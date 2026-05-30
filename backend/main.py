@@ -10,6 +10,9 @@ from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from openai import AsyncOpenAI
+from genre_data import detect_genre, build_genre_guide, get_strand_rules, get_reviewer_dimensions
+
+# 删除旧提示词定义块 — 已迁移到 genre_data/ 模块
 from collections import defaultdict
 from agent_loader import load_all_agents, build_role_catalog, get_agent_by_name
 from skill_loader import load_all_skills, load_skill_content, save_skill, delete_skill, search_skills
@@ -680,79 +683,6 @@ DEFAULT_ROLE_BY_TYPE = {
     "reviewer": "通用助手",
 }
 
-# ============================================
-# 体裁模板 — 从用户任务中自动检测体裁，注入对应写作指南
-# ============================================
-GENRE_TEMPLATES = {
-    "玄幻": {
-        "tags": ["玄幻", "修真", "修仙", "仙侠", "异界", "异世", "穿越异界"],
-        "爽点": ["越级反杀", "实力碾压", "众人震惊", "资源暴增", "逆袭翻盘", "装逼打脸"],
-        "节奏": "三章一爽点，五章一高潮。升级节奏：每10-15章一个大境界",
-        "禁忌": ["主角性格前后矛盾", "战力体系崩坏（筑基打赢元婴）", "升级过于轻松无代价", "配角工具人化"],
-        "人物": "主角有明确的成长线和金手指限制；反派分层（小怪→精英→Boss）；必有导师/长辈角色"
-    },
-    "都市": {
-        "tags": ["都市", "现代", "校花", "总裁", "神豪", "战神", "重生", "穿越都市"],
-        "爽点": ["身份揭晓", "众人震惊", "财富碾压", "权势打脸", "美女倾慕", "扮猪吃虎"],
-        "节奏": "每章至少一个小爽点。身份揭晓节奏：铺垫→冲突→反转→打脸",
-        "禁忌": ["主角无理由的万人迷", "女性角色花瓶化", "商业逻辑过于儿戏", "敌人智商下线"],
-        "人物": "主角有隐藏身份或特殊能力；对手有真实动机不是纯恶人；女性角色有独立性格"
-    },
-    "历史": {
-        "tags": ["历史", "权谋", "宫斗", "争霸", "科举", "谍战", "架空", "古代"],
-        "爽点": ["智谋碾压", "步步为营", "权力反转", "朝堂打脸", "军事胜利"],
-        "节奏": "谋略先行，武力兜底。大事件配小伏笔，每卷一个核心冲突",
-        "禁忌": ["现代词汇穿越", "历史事实严重错误", "谋略过于幼稚", "忽视时代背景限制"],
-        "人物": "主角智谋为主武力为辅；对手智商在线；配角各有立场非脸谱化"
-    },
-    "科幻": {
-        "tags": ["科幻", "星际", "机甲", "赛博", "末世", "废土", "AI", "未来"],
-        "爽点": ["科技碾压", "文明碰撞", "星际征服", "生存逆袭", "真相揭晓"],
-        "节奏": "设定先行，冲突驱动。科技树有逻辑递进，不突然开挂",
-        "禁忌": ["科学原理严重违背常识", "科技树跳跃无解释", "末世资源无限", "社会结构不合逻辑"],
-        "人物": "主角的科技/能力有合理来源；世界观规则前后一致；文明设定有深度"
-    },
-    "悬疑": {
-        "tags": ["悬疑", "推理", "灵异", "恐怖", "惊悚", "侦探", "密室"],
-        "爽点": ["真相揭晓", "反转打脸", "绝境逃生", "谜题破解", "凶手落网"],
-        "节奏": "草蛇灰线，伏笔千里。线索密度每章1-2个，大反转每卷1-2次",
-        "禁忌": ["凶手过于明显", "线索突然出现（机械降神）", "角色行为不合逻辑", "恐怖元素仅靠血腥堆砌"],
-        "人物": "主角有观察力或特殊能力但不过分；每个角色都有嫌疑；动机合理"
-    },
-    "言情": {
-        "tags": ["言情", "女频", "总裁", "甜宠", "虐恋", "重生", "宅斗", "宫斗"],
-        "爽点": ["霸总沦陷", "打脸渣男", "逆袭翻身", "甜蜜互动", "身份揭晓"],
-        "节奏": "感情线为主，事业线为辅。甜虐交替，每5-10章一个感情节点",
-        "禁忌": ["男主油腻霸总模板化", "女主傻白甜无脑", "感情进展无铺垫", "配角沦为工具人"],
-        "人物": "男女主各有独立事业线；感情发展有逻辑有波折；配角有完整人设"
-    },
-    "游戏": {
-        "tags": ["游戏", "电竞", "网游", "全息", "虚拟现实"],
-        "爽点": ["技术碾压", "极限操作", "比赛逆转", "装备爆出", "排名飙升"],
-        "节奏": "比赛/副本→升级→新挑战循环。每场关键比赛都是小高潮",
-        "禁忌": ["游戏机制不解释", "装备属性前后矛盾", "对手无理由变菜"],
-        "人物": "主角有独特游戏理解或天赋；战队成员各有特色；对手值得尊敬"
-    },
-}
-
-def detect_genre(task: str) -> dict:
-    """从用户任务中检测体裁，返回对应的写作模板"""
-    task_lower = task.lower()
-    for genre_name, genre_info in GENRE_TEMPLATES.items():
-        for tag in genre_info["tags"]:
-            if tag in task:
-                return {"name": genre_name, **genre_info}
-    # 默认：通用网文模板
-    return {
-        "name": "通用",
-        "tags": [],
-        "爽点": ["装逼打脸", "实力碾压", "逆袭翻盘", "众人震惊"],
-        "节奏": "三章一爽点，五章一高潮",
-        "禁忌": ["前后矛盾", "角色OOC", "战力崩坏", "水文字数"],
-        "人物": "主角有明确目标；成长有代价；配角不是工具人"
-    }
-
-
 # 模型
 # ============================================
 
@@ -1336,23 +1266,84 @@ class GraphExecutor:
         self.node_icons[nid] = icon
         self.node_roles[nid] = role_name
 
-        # === 体裁模板注入（写作阶段自动检测体裁，注入写作指南）===
+        # === 体裁模板注入（按节点类型分配不同数据）===
         genre_info = detect_genre(self.task)
-        if novel_stage in ("writing", "polish") and genre_info["name"] != "通用":
-            genre_guide = (
-                f"\n\n【📖 体裁写作指南：{genre_info['name']}】\n"
-                f"爽点模式：{'、'.join(genre_info['爽点'])}\n"
-                f"节奏要求：{genre_info['节奏']}\n"
-                f"创作禁忌：{'、'.join(genre_info['禁忌'])}\n"
-                f"人物要求：{genre_info['人物']}"
-            )
-            system_prompt += genre_guide
+        if novel_stage in ("writing", "polish"):
+            genre_guide = build_genre_guide(genre_info, novel_stage)
+            if genre_guide:
+                system_prompt += genre_guide
+            # 按节点类型注入 InkOS 节点特定数据
+            if genre_info.get("name", "通用") != "通用":
+                from genre_data.inkos_data import get_inkos_genre, get_fatigue_words, get_chapter_types
+                inkos = None
+                for ink_name in ["玄幻", "仙侠", "都市", "恐怖"]:
+                    if ink_name in genre_info.get("name", ""):
+                        inkos = get_inkos_genre(ink_name)
+                        break
+                fw = (inkos or {}).get("fatigueWords", [])[:4]
+                ct = (inkos or {}).get("chapterTypes", [])
+                rp = genre_info.get("rhythm_strategy", "")
+                sp = genre_info.get("style_priority", [])
 
+                if node.type == "manager":
+                    # Manager: 节奏策略 + Strand + 章节分类
+                    strand_rules = get_strand_rules()
+                    system_prompt += f"\n\n{strand_rules}"
+                    yield_func({
+                        "status": "info", "role": "📖 体裁",
+                        "message": f"{genre_info['name']} | 风格: {'>'.join(sp[:2])} | {rp[:30]}"
+                    })
+                    if ct:
+                        yield_func({
+                            "status": "info", "role": "📋 章型",
+                            "message": f"{'/'.join(ct)} | 裁决: {genre_info.get('conflict_verdict','')[:40]}"
+                        })
+
+                elif node.type == "worker":
+                    # Worker: 语言规则 + 疲劳词 + 叙事指导 + 爽点
+                    if inkos:
+                        rules = inkos.get("languageRules", [])
+                        sat = inkos.get("satisfactionTypes", [])
+                        guidance = inkos.get("narrativeGuidance", "")
+                        if rules:
+                            system_prompt += "\n\n【语言铁律】\n" + "\n".join(f"- {r}" for r in rules[:3])
+                        if guidance:
+                            system_prompt += f"\n\n【叙事指导】\n{guidance[:300]}"
+                    yield_func({
+                        "status": "info", "role": "📖 体裁",
+                        "message": f"{genre_info['name']} | {'/'.join(ct[:3]) if ct else ''}"
+                    })
+                    if fw:
+                        yield_func({
+                            "status": "info", "role": "InkOS",
+                            "message": f"禁词: {'/'.join(fw)} | 爽点: {'/'.join((inkos or {}).get('satisfactionTypes',[])[:3])}"
+                        })
+
+                elif node.type == "reviewer":
+                    # Reviewer: 审计维度 + 禁忌 + 追读力
+                    dims = (inkos or {}).get("auditDimensions", []) if inkos else []
+                    taboos = (inkos or {}).get("taboos", []) if inkos else genre_info.get("anti_patterns", [])
+                    if taboos:
+                        system_prompt += "\n\n【体裁禁忌】\n" + "\n".join(f"- {t}" for t in taboos[:4])
+                    yield_func({
+                        "status": "info", "role": "📖 体裁",
+                        "message": f"{genre_info['name']} | 节奏: {rp[:25]}"
+                    })
+                    if dims:
+                        yield_func({
+                            "status": "info", "role": "🔍 审计",
+                            "message": f"InkOS {len(dims)}维度 | Hard-001~004 | 禁忌: {'/'.join(taboos[:2]) if taboos else ''}"
+                        })
+
+        preset_name = node.config.get("preset_name", "") or "默认"
+        model_name = config.model if config else ""
         yield_func({
             "status": "info",
             "role": f"{icon} {role_name}",
             "node_id": nid,
-            "message": f"激活: {role_name}"
+            "message": f"激活: {role_name}",
+            "preset": preset_name,
+            "model": model_name,
         })
 
         # 构建用户提示词（包含上游输出）

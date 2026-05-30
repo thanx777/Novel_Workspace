@@ -30,6 +30,7 @@ export function LogsPanel({ t, logs, setLogs, logEndRef, setShowLogs }) {
           return (
             <div key={i} className={logClass + (isLong ? ' log-collapsible' : '')} onClick={isLong ? () => toggleLog(i) : undefined}>
               <span className="log-role">{log.role}</span>
+              {log.model && <span className="log-model-badge" title={log.preset || ''}>{log.model}</span>}
               <span className={'log-msg' + (isLong && !isExpanded ? ' log-msg-collapsed' : '')}>{log.message}</span>
               {isLong && <span className="log-expand-icon">{isExpanded ? '▲' : '▼'}</span>}
             </div>
