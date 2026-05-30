@@ -1,0 +1,107 @@
+/* ============================================
+   Novel Forge — 动画与微交互
+   ============================================ */
+
+/* —— 淡入上移 —— */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* —— 淡入 —— */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* —— 面板滑入 —— */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideInLeft {
+  from { transform: translateX(-16px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+
+/* —— 面板滑出 —— */
+@keyframes slideOutRight {
+  from { transform: translateX(0); opacity: 1; }
+  to   { transform: translateX(100%); opacity: 0; }
+}
+
+/* —— 缩放弹入 —— */
+@keyframes scaleIn {
+  from { transform: scale(0.92); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+/* —— 模态框入场 —— */
+@keyframes dialogIn {
+  from { transform: scale(0.95) translateY(-20px); opacity: 0; }
+  to   { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+/* —— 旋转加载 —— */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* —— 节点活动脉冲 —— */
+@keyframes activityPulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent-dim); }
+  50%  { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* —— 状态指示灯呼吸 —— */
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+/* —— 通知滑入 —— */
+@keyframes notifIn {
+  from { transform: translateX(100%) translateY(-20px); opacity: 0; }
+  to   { transform: translateX(0) translateY(0); opacity: 1; }
+}
+
+/* —— 墨迹扩散 —— */
+@keyframes inkReveal {
+  from { clip-path: circle(0% at 50% 50%); opacity: 0; }
+  to   { clip-path: circle(100% at 50% 50%); opacity: 1; }
+}
+
+/* —— 笔划绘制 —— */
+@keyframes strokeDraw {
+  from { stroke-dashoffset: var(--stroke-length, 100); }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* —— 终端光标闪烁 —— */
+@keyframes termPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* ============================================
+   交错入场 — 用于列表项
+   ============================================ */
+.stagger-item {
+  opacity: 0;
+  animation: fadeInUp var(--transition-normal) forwards;
+}
+
+.stagger-item:nth-child(1)  { animation-delay: 0.03s; }
+.stagger-item:nth-child(2)  { animation-delay: 0.06s; }
+.stagger-item:nth-child(3)  { animation-delay: 0.09s; }
+.stagger-item:nth-child(4)  { animation-delay: 0.12s; }
+.stagger-item:nth-child(5)  { animation-delay: 0.15s; }
+.stagger-item:nth-child(6)  { animation-delay: 0.18s; }
+.stagger-item:nth-child(7)  { animation-delay: 0.21s; }
+.stagger-item:nth-child(8)  { animation-delay: 0.24s; }
+.stagger-item:nth-child(9)  { animation-delay: 0.27s; }
+.stagger-item:nth-child(10) { animation-delay: 0.30s; }
+.stagger-item:nth-child(n+11) { animation-delay: 0.33s; }

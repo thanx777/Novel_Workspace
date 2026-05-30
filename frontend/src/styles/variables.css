@@ -1,0 +1,94 @@
+/* ============================================
+   Novel Forge — 文人书斋 设计系统
+   Scholar's Study Design System
+   默认：亮色主题（旧纸色调）
+   ============================================ */
+
+:root {
+  /* —— 亮色主题（默认）—— 旧纸色调 —— */
+  --bg-base: #f5f0e8;
+  --bg-surface: #faf7f2;
+  --bg-elevated: #f0ebe0;
+  --bg-hover: #e8e2d5;
+  --bg-active: #ddd6c5;
+  --border: #d4ccbb;
+  --border-light: #c4baa5;
+  --grid-dot: #e5dfd0;
+  --text: #2c2416;
+  --text-dim: #6b6050;
+  --text-muted: #9c9280;
+  --accent: #b33a2a;
+  --accent-dim: rgba(179, 58, 42, 0.1);
+  --accent-strong: #8b1e12;
+  --green: #4a7a49;
+  --green-dim: rgba(74, 122, 73, 0.1);
+  --amber: #b8952e;
+  --amber-dim: rgba(184, 149, 46, 0.1);
+  --red: #b33a2a;
+  --red-dim: rgba(179, 58, 42, 0.1);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --shadow-glow: 0 0 16px var(--accent-dim);
+
+  /* —— 排版 —— */
+  --font-display: 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', 'STSong', serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+
+  /* —— 间距 —— */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
+  /* —— 圆角 —— */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 16px;
+
+  /* —— 过渡 —— */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+  --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* —— 节点颜色 —— */
+  --node-manager: #b33a2a;
+  --node-worker: #4a7a49;
+  --node-reviewer: #b8952e;
+}
+
+/* ============================================
+   暗色主题 — 暖墨色调
+   ============================================ */
+[data-theme="dark"] {
+  --bg-base: #1a1714;
+  --bg-surface: #24211d;
+  --bg-elevated: #2d2925;
+  --bg-hover: #36312b;
+  --bg-active: #423b33;
+  --border: #3d3730;
+  --border-light: #4d463d;
+  --grid-dot: #2a2520;
+  --text: #e6dfd1;
+  --text-dim: #a09888;
+  --text-muted: #6b6255;
+  --accent: #c43e2c;
+  --accent-dim: rgba(196, 62, 44, 0.15);
+  --accent-strong: #d4553f;
+  --green: #5b8c5a;
+  --green-dim: rgba(91, 140, 90, 0.15);
+  --amber: #c9a95c;
+  --amber-dim: rgba(201, 169, 92, 0.15);
+  --red: #c43e2c;
+  --red-dim: rgba(196, 62, 44, 0.15);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 16px var(--accent-dim);
+  --node-manager: #c43e2c;
+  --node-worker: #5b8c5a;
+  --node-reviewer: #c9a95c;
+}
