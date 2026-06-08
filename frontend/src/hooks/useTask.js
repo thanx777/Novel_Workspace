@@ -1,6 +1,9 @@
 import { useState, useCallback, useRef } from 'react'
 import { API_BASE } from '../constants'
 
+const MAX_LOGS = 800       // 日志最大条数，超出后裁剪
+const LOG_FLUSH_MS = 120   // 日志批量刷新间隔(ms)，减少 React 重渲染
+
 export default function useTask({ showNotification, nodes, setNodes, connections, presets, conversations, setConversations, setLogs, setIsRunning, setElapsed, clearAllNodeActivity, updateNodeActivity, loadFiles, executionMode, elapsedOffsetRef }) {
   const [taskInput, setTaskInput] = useState('')
   const [chapterCount, setChapterCount] = useState('')
@@ -97,6 +100,37 @@ export default function useTask({ showNotification, nodes, setNodes, connections
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
 
+      // === 帧级批量：收集原始数据，rAF 帧末一次性更新 React ===
+      const rawLogs = []
+      const frameNode = {}    // nodeId -> { activity, thought, response }
+      const frameConvs = []
+      let frameClear = false
+      let rafId = null
+
+      const applyFrame = () => {
+        rafId = null
+        // 日志
+        if (rawLogs.length > 0) {
+          const batch = rawLogs.splice(0)
+          setLogs(prev => {
+            const next = prev.concat(batch)
+            return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next
+          })
+        }
+        // 节点：去重只留每节点最终状态
+        const keys = Object.keys(frameNode)
+        if (keys.length > 0) {
+          const snap = { ...frameNode }
+          for (const k of keys) delete frameNode[k]
+          setNodes(prev => prev.map(n => snap[n.id] ? { ...n, activity: snap[n.id].activity, thought: snap[n.id].thought || n.thought, response: snap[n.id].response || n.response } : n))
+        }
+        if (frameClear) { frameClear = false; clearAllNodeActivity() }
+        if (frameConvs.length > 0) {
+          const msgs = frameConvs.splice(0)
+          setConversations(prev => [...prev, ...msgs])
+        }
+      }
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
@@ -105,46 +139,35 @@ export default function useTask({ showNotification, nodes, setNodes, connections
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.replace('data: ', ''))
-              setLogs(prev => [...prev, data])
+              rawLogs.push(data)
 
               const status = data.status || ''
               const nodeId = data.node_id || ''
-              const role = data.role || ''
 
               if (nodeId) {
-                const targetNode = nodes.find(n => n.id === nodeId)
-                if (targetNode) {
-                  if (status === 'info') {
-                    updateNodeActivity(nodeId, 'thinking', data.message, '')
-                  } else if (status === 'working') {
-                    updateNodeActivity(nodeId, 'responding', '', data.message)
-                  } else if (status === 'success') {
-                    updateNodeActivity(nodeId, 'completed', '', data.message)
-                  } else if (status === 'error') {
-                    updateNodeActivity(nodeId, 'idle', '', data.message)
-                  }
-                }
-              } else if (status === 'feedback_processing') {
-                // 反馈处理：清空节点旧状态，Manager 重新规划
-                clearAllNodeActivity()
-                setConversations(prev => [...prev, { role: 'assistant', content: data.message, timestamp: Date.now() }])
-              } else if (status === 'feedback_received') {
-                setConversations(prev => [...prev, { role: 'assistant', content: data.message, timestamp: Date.now() }])
-              } else if (status === 'info' || status === 'working') {
-                if (manager && (role.includes('协调') || role.includes('🎯'))) {
-                  updateNodeActivity(manager.id, 'thinking', data.message, '')
-                }
+                const actMap = { info: 'thinking', working: 'responding', success: 'completed', error: 'idle' }
+                const act = actMap[status]
+                if (act) frameNode[nodeId] = { activity: act, thought: data.message || '', response: data.message || '' }
+              }
+              if (status === 'feedback_processing' || status === 'feedback_received') {
+                frameClear = true
+                frameConvs.push({ role: 'assistant', content: data.message, timestamp: Date.now() })
+              }
+              if (status === 'done') {
+                frameConvs.push({ role: 'assistant', content: data.message, timestamp: Date.now() })
+              } else if (status === 'error' && !nodeId) {
+                showNotification(data.message, 'error')
               }
 
-              if (status === 'done' || status === 'error') {
-                setConversations(prev => [...prev, { role: 'assistant', content: data.message, timestamp: Date.now() }])
-              }
-
+              if (!rafId) rafId = requestAnimationFrame(applyFrame)
             } catch (e) {}
           }
         }
       }
+      // 最后 flush
+      applyFrame()
     } catch (e) {
+      applyFrame()
       if (e.name === 'AbortError') {
         setLogs(prev => [...prev, { status: 'warning', role: 'System', message: '⏹️ 任务已停止' }])
       } else {

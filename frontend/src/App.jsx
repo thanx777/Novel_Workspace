@@ -123,6 +123,8 @@ function App() {
 
   const dialogEndRef = useRef(null)
   const logEndRef = useRef(null)
+  const logBufferRef = useRef([])
+  const logFlushRef = useRef(null)
 
   const showNotification = useCallback((msg, type = 'info') => {
     setNotification({ msg, type, id: Date.now() })
@@ -315,7 +317,21 @@ function App() {
     const startResumeStream = (folder) => {
       taskHook.setTaskInput('')
       setLogs([])
+      logBufferRef.current = []
       taskHook.setIsRunning(true)
+
+      // 批量日志刷新
+      const MAX_LOGS = 800
+      const flushLogs = () => {
+        const batch = logBufferRef.current
+        if (batch.length === 0) return
+        logBufferRef.current = []
+        logFlushRef.current = null
+        setLogs(prev => {
+          const next = prev.concat(batch)
+          return next.length > MAX_LOGS ? next.slice(-MAX_LOGS) : next
+        })
+      }
       // 续跑：从上次中断的累计时间继续计时
       const offset = elapsedOffsetRef.current
       setElapsed(offset)
@@ -347,7 +363,10 @@ function App() {
               try {
                 const msg = JSON.parse(line.slice(6))
                 // 所有消息都进日志
-                setLogs(prev => [...prev, msg])
+                // 批量日志：避免积压时 React 卡死
+                logBufferRef.current.push(msg)
+                if (logFlushRef.current) clearTimeout(logFlushRef.current)
+                logFlushRef.current = setTimeout(flushLogs, 120)
 
                 if (msg.status === 'done') {
                   clearInterval(timer)
@@ -375,12 +394,14 @@ function App() {
             }
           }
         }
+        flushLogs()
         clearInterval(timer)
         taskHook.setIsRunning(false)
         setElapsed(0)
         fetchTasks()
       }).catch((err) => {
         console.error('Resume stream error:', err)
+        flushLogs()
         clearInterval(timer)
         taskHook.setIsRunning(false)
         setElapsed(0)

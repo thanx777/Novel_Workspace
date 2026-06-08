@@ -1336,7 +1336,8 @@ class GraphExecutor:
                         })
 
         preset_name = node.config.get("preset_name", "") or "默认"
-        model_name = config.model if config else ""
+        node_config = self._get_config(node)
+        model_name = node_config.model if node_config else ""
         yield_func({
             "status": "info",
             "role": f"{icon} {role_name}",
