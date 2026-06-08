@@ -23,3 +23,11 @@ Thumbs.db
 
 # Local config (contains API keys)
 backend/config.json
+
+# Workspace runtime data
+backend/workspace/run_*/
+backend/workspace/state.json
+
+# Backup files
+*.bak
+*.refactor*

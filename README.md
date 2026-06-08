@@ -1,95 +1,18 @@
-# Novel Forge v4.5
+# Omni-Agent-Hub
 
-> 长篇小说 AI 写作引擎 — 可视化多智能体编排，一章一章精工细作
+> 多智能体协作引擎 — 可视化编排、流水线执行、长篇小说 AI 写作
 
-## v4.5 更新日志
+## 特性
 
-### 📖 长篇小说写作引擎
-
-**三阶段流水线**：大纲创作(3节点) → 分批写作(5节点，含润色循环) → 全局审校(5节点)
-
-```
-Manager → 创作作家 → 内容审查者 → 润色作家 → 终审者 → Manager(回路)
-```
-
-- **一章一生成**：每轮只写一章，保证最高质量
-- **退出守卫**：Manager 说完成但章数不够 → 系统强制替换 `[EXIT_LOOP]` 为 `[CONTINUE]`，不写完不许退出
-- **动态 MAX_ROUNDS**：自动按 `目标章数 × 3` 计算，500章小说也不会提前截断
-- **写/改分离**：Worker 自动识别审查意见是"需修改"还是"通过"，修改模式自动加载被修改章节全文
-
-### 🎛️ 三模式适配
-
-| 模式 | 节点数 | 适用模型 | 特点 |
-|------|--------|---------|------|
-| **标准 (STD)** | 9节点(3×3) | Claude/GPT-4 | 精简提示词，主流模型 |
-| **兼容 (CMP)** | 13节点(3+5+5) | GLM/Llama/Qwen | 极详细提示词，润色循环，宽松退出 |
-| **完整 (FULL)** | 13节点(3+5+5) | 高级模型 | 最大token、完整角色库、不截断 |
-
-所有模式 Prompt 均已去硬编码——章数、类型、要求全部从用户任务动态提取。
-
-### 💾 任务检查点 + 续跑
-
-- **自动存盘**：每轮结束自动保存 `state.json` 到 `run_xxx/` 文件夹
-- **任务面板**：侧边栏"任务"标签页，显示所有任务进度、状态(运行中/已中断/已完成)
-- **一键续跑**：停止后点"继续"，从断点恢复执行，画布自动显示完整管线 + preset 配置
-- **原子写入**：`state.json.tmp → os.replace()` 防崩溃损坏
-- **每任务独立文件夹**：`run_20260528_任务描述/`，内含所有章节 + memory/ + state.json
-
-### 🧠 全局记忆系统
-
-每个小说独立 `run_xxx/memory/` 目录：
-
-```
-run_xxx/memory/
-└── novel_memory.md   ← 累积式全局记忆
-```
-
-- **`[MEMORY: ...]`**：Manager 每5章更新，记录角色状态、主线进展、伏笔
-- **`[SUMMARY: ...]`**：Manager 每10章输出，快速剧情摘要
-- Worker 写新章前自动注入全局记忆(最近4000字) + 前文摘要
-- 断点续跑不丢失
-
-### 👷 Worker 上下文增强
-
-- **最近3章结尾注入**：保证情节衔接连贯，不只依赖上一章
-- **章节列表概览**：Worker 看到已完成章节列表，知道写到哪了
-- **修订模式**：Reviewer 说"需修改"时，自动加载被修改章节全文 + 审查意见
-- **创作模式**：Manager 说"写第N章"时，注入大纲 + 人物设定 + 前文记忆 + 最近章节
-
-### 🎨 UI 重新设计 — "文人书斋"
-
-- **暖墨色/旧纸色**双主题，默认亮色
-- **衬线标题字体**（Noto Serif SC），文学气质
-- **朱砂红强调色**（传统印泥色），替代工程蓝
-- **节点微交互**：hover 上浮、选中发光、删除按钮渐显
-- **任务面板重设计**：进度条、状态标签、续跑/删除按钮，全部 CSS 类化
-- **交错入场动画**：列表项依次淡入
-- 侧边栏标题竖线装饰、毛玻璃效果
-
-### 🔧 工程优化
-
-- **移除死代码**：`LanguageContext.jsx`、`tools.py`、`locales/zh.js`、空目录(`constants/`、`utils/`、`assets/`)
-- **移除重复 import**：`import re as _re3` 重复行
-- **MODE_CONFIG 清理**：移除未使用的 `enable_tools`、`tool_max_rounds`
-- **阶段名映射修复**：`suffix - 1` 替代 `enumerate` 索引，resume 时阶段名不会错位
-- **`_count_chapters()` 统一函数**：4处内联章节计数全部改用正则 `第(\d+)章` 精确提取
-- **`_manager_says_done` 扫描窗口**：200→500字符
-- **对话记忆持久化**：`conversation_history` 保存到 checkpoint，每轮注入 Manager 而不仅是首轮
-- **Resume 节点活动映射修复**：`'info'→'thinking'`, `'working'→'responding'`
-
-### 🗑️ 清理的文件
-
-| 文件 | 原因 |
-|------|------|
-| `backend/tools.py` | 工具调用方案已移除 |
-| `frontend/src/LanguageContext.jsx` | 从未被 App.jsx 引用 |
-| `frontend/src/locales/zh.js` | LanguageContext 的附属文件 |
-| `frontend/src/constants/` | 空目录 |
-| `frontend/src/utils/` | 空目录 |
-| `frontend/src/assets/` | Vite 默认模板文件 |
-| 根目录 `test_*.py` | 临时测试文件 |
-
----
+- **三阶段流水线**：大纲创作 → 分批写作 → 全局审校，自动按 `_N` 后缀分阶段
+- **Manager-Worker-Reviewer 三角色**：指挥→执行→审查反馈循环，Manager 决定何时退出
+- **5 层守卫体系**：Reviewer 拒绝守卫 / 大纲产出守卫 / 章数守卫 / Stale 检测 / 幻觉检测
+- **全局记忆系统**：`[MEMORY:]` + `[SUMMARY:]` 标签，跨章节保持连贯性
+- **体裁感知**：融合 webnovel-writer 追读力分类学 + InkOS 33维审计体系 + Anti-AI 写作规范
+- **断点续跑**：checkpoint 持久化 + 已完成阶段跳过，支持 manual 大纲审核
+- **三模式适配**：standard / compatible / full，适配不同能力模型
+- **60+ 内置角色**：工程/设计/产品/测试/专业领域，.md 格式可扩展
+- **40+ API 端点**：任务管理 / 预设CRUD / 文件操作 / 终端测试 / SSE 实时日志
 
 ## 快速开始
 
@@ -112,128 +35,211 @@ npm install
 npm run dev             # → http://localhost:5173
 ```
 
-## 使用指南
+## 架构
 
-### 三种模式
+```
+┌──────────────────────────────────────────────────────┐
+│                   Frontend (React)                     │
+│  App.jsx → Sidebar + Workbench + NewTaskModal         │
+│  Workbench → TaskDetailModal + NovelWorkspace          │
+│  Hooks: usePreset / useTask / useNovelTask / useSkill  │
+└──────────────────────┬───────────────────────────────┘
+                       │ SSE / REST API
+┌──────────────────────▼───────────────────────────────┐
+│                  Backend (FastAPI)                      │
+│  main.py — 40+ API 端点                                │
+│  executor.py — GraphExecutor 核心引擎                   │
+│  agent_loader.py — 角色 .md 加载器                      │
+│  skill_loader.py — 技能加载器                           │
+│  test_runner.py — 终端测试执行器                        │
+│  memory_manager.py — 记忆管理器                         │
+│  hallucination_guard.py — 幻觉守卫                     │
+│  genre_data/ — 体裁数据                                 │
+└───────────────────────────────────────────────────────┘
+```
 
-工具栏右侧的模式选择器：
+## 核心引擎：GraphExecutor
 
-| 按钮 | 模式 | 节点 | 提示词 | 适用场景 |
-|------|------|------|--------|---------|
-| STD | 标准 | 9节点 | 精简 50% | Claude/GPT-4 等强模型 |
-| CMP | 兼容 | 13节点(润色循环) | 极详细 | GLM/Llama/Qwen 等弱模型 |
-| FULL | 完整 | 13节点(润色循环) | 详细 | 高级模型，最大 token |
+```
+execute()
+  │
+  ├─ _detect_pipeline_stages()  ← 按 _N 后缀分阶段
+  │   m_1/w_1/r_1 → stage 1 (outline)
+  │   m_2/w_2/r_2 → stage 2 (writing)
+  │   m_3/w_3/r_3 → stage 3 (polish)
+  │
+  └─ _execute_pipeline(stages)
+       │
+       for each stage:
+       │  ├─ 跳过已完成阶段 (resume 支持)
+       │  ├─ 创建子 GraphExecutor
+       │  │   _auto_connect() → M→W, W→R, R→M
+       │  └─ sub._execute_phase_graph()
+       │       │
+       │       _compute_phases() → BFS 拓扑排序
+       │       │
+       │       for round 1..MAX_ROUNDS:
+       │         ├─ 并发执行当前 Phase 节点
+       │         ├─ 退出检查:
+       │         │   ├─ Reviewer 拒绝守卫 (需修改/不通过 → 强制继续)
+       │         │   ├─ Outline 产出守卫 (outline.md + characters.md)
+       │         │   ├─ Writing 章数守卫 (N chapters 未达标 → 强制继续)
+       │         │   └─ Manager [EXIT_LOOP] → break
+       │         └─ stale_rounds ≥ 3 → break
+       │
+       ├─ 记录 _completed_stages
+       └─ manual 模式 → paused + return
+```
 
-### 任务面板
+## 小说写作流程
 
-侧边栏"任务"标签页：
-- 显示所有已中断/已完成的写作任务
-- 进度条显示 `已完成/总章数`
-- 点击"继续"从断点恢复，画布自动还原完整管线
-- 点击"删除"清理整个 run 文件夹
+```
+用户输入："写一个100章的玄幻小说"
+    │
+    ▼
+阶段1: 大纲创作 (outline)
+    架构师 → 撰写者(outline.md + characters.md) → 审查者 → 架构师
+    │  审查不通过 → 强制修改，直到通过
+    │  manual模式 → 暂停等待人工确认
+    ▼
+阶段2: 分批写作 (writing)
+    创作总指挥 → 小说作家(每次1章) → 章节审查者 → 创作总指挥
+    │  未达100章 → 系统强制替换 [EXIT_LOOP] 为 [CONTINUE]
+    │  上下文注入: 大纲 + 人物设定 + 最近3章结尾 + 全局记忆
+    ▼
+阶段3: 全局审校 (polish)
+    主编 → 修订编辑 → 终审者 → 主编
+    │
+    ▼
+完成 → 全部章节生成 + 审校通过
+```
 
-### 节点类型
+## 5 层守卫体系
 
-| 节点 | 颜色 | 说明 |
+| 层级 | 守卫 | 机制 |
 |------|------|------|
-| **Manager** | 朱砂红 | 指挥调度、查看进度、维护全局记忆 |
-| **Worker** | 玉绿 | 创作内容、产出文件 |
-| **Reviewer** | 古金 | 审查内容、给出"通过/需修改/不通过" |
+| 1 | Reviewer 拒绝守卫 | "需修改"/"不通过"/"❌" → 替换 `[EXIT_LOOP]` 为 `[CONTINUE]` |
+| 2 | Outline 产出守卫 | outline.md + characters.md 未产出 → 不准退出 |
+| 3 | Writing 章数守卫 | 实际章数 < 目标章数 → 不准退出 |
+| 4 | Stale 检测 | 3轮无新文件产出 → 自动退出 |
+| 5 | 幻觉检测 | HallucinationGuard 独立模块 |
 
-### 连线结构 (兼容/完整模式)
+## 三模式配置
+
+| 参数 | Standard | Compatible | Full |
+|------|----------|------------|------|
+| Manager max_tokens | 2000 | 3000 | 4000 |
+| Worker max_tokens | 16000 | 24000 | 32000 |
+| Reviewer max_tokens | 2000 | 3000 | 4000 |
+| 超时 | 300s | 450s | 600s |
+| Prompt 版本 | 压缩版 | 兼容版 | 原版 |
+| 适用模型 | Claude/GPT-4 | GLM/Llama/Qwen | 高级模型 |
+
+## 体裁数据融合
+
+### webnovel-writer 追读力分类学
+
+- 5种钩子类型（悬念/情感/冲突/反转/信息差）
+- 8种爽点模式（逆袭/打脸/装逼/金手指/升级/夺宝/复仇/认亲）
+- Hard Invariants（可读性底线/承诺兑现/节奏灾难/冲突真空）
+- 14种体裁裁决规则（风格优先级/爽点/毒点/禁忌）
+
+### InkOS 33维审计体系
+
+- 5种体裁配置（玄幻/仙侠/都市/恐怖/通用）
+- 疲劳词列表（"冷笑/蝼蚁/倒吸凉气/瞳孔骤缩"等 AI 高频词）
+- 33维审计维度（人物一致性/情节因果链/OOC检测/战力一致性/信息泄露/AI痕迹检测/伏笔管理...）
+
+### Anti-AI 写作规范
+
+- 对抗 LLM 8大倾向（重复/模板化/过度解释/情感泛滥...）
+- 核心创作铁律 + 爽点三段式结构
+- Strand 三线节奏管理（Quest 60% / Fire 20% / Constellation 20%）
+
+## 全局记忆系统
 
 ```
-阶段1 大纲:  m_1 → w_1 → r_1 → m_1(回路)
-阶段2 写作:  m_2 → w_2a(创作) → r_2a(审查) → w_2b(润色) → r_2b(终审) → m_2(回路)
-阶段3 审校:  m_3 → w_3a(修订) → r_3a(初审) → w_3b(精修) → r_3b(终审) → m_3(回路)
+run_xxx/memory/
+└── novel_memory.md   ← 累积式全局记忆
 ```
 
-## 执行流程
-
-```
-用户输入任务："写一个100章的玄幻小说"
-    │
-    ▼
-阶段1: 大纲创作
-    Manager → Worker(outline.md + characters.md) → Reviewer → Manager
-    │
-    ▼
-阶段2: 分批写作 (循环100轮)
-    Manager(报进度)→ 创作作家(写第N章) → 内容审查者 → 润色作家 → 终审者 → Manager
-    │                                                    │
-    │                                          [EXIT_LOOP] 未达100章→ [CONTINUE]
-    │
-    ▼
-阶段3: 全局审校
-    Manager(找问题)→ 修订编辑 → 初审编辑 → 精修编辑 → 终审编辑 → Manager
-    │
-    ▼
-完成 → 100章全部生成 + 审校通过
-```
+- **`[MEMORY: ...]`**：Manager 每5章更新，记录角色状态、主线进展、伏笔
+- **`[SUMMARY: ...]`**：Manager 每10章输出，快速剧情摘要
+- Worker 写新章前自动注入全局记忆(最近4000字) + 前文摘要
+- 断点续跑不丢失
 
 ## API 端点
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/presets` | GET/POST/PUT/DELETE | 预设模型管理 |
-| `/api/run-task` | POST | 执行图谱任务（SSE 流式） |
-| `/api/stop-task` | POST | 停止当前任务 |
-| `/api/tasks` | GET | 列出所有任务 |
-| `/api/tasks/{folder}` | GET/DELETE | 查看/删除任务 |
-| `/api/tasks/{folder}/resume` | POST | 续跑任务（SSE 流式） |
-| `/api/skills` | GET | Skill 列表 |
-| `/api/projects` | GET/POST | 项目保存/加载 |
-| `/api/workspace/files` | GET | 列出文件 |
-| `/api/test-connection` | POST | 测试 API 连接 |
-| `/api/test/terminal/ws` | WebSocket | 终端实时交互 |
+| 类别 | 端点 | 方法 | 说明 |
+|------|------|------|------|
+| 任务 | `/api/run-task` | POST | 启动任务(SSE) |
+| | `/api/tasks/{folder}/resume` | POST | 恢复任务(SSE) |
+| | `/api/stop-task` | POST | 停止任务 |
+| | `/api/tasks` | GET | 任务列表 |
+| | `/api/tasks/{folder}` | GET/PATCH/DELETE | 查看/更新/删除 |
+| | `/api/run-task/feedback` | POST | 中途反馈 |
+| 预设 | `/api/presets` | GET/POST/PUT/DELETE | CRUD |
+| 文件 | `/api/workspace/files/{path}` | GET/POST/DELETE | 文件操作 |
+| 角色 | `/api/agent-catalog` | GET | 角色目录 |
+| 技能 | `/api/skills` | GET/POST/PUT/DELETE | CRUD |
+| 测试 | `/api/test/exec` | POST | 执行测试 |
+| | `/api/test/terminal/ws` | WebSocket | 终端实时交互 |
+| 连接 | `/api/test-connection` | POST | 测试 API 连接 |
 
 ## 项目结构
 
 ```
 omni-agent-hub/
 ├── backend/
-│   ├── main.py              # FastAPI + 图谱执行引擎 + 长篇小说管线
-│   ├── test_runner.py       # Agent 测试执行引擎
-│   ├── agent_loader.py      # Agent 角色加载器
-│   ├── skill_loader.py      # Skill 加载器
-│   ├── config.json           # 预设模型配置
-│   ├── requirements.txt
-│   ├── agents/               # Agent 角色定义
-│   ├── skills/               # Skill 定义
-│   ├── workspace/            # 文件输出 + run_xxx/ 任务文件夹
-│   └── projects/             # 项目保存
+│   ├── executor.py              # 核心引擎 (GraphExecutor)
+│   ├── main.py                  # FastAPI 入口 (40+ 端点)
+│   ├── agent_loader.py          # 角色 .md 加载器
+│   ├── skill_loader.py          # 技能加载器
+│   ├── test_runner.py           # 测试执行引擎
+│   ├── memory_manager.py        # 记忆管理器
+│   ├── hallucination_guard.py   # 幻觉守卫
+│   ├── genre_data/              # 体裁数据
+│   │   ├── taxonomy.py          # 追读力分类学
+│   │   ├── genre_profiles.py    # 14体裁裁决规则
+│   │   ├── inkos_data.py        # 33维审计体系
+│   │   ├── writing_guides.py    # Anti-AI写作规范
+│   │   └── detect.py            # 体裁自动检测
+│   ├── agents/                  # 60+ 角色 .md
+│   │   ├── engineering/         # 工程类
+│   │   ├── design/              # 设计类
+│   │   ├── product/             # 产品类
+│   │   ├── specialized/         # 专业类
+│   │   ├── testing/             # 测试类
+│   │   └── strategy/            # 策略类
+│   ├── workspace/               # 文件输出 + 任务文件夹
+│   └── projects/                # 项目保存
 ├── frontend/
-│   ├── src/
-│   │   ├── App.jsx           # 主应用 + 13/9节点管线定义
-│   │   ├── App.css            # 核心样式
-│   │   ├── constants.js       # 常量配置
-│   │   ├── translations.js    # 中/英翻译
-│   │   ├── styles/            # 设计系统
-│   │   │   ├── variables.css  # CSS 变量 + 主题
-│   │   │   ├── typography.css # 排版
-│   │   │   └── animations.css # 动画
-│   │   ├── hooks/
-│   │   │   ├── useTask.js     # 任务执行
-│   │   │   ├── useCanvas.js   # 画布交互
-│   │   │   ├── usePreset.js   # 预设管理
-│   │   │   ├── useSkill.js    # Skill 管理
-│   │   │   └── useProject.js  # 项目管理
-│   │   └── components/
-│   │       ├── Canvas.jsx     # 连线 + 节点画布
-│   │       ├── ConfigPanel.jsx
-│   │       ├── Sidebar.jsx    # 预设/对话/任务面板
-│   │       ├── Toolbar.jsx
-│   │       ├── Modals.jsx
-│   │       ├── TerminalPanel.jsx
-│   │       └── TestResultCard.jsx
-│   ├── package.json
-│   └── vite.config.js
+│   └── src/
+│       ├── App.jsx              # 入口组件
+│       ├── App.css              # 全局样式
+│       ├── translations.js      # 中/英 i18n
+│       ├── styles/              # 设计系统
+│       ├── hooks/               # 自定义 hooks
+│       │   ├── usePreset.js     # 预设管理
+│       │   ├── useTask.js       # 任务执行
+│       │   ├── useNovelTask.js  # 小说任务
+│       │   └── useSkill.js      # 技能管理
+│       └── components/
+│           ├── Workbench.jsx    # 核心工作区
+│           ├── Sidebar.jsx      # 侧边栏
+│           ├── TaskDetailModal.jsx # 任务编辑
+│           └── Novel/           # 小说专用组件
 └── README.md
 ```
 
 ## 技术栈
 
-- **前端**：React 19 + Vite 8，SVG 连线，CSS 变量驱动双主题，SSE + WebSocket
-- **后端**：FastAPI + AsyncOpenAI，BFS拓扑排序，异步并发，checkpoint序列化
-- **AI 集成**：OpenAI 兼容 API / Anthropic Claude 原生 API
+- **前端**：React 19 + Vite，CSS 变量双主题，SSE + WebSocket
+- **后端**：FastAPI + AsyncOpenAI，BFS 拓扑排序，异步并发，checkpoint 序列化
+- **AI 集成**：OpenAI 兼容 API / Anthropic Claude 原生 API / thinking_mode
 - **设计**：Noto Serif SC 衬线字体，"文人书斋"暖色调主题
+
+## 致谢
+
+- [webnovel-writer](https://github.com/EricZhu-42/webnovel-writer) — 追读力分类学、体裁裁决规则
+- [InkOS](https://github.com/Narcooo/inkos) — 33维审计体系、疲劳词列表、语言铁律
