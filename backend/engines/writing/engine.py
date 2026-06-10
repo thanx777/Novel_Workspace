@@ -438,10 +438,23 @@ class WritingEngine(BaseEngine):
     async def write_all(self, start_chapter: int = 1) -> Dict:
         """从指定章节开始逐章写作。"""
         results = []
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+
         for ch in range(start_chapter, self.total_chapters + 1):
             r = await self.write_chapter(ch)
             results.append(r)
             self._emit({"status": "chapter_completed", "chapter": ch, "progress": f"{ch}/{self.total_chapters}"})
+
+            # 连续失败检测：如果连续多章评分低于阈值，提前终止
+            if r.get("score", 0) < self.score_threshold or r.get("issues"):
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    self._emit({"status": "writing_stopped", "reason": f"连续{max_consecutive_failures}章质量不达标，停止写作"})
+                    break
+            else:
+                consecutive_failures = 0
+
         self.state.writing_set_status("completed")
         self.state.current_stage = "review"
         return {"chapters_written": len(results), "results": results}

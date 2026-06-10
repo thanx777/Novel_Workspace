@@ -847,8 +847,8 @@ export default function Workbench({
                             {language === "zh" ? "当前阶段" : "Current Stage"}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span className={`stage-badge stage-${engineState?.current_stage || activeProject.current_stage || "outline"}`}>
-                              {stageLabel(engineState?.current_stage || activeProject.current_stage || "outline")}
+                            <span className={`stage-badge stage-${activeProject.current_stage || engineState?.current_stage || "outline"}`}>
+                              {stageLabel(activeProject.current_stage || engineState?.current_stage || "outline")}
                             </span>
                             <span style={{ fontSize: 11, opacity: 0.7 }}>
                               {activeProject.chapters_done || 0}/{activeProject.total_chapters || 0} {language === "zh" ? "章" : "chapters"}
@@ -857,22 +857,20 @@ export default function Workbench({
                           {/* 引擎状态详情 */}
                           {engineState && (
                             <div style={{ marginTop: 6, fontSize: 10, opacity: 0.7 }}>
-                              {engineState.current_stage === "outline" && (
-                                <div>{language === "zh" ? "大纲" : "Outline"}：{engineState.outline?.status || "pending"} · {language === "zh" ? "已完成层" : "Layers done"}：{(engineState.outline?.completed_layers || []).join(", ") || "—"}</div>
-                              )}
-                              {engineState.current_stage === "writing" && (
-                                <div>{language === "zh" ? "写作进度" : "Writing progress"}：{engineState.writing?.progress || "0/0"}</div>
-                              )}
-                              {engineState.current_stage === "review" && (
-                                <div>{language === "zh" ? "审校" : "Review"}：{engineState.review?.status || "pending"} · {language === "zh" ? "已完成维度" : "Dims done"}：{(engineState.review?.dimensions_done || []).join(", ") || "—"}</div>
-                              )}
+                              {(() => {
+                                const _s = activeProject.current_stage || engineState?.current_stage || "outline"
+                                if (_s === "outline") return <div>{language === "zh" ? "大纲" : "Outline"}：{engineState.outline?.status || "pending"} · {language === "zh" ? "已完成层" : "Layers done"}：{(engineState.outline?.completed_layers || []).join(", ") || "—"}</div>
+                                if (_s === "writing") return <div>{language === "zh" ? "写作进度" : "Writing progress"}：{engineState.writing?.progress || "0/0"}</div>
+                                if (_s === "review" || _s === "polish") return <div>{language === "zh" ? "审校" : "Review"}：{engineState.review?.status || "pending"} · {language === "zh" ? "已完成维度" : "Dims done"}：{(engineState.review?.dimensions_done || []).join(", ") || "—"}</div>
+                                return null
+                              })()}
                             </div>
                           )}
                         </div>
 
                         {/* 阶段列表 — 使用新引擎 SSE 流式 API */}
                         {(() => {
-                          const curStage = engineState?.current_stage || activeProject.current_stage || "outline"
+                          const curStage = activeProject.current_stage || engineState?.current_stage || "outline"
                           const stageOrder = { outline: 0, writing: 1, review: 2, polish: 2, done: 3, completed: 3 }
                           const curIdx = stageOrder[curStage] ?? 0
                           return [
@@ -881,7 +879,7 @@ export default function Workbench({
                             { key: "review", label: "🔍 " + (language === "zh" ? "审校阶段" : "Review"), desc: language === "zh" ? "按维度全局审校" : "Dimension-based global review", btnLabel: language === "zh" ? "全局审校" : "Global Review" },
                           ].map((stage) => {
                             const stageIdx = stageOrder[stage.key] ?? 0
-                            const isCurrent = curStage === stage.key
+                            const isCurrent = curStage === stage.key || (curStage === "polish" && stage.key === "review")
                             const isCompleted = stageIdx < curIdx
                             const handleEngineAction = async () => {
                               if (!activeProject) return

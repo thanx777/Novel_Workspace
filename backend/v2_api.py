@@ -551,6 +551,14 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
                     break
 
         result = await exec_task
+        # Sync project.db current_stage with engine_state
+        try:
+            db = ProjectDB(name)
+            engine_state = EngineState(project_dir)
+            db.set_stage(engine_state.current_stage)
+            db.close()
+        except Exception:
+            pass
         yield {"data": json.dumps({"status": "done", "stage": "outline", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
@@ -613,6 +621,14 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
                     break
 
         result = await exec_task
+        # Sync project.db current_stage with engine_state
+        try:
+            db = ProjectDB(name)
+            engine_state = EngineState(project_dir)
+            db.set_stage(engine_state.current_stage)
+            db.close()
+        except Exception:
+            pass
         yield {"data": json.dumps({"status": "done", "stage": "writing", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
@@ -668,6 +684,14 @@ async def _review_start_stream(name: str):
                     break
 
         result = await exec_task
+        # Sync project.db current_stage with engine_state
+        try:
+            db = ProjectDB(name)
+            engine_state = EngineState(project_dir)
+            db.set_stage(engine_state.current_stage)
+            db.close()
+        except Exception:
+            pass
         yield {"data": json.dumps({"status": "done", "stage": "review", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}

@@ -93,6 +93,8 @@ class BaseEngine(ABC):
         5. 否则 Manager 把 Reviewer 反馈传给 Writer 重做
         """
         last_result = None
+        consecutive_same_failures = 0
+        prev_issues_key = None
 
         for round_num in range(1, max_rounds + 1):
             self._emit({"status": "mwr_round", "round": round_num, "max_rounds": max_rounds})
@@ -120,7 +122,25 @@ class BaseEngine(ABC):
                 self._emit({"status": "cycle_completed", "round": round_num, "score": result.score})
                 return result
 
-        # 5. 达到上限，Manager 做最终决策
+            # 5. 连续相同问题检测：如果连续 3 轮评分低于阈值且问题相同，提前退出
+            if result.score < score_threshold:
+                issues_key = tuple(sorted(result.issues))
+                if issues_key == prev_issues_key:
+                    consecutive_same_failures += 1
+                else:
+                    consecutive_same_failures = 1
+                    prev_issues_key = issues_key
+                if consecutive_same_failures >= 3:
+                    self._emit({"status": "cycle_stuck", "round": round_num,
+                                "reason": f"连续{consecutive_same_failures}轮相同问题未解决，提前退出"})
+                    self._emit({"status": "cycle_ended", "accepted": False,
+                                "reason": f"连续{consecutive_same_failures}轮相同问题未解决"})
+                    return result
+            else:
+                consecutive_same_failures = 0
+                prev_issues_key = None
+
+        # 6. 达到上限，Manager 做最终决策
         final = self.manager_final_decision()
         if final.accepted:
             self._on_cycle_completed(max_rounds, last_result)
