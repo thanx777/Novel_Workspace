@@ -1,12 +1,13 @@
-﻿import { useState, useEffect, useCallback } from "react"
+﻿﻿import { useState, useEffect, useCallback } from "react"
 import "./App.css"
+import "./styles/kg_v2.css"
 import translations from "./translations"
 import { API_BASE } from "./constants"
 import usePreset from "./hooks/usePreset"
-import useProject from "./hooks/useProject"
+import useProjectV2 from "./hooks/useProjectV2"
 import Workbench from "./components/Workbench"
 import { PresetPanel } from "./components/Sidebar"
-import { ProjectModal, WorkspaceSettings, ConfirmDialog, DangerConfirmModal } from "./components/Modals"
+import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./components/Modals"
 
 function App() {
   const [language, setLanguage] = useState("zh")
@@ -29,10 +30,7 @@ function App() {
   }, [])
 
   const presetHook = usePreset({ t, showNotification })
-  const projectHook = useProject({
-    t, showNotification, setConfirmDialog,
-    nodes: [], connections: [], conversations: [], memory: "", logs: []
-  })
+  const projectV2 = useProjectV2({ t, showNotification, presets: presetHook.presets })
 
   // Apply dark theme to document root
   useEffect(() => {
@@ -154,20 +152,9 @@ function App() {
           showNotification={showNotification}
           isRunning={isRunning} setIsRunning={setIsRunning}
           agentCatalog={agentCatalog}
+          projectV2={projectV2}
         />
       </div>
-
-      <ProjectModal
-        t={t} showProjectModal={projectHook.showProjectModal}
-        setShowProjectModal={projectHook.setShowProjectModal}
-        projectName={projectHook.projectName} setProjectName={projectHook.setProjectName}
-        handleSaveProject={projectHook.handleSaveProject}
-        projectList={projectHook.projectList}
-        handleLoadProject={projectHook.handleLoadProject}
-        handleDeleteProject={projectHook.handleDeleteProject}
-        setConfirmDialog={setConfirmDialog}
-        nodes={[]} connections={[]} conversations={[]} memory="" logs={[]}
-      />
 
       <WorkspaceSettings
         t={t} showWorkspaceSettings={showWorkspaceSettings}

@@ -84,6 +84,7 @@ export default function NovelWorkspace({
           stage_timeout_seconds: 600,
           execution_mode: mode,
           outline_review_mode: outlineReviewMode,
+          outline_layers: outlineLayers || { L1: true, L2: true, L3: true },
         })
       })
 

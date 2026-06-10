@@ -1,4 +1,4 @@
-﻿import { useState } from "react"
+import { useState } from "react"
 
 export default function NewTaskModal({
   t, language,
@@ -11,6 +11,7 @@ export default function NewTaskModal({
   const [genre, setGenre] = useState("")
   const [outlineReviewMode, setOutlineReviewMode] = useState("auto")
   const [executionMode, setExecutionMode] = useState("lite")
+  const [outlineLayers, setOutlineLayers] = useState({ L1: true, L2: true, L3: true })
   const [managerIdx, setManagerIdx] = useState(-1)
   const [workerIdx, setWorkerIdx] = useState(-1)
   const [reviewerIdx, setReviewerIdx] = useState(-1)
@@ -25,12 +26,19 @@ export default function NewTaskModal({
     setShow(false)
     setNovelTitle(""); setChapterCount(""); setTaskInput(""); setGenre("")
     setOutlineReviewMode("auto"); setExecutionMode("lite")
+    setOutlineLayers({ L1: true, L2: true, L3: true })
     setManagerIdx(-1); setWorkerIdx(-1); setReviewerIdx(-1)
   }
 
   const handleStart = () => {
     if (!novelTitle.trim() || !chapterCount) return
     if (!allRolesAssigned) return
+    // 校验：L1 关 → L2/L3 也关
+    const layers = { ...outlineLayers }
+    if (!layers.L1) {
+      layers.L2 = false
+      layers.L3 = false
+    }
     onRun({
       novelTitle: novelTitle.trim(),
       genre,
@@ -38,6 +46,7 @@ export default function NewTaskModal({
       taskInput: taskInput.trim(),
       outlineReviewMode,
       executionMode,
+      outlineLayers: layers,
       managerPreset: presets[managerIdx],
       workerPreset: presets[workerIdx],
       reviewerPreset: presets[reviewerIdx]
@@ -110,6 +119,46 @@ export default function NewTaskModal({
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Outline layers: L1 / L2 / L3 三层大纲（同时进行）*/}
+          <div className="form-group">
+            <label> {language === "zh" ? "📋 大纲模板（三层同时进行）" : "📋 Outline Layers (3 layers run together)"}</label>
+            <div className="outline-layers-grid">
+              {[
+                { key: "L1", icon: "📚", name: language === "zh" ? "L1 完整版全书大纲" : "L1 Full Outline", desc: language === "zh" ? "10w字+ 详细世界观/卷/伏笔" : "Detailed worldview/volumes/foreshadowing" },
+                { key: "L2", icon: "🚀", name: language === "zh" ? "L2 网文精简版大纲" : "L2 Web-Novel Outline", desc: language === "zh" ? "爽点清单 / 三幕结构" : "Hook list / 3-act structure" },
+                { key: "L3", icon: "📝", name: language === "zh" ? "L3 单章细纲" : "L3 Chapter Detail", desc: language === "zh" ? "每章写作前的详细剧本" : "Detailed chapter script" },
+              ].map(l => {
+                const disabled = !outlineLayers.L1 && l.key !== "L1"
+                return (
+                  <div
+                    key={l.key}
+                    className={`outline-layer-card ${outlineLayers[l.key] ? "active" : ""} ${disabled ? "disabled" : ""}`}
+                    onClick={() => {
+                      if (disabled) return
+                      setOutlineLayers(prev => ({ ...prev, [l.key]: !prev[l.key] }))
+                    }}
+                  >
+                    <div className="layer-icon">{l.icon}</div>
+                    <div className="layer-info">
+                      <span className="layer-name">{l.name}</span>
+                      <span className="layer-desc">{l.desc}</span>
+                    </div>
+                    <div className="layer-switch">
+                      <div className={`switch ${outlineLayers[l.key] ? "on" : "off"}`}>
+                        <div className="switch-knob" />
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            {!outlineLayers.L1 && (
+              <div className="hint-warning">
+                {language === "zh" ? "⚠️ L1 关闭时 L2/L3 也会自动关闭（依赖 L1 摘要）" : "⚠️ Closing L1 will auto-disable L2/L3 (depend on L1)"}
+              </div>
+            )}
           </div>
 
           {/* Outline review mode */}
