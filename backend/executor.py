@@ -144,44 +144,23 @@ FRAMEWORK_PROMPTS = {
 }
 
 # ============================================
-# 三模式配置：标准 / 兼容 / 满血
+# 单模式配置（标准版；3 模式已合并：standard / compatible / full → 单一）
 # ============================================
 
 MODE_CONFIG = {
-    "standard": {
-        "max_tokens": {"manager": 2000, "worker": 16000, "reviewer": 2000},
-        "timeout": 300,
-        "reviewer_truncate": True,
-        "manager_truncate_files": 30,
-        "manager_prev_output": 500,
-        "history_count": 5,
-        "history_chars": 200,
-        "role_catalog": "compact",
-        "strict_exit": True,
-    },
-    "compatible": {
-        "max_tokens": {"manager": 3000, "worker": 24000, "reviewer": 3000},
-        "timeout": 450,
-        "reviewer_truncate": True,
-        "manager_truncate_files": 20,
-        "manager_prev_output": 400,
-        "history_count": 4,
-        "history_chars": 150,
-        "role_catalog": "compact",
-        "strict_exit": False,
-        "force_test": False,
-    },
-    "full": {
-        "max_tokens": {"manager": 4000, "worker": 32000, "reviewer": 4000},
-        "timeout": 600,
-        "reviewer_truncate": False,
-        "manager_truncate_files": 0,
-        "manager_prev_output": 800,
-        "history_count": 8,
-        "history_chars": 300,
-        "role_catalog": "full",
-        "strict_exit": True,
-    },
+    "max_tokens": {"manager": 2000, "worker": 16000, "reviewer": 2000},
+    "timeout": 300,
+    "reviewer_truncate": True,
+    "manager_truncate_files": 30,
+    "manager_prev_output": 500,
+    "history_count": 5,
+    "history_chars": 200,
+    "role_catalog": "compact",
+    "strict_exit": True,
+    "outline_max_rounds": 20,
+    "writing_max_rounds": 300,
+    "polish_max_rounds": 100,
+    "max_rounds": 100,
 }
 
 # 标准版 Framework Prompt（~50% 压缩，适合 Claude/GPT-4）
@@ -225,41 +204,6 @@ FRAMEWORK_PROMPTS_STANDARD = {
 ⚠️ Web项目(HTML+JS)：禁止用 node 测浏览器代码，document/window 在 Node 下不存在会误报。用 [TEST:PW: 打开 index.html] 或无头浏览器测试。""",
 }
 
-# 兼容版 Framework Prompt（超简、全肯定句式，适合 GLM/Llama/Qwen）
-FRAMEWORK_PROMPTS_COMPATIBLE = {
-    "manager": """你是项目调度者。你要做三件事：
-1. 根据用户需求，告诉执行者具体做什么
-2. 检查审查者的反馈
-3. 审查通过且测试通过后输出[EXIT_LOOP]。测试失败就指令修复
-
-重要规则：
-- 用户要几个文件就安排几个文件
-- 用[ROLE:节点ID=角色名]给每个节点分配角色
-- 文件都生成好了就输出[EXIT_LOOP]结束任务""",
-
-    "worker": """你是执行者。按照指令创建文件。
-
-规则：
-- 安排几个文件就写几个文件
-- 不要写：报告、总结、测试文件、清理脚本
-- 不要写多个版本
-
-文件格式：
----FILE: 文件名---
-文件内容
----ENDFILE---""",
-
-    "reviewer": """你是审查者。检查执行者的代码质量。
-
-请这样做：
-1. 先看代码理解逻辑
-2. 用[TEST:CMD:命令]实际运行测试
-3. 根据测试结果说"通过✅"或"需要修改"
-
-代码能正常运行就是通过。结论要简短。""",
-}
-
-# ============================================
 # 小说流水线专用 Prompt（纯文学创作，不使用测试指令）
 # ============================================
 
@@ -404,244 +348,6 @@ NVL_STAGE_PROMPTS = {
     },
 }
 
-# 兼容版小说流水线 Prompt（适合 GLM/Llama/Qwen 等低级模型）
-# 特点：指令极其明确、分步指导、全肯定句式、减少抽象概念
-NVL_STAGE_PROMPTS_COMPATIBLE = {
-    "outline": {
-        "manager": """你是小说架构师。你要做一件事：让执行者写出大纲和人物设定。
-
-你需要做的：
-1. 从用户任务中提取：章节总数、小说类型/风格（玄幻/都市/科幻等）
-2. 告诉执行者写出 outline.md（每章一句话概括）和 characters.md（人物介绍）
-3. 章数从用户任务里找。用户说多少章就写多少章，严格按照用户要求
-4. 检查产出：章数对不对？人物有没有冲突？类型风格是否符合？
-5. 检查没问题就输出 [EXIT_LOOP]
-
-重要提醒：
-- 你自己不写文件，只下指令
-- 不要输出测试指令
-- 检查通过就 [EXIT_LOOP]""",
-
-        "worker": """你是大纲撰写者。按照要求写出两个文件。
-
-要写的文件：
-1. outline.md — 每章一句话梗概，共N章
-2. characters.md — 人物名字、性格、说话方式、动机、和其他人的关系
-
-文件写法：
----FILE: outline.md---
-大纲内容
----ENDFILE---
-
----FILE: characters.md---
-人物设定
----ENDFILE---
-
-注意：
-- 只写这两个文件
-- 不要写正文""",
-
-        "reviewer": """你是大纲审查者。请检查两个文件的质量。
-
-检查什么：
-1. 章数够不够（用户说多少章就是多少章）
-2. 故事主线是否清楚
-3. 人物之间有没有矛盾
-4. 人物关系合不合理
-
-结论说一种：
-- 通过 ✅ — 没问题
-- 需修改 — 说出具体哪里要改
-- 不通过 — 说出严重问题
-
-不要输出测试指令。只需要阅读后给结论。""",
-    },
-
-    "writing": {
-        "manager": """你是创作总指挥。你的工作是告诉执行者写哪些章，然后检查。
-
-你需要这样做：
-第一步：看大纲和已写章节，确定接下来写哪一章
-第二步：告诉创作作家写第N章，给出该章的大纲要点
-第三步：等初审结果。通过且还没写完 → 回到第一步继续
-第四步：初审通过后，让润色作家打磨这一章
-第五步：全部写完了 → 输出 [EXIT_LOOP]
-
-重要规则：
-- 你自己绝对不写文件，只下指令给执行者
-- 一次只写一章，保证每章质量
-- 每次先报进度：「进度：第X章/共Y章已完成」
-- 不到最后一章绝不 [EXIT_LOOP]
-- 初审说"需修改"或"不通过" → 让创作作家改
-- 终审说"需修改" → 让润色作家打磨
-- 不要输出测试指令
-- 每5章输出一次 [MEMORY: 更新全局记忆，记录：(1)角色状态变化 (2)主线推进 (3)新伏笔或伏笔回收 (4)关键事件] 让所有 agent 了解整部小说进展
-- 每10章输出一次 [SUMMARY: 最近剧情的简明摘要] 让创作作家快速了解前文
-- 🎯 每章指定类型（三选一）：Quest主线推进 | Fire爽点高潮 | Constellation世界观展开
-  主线不断档超过5章，爽点不断档超过10章，世界观不断档超过15章""",
-
-        "w_a": """你是创作作家。按总指挥的指令写章节初稿。
-
-每章的要求：
-- 字数：800到1500字
-- 文件名：第N章.txt
-- 一章一个文件
-
-每章开头要写三个标注：
----PREV: [上一章结尾最后一段]---
----CAST: [当前出场角色及状态]---
----THREAD: [本章推进的故事线]---
-
-文件写法：
----FILE: 第N章.txt---
----PREV: ...
----CAST: ...
----THREAD: ...
-正文内容
----ENDFILE---
-
-注意：
-- 只写总指挥指定的章
-- 严格按大纲写，不自己加新人物、新故事线
-- 不写报告、不写总结
-
-写完每章后维护三个文件：
-- chapter_summaries.md — 追加本章1-2句摘要
-- pending_hooks.md — 如有新伏笔就追加进去（标注章节号）
-- character_state.md — 如有角色状态变化就更新""",
-
-        "r_a": """你是内容审查者。只检查内容是否正确，不检查格式和衔接。
-
-检查的项目：
-1. 本章是否按要求完成
-2. 字数检查：800到1500字吗？
-3. 内容和大纲的梗概是否一致？
-4. 有没有大纲里没出现过的新角色或新情节？（这是幻觉！）
-5. 人物性格和说话方式是否符合设定？
-
-结论说一种：
-- 通过 ✅ — 内容合格，可以交给润色
-- 需修改 — 指出哪章有什么内容问题（只讲内容，不讲格式）
-- 不通过 — 出现不该有的新角色或严重偏离大纲
-
-5. 本章最后有没有留下悬念钩子？读者看了会不会想继续看下一章？
-6. 有没有爽点（打脸/碾压/逆袭）？本章会不会让读者觉得平淡？
-
-不要输出测试指令。只需要阅读后给结论。""",
-
-        "w_b": """你是润色作家。内容审查通过后，你来打磨章节的文笔。
-
-你要做的事：
-1. 读一遍章节内容，保持情节不变
-2. 改善文笔：对话更自然、描写更生动、节奏更流畅
-3. 检查并更新 ---PREV:---、---CAST:---、---THREAD:--- 标注
-4. 修改后字数保持在800到1500字
-
-文件写法（重写润色后的章节）：
----FILE: 第N章.txt---
----PREV: ...
----CAST: ...
----THREAD: ...
-润色后的正文
----ENDFILE---
-
-注意：
-- 不改变情节和人物设定
-- 不新增角色和事件
-- 只打磨已有内容，不做大改""",
-
-        "r_b": """你是终审者。润色完成后做最终检查，确保衔接和格式都正确。
-
-检查的项目：
-1. 每章 ---PREV:---、---CAST:---、---THREAD:--- 标注都正确吗？
-3. PREV标注和上一章结尾能接上吗？（衔接检查）
-4. 人名、地名、时间线前后一致吗？
-5. 字数在800到1500字吗？
-
-结论说一种：
-- 通过 ✅ — 全部合格
-- 需修改 — 指出具体章和问题（格式或衔接）
-
-不要输出测试指令。只需要阅读后给结论。""",
-    },
-
-    "polish": {
-        "manager": """你是主编。找出章节里的问题，让执行者修改。
-
-你要做的事：
-1. 全局检查所有章节：前后矛盾？人名地名时间线？伏笔回收？文风统一？
-2. 指出具体哪章哪有问题，让修订编辑改
-3. 修订完成后，让精修编辑做最后打磨
-4. 问题都修好就输出 [EXIT_LOOP]
-
-注意：
-- 你自己不写文件
-- 不要输出测试指令""",
-
-        "w_a": """你是修订编辑。按主编的要求修改指定章节。
-
-你要做的事：
-1. 只改主编指定的章节
-2. 修复主编指出的具体问题（矛盾、漏洞、不一致）
-3. 修改后字数保持在800到1500字
-4. 保持 ---PREV:---、---CAST:---、---THREAD:--- 标注正确
-5. 改完后说明改了哪里
-
-注意：
-- 不创建新文件，只修改已有章节
-- 不动主编没指定的章节""",
-
-        "r_a": """你是初审编辑。逐项检查主编指出的问题是否都修好了。
-
-检查什么：
-1. 主编说的问题修好了吗？一条条对照
-2. 修改有没有引入新问题？（人物OOC、情节矛盾、时间线错乱）
-3. 主角性格和说话风格前后一致吗？
-4. 字数在800-1500字吗？
-5. AI痕迹（重复句式、万能形容词、过多"说道"）
-
-结论：
-- 通过 ✅ — 问题都修好了，交给精修
-- 需修改 — 指出还有哪些内容问题
-
-不要输出测试指令。""",
-
-        "w_b": """你是精修编辑。问题修复完成后，做最后的文字打磨。
-
-你要做的事：
-1. 通读修订后的章节
-2. 精修文笔：统一文风、优化对话、润色描写、调整节奏
-3. 检查 ---PREV:---、---CAST:---、---THREAD:--- 标注是否需要更新
-4. 确保字数在800到1500字
-
-文件写法（重写精修后的章节）：
----FILE: 第N章.txt---
----PREV: ...
----CAST: ...
----THREAD: ...
-精修后的正文
----ENDFILE---
-
-注意：
-- 不改变情节结构和人物设定
-- 只做文字层面的提升""",
-
-        "r_b": """你是终审编辑。精修完成后做最终检查。
-
-检查什么：
-1. 全文一致性：主角性格、说话风格前后统一吗？
-2. 伏笔都回收了吗？有没有断掉的线索？
-3. 人名地名时间线全部一致吗？
-4. 所有章节格式正确吗？
-
-结论：
-- 通过 ✅ — 全部合格
-- 需修改 — 指出具体问题
-
-不要输出测试指令。""",
-    },
-}
-
 # 节点类型（Manager/Worker/Reviewer）决定框架行为（HOW）
 # 角色身份（代码审查员/创意作家 等）决定领域知识（WHAT）
 # 角色身份由 Manager 通过 [ROLE: 节点ID = 角色名] 分配，未分配时回退到通用助手
@@ -690,8 +396,7 @@ class GraphTaskRequest(BaseModel):
     skills: List[str] = []
     conversation_history: List[dict] = []
     stage_timeout_seconds: int = DEFAULT_STAGE_TIMEOUT_SECONDS
-    execution_mode: str = "standard"  # "standard" | "compatible" | "full"
-    outline_review_mode: str = "auto"  # "auto" | "manual"
+    outline_review_mode: str = "manual"  # "auto" | "manual"（默认 manual：人工确认大纲）
 
 class WorkspaceConfig(BaseModel):
     path: str
@@ -705,14 +410,12 @@ class FolderStructure(BaseModel):
 # 系统提示词解析
 # ============================================
 
-def resolve_system_prompt(node_type: str, config: dict, skills: List[str] = None, execution_mode: str = "standard", novel_stage: str = "", node_id: str = "") -> tuple:
+def resolve_system_prompt(node_type: str, config: dict, skills: List[str] = None, novel_stage: str = "", node_id: str = "") -> tuple:
     """解析节点的系统提示词。
     框架指令（节点类型决定 HOW）+ 角色知识（agent .md 决定 WHAT）+ Skill（领域规范）
     优先级: custom_prompt > agent_role > 默认角色
     Skill 始终追加（即使在 custom_prompt 模式下）
-    三模式：standard=压缩版, compatible=兼容版, full=原版
     novel_stage="outline"/"writing"/"polish" 时使用小说流水线专用 prompt
-    node_id 用于兼容版识别 w_a/w_b/r_a/r_b 变体
 
     Returns: (system_prompt, icon, role_name)
     """
@@ -721,22 +424,11 @@ def resolve_system_prompt(node_type: str, config: dict, skills: List[str] = None
         full_prompt = custom_prompt
         icon, role_name = "✨", "自定义"
     else:
-        # 小说流水线模式：使用阶段专用 prompt（按执行模式选 standard/compatible 版本）
+        # 小说流水线模式：使用阶段专用 prompt
         # 角色已内置在 prompt 中，无需从 agent 目录加载
         if novel_stage and novel_stage in NVL_STAGE_PROMPTS:
-            prompt_key = node_type  # default: "manager", "worker", "reviewer"
-            if execution_mode in ("compatible", "full") and novel_stage in NVL_STAGE_PROMPTS_COMPATIBLE:
-                stage_prompts = NVL_STAGE_PROMPTS_COMPATIBLE[novel_stage]
-                # 检测润色变体节点：w_2a→w_a, w_2b→w_b, r_2a→r_a, r_2b→r_b
-                if node_id and node_type in ("worker", "reviewer"):
-                    import re as _nvl_re
-                    m = _nvl_re.match(r'^([wr])_\d+([ab])$', node_id)
-                    if m:
-                        prompt_key = m.group(1) + "_" + m.group(2)  # "w_a", "r_b"
-                framework = stage_prompts.get(prompt_key, stage_prompts.get(node_type, stage_prompts.get("worker", "")))
-            else:
-                stage_prompts = NVL_STAGE_PROMPTS[novel_stage]
-                framework = stage_prompts.get(node_type, stage_prompts.get("worker", ""))
+            stage_prompts = NVL_STAGE_PROMPTS[novel_stage]
+            framework = stage_prompts.get(node_type, stage_prompts.get("worker", ""))
             full_prompt = framework
             # 小说流水线固定角色名和图标
             novel_icons = {
@@ -746,28 +438,14 @@ def resolve_system_prompt(node_type: str, config: dict, skills: List[str] = None
                 ("writing", "manager"): ("🎬", "创作总指挥"),
                 ("writing", "worker"): ("✍️", "小说作家"),
                 ("writing", "reviewer"): ("🔍", "章节审查者"),
-                ("writing", "w_a"): ("✍️", "创作作家"),
-                ("writing", "r_a"): ("🔍", "内容审查者"),
-                ("writing", "w_b"): ("🖋️", "润色作家"),
-                ("writing", "r_b"): ("✅", "终审者"),
                 ("polish", "manager"): ("📰", "主编"),
                 ("polish", "worker"): ("✏️", "修订编辑"),
                 ("polish", "reviewer"): ("✅", "终审者"),
-                ("polish", "w_a"): ("✏️", "修订编辑"),
-                ("polish", "r_a"): ("🔍", "初审编辑"),
-                ("polish", "w_b"): ("🖋️", "精修编辑"),
-                ("polish", "r_b"): ("✅", "终审编辑"),
             }
-            icon, role_name = novel_icons.get((novel_stage, prompt_key), novel_icons.get((novel_stage, node_type), ("🤖", node_type)))
+            icon, role_name = novel_icons.get((novel_stage, node_type), ("🤖", node_type))
         else:
-            # 按执行模式选择 framework prompt
-            if execution_mode == "compatible":
-                prompts = FRAMEWORK_PROMPTS_COMPATIBLE
-            elif execution_mode == "full":
-                prompts = FRAMEWORK_PROMPTS
-            else:
-                prompts = FRAMEWORK_PROMPTS_STANDARD
-            framework = prompts.get(node_type, prompts.get("worker", ""))
+            # 通用模式：使用标准版 framework prompt
+            framework = FRAMEWORK_PROMPTS_STANDARD.get(node_type, FRAMEWORK_PROMPTS_STANDARD.get("worker", ""))
 
             # 获取 agent 角色知识（通用模式）
             agent_role = config.get("agent_role", "").strip()
@@ -1099,9 +777,9 @@ class GraphExecutor:
 
     def __init__(self, nodes: List[NodeInfo], connections: List[ConnectionInfo],
                  task: str, presets: List[dict], skills: List[str] = None,
-                 conversation_history: List[dict] = None, execution_mode: str = "standard",
+                 conversation_history: List[dict] = None,
                  prev_stage_files: List[str] = None, run_subfolder: str = "",
-                 outline_review_mode: str = "auto"):
+                 outline_review_mode: str = "manual"):
         GraphExecutor._current_executor = self
         self.cancelled = False
         self._current_llm_task = None  # 用于 stop 端点取消正在进行的 LLM 调用
@@ -1114,8 +792,7 @@ class GraphExecutor:
         self.skills = skills or []
         self.active_skills = []
         self.conversation_history = conversation_history or []
-        self.execution_mode = execution_mode
-        self.mode_cfg = MODE_CONFIG.get(execution_mode, MODE_CONFIG["standard"])
+        self.mode_cfg = MODE_CONFIG  # 单模式配置
         self.prev_stage_files = prev_stage_files or []
         self.run_subfolder = run_subfolder
         self._guard_override = ''
@@ -1237,7 +914,7 @@ class GraphExecutor:
         # 合并用户手动选的 Skill + Manager 自动分配的 Skill（去重）
         merged_skills = list(dict.fromkeys(self.skills + self.active_skills))
         novel_stage = getattr(self, '_novel_stage', '')
-        system_prompt, icon, role_name = resolve_system_prompt(node.type, node.config, merged_skills, self.execution_mode, novel_stage, nid)
+        system_prompt, icon, role_name = resolve_system_prompt(node.type, node.config, merged_skills, novel_stage, nid)
         self.node_icons[nid] = icon
         self.node_roles[nid] = role_name
 
@@ -1427,7 +1104,7 @@ class GraphExecutor:
                     if gaps:
                         gap_info = f"，缺失: {gaps[:10]}{'...' if len(gaps) > 10 else ''}"
 
-                is_enhanced = self.execution_mode in ("compatible", "full")
+                is_enhanced = False  # 兼容/满血模式已合并
                 if is_enhanced:
                     if novel_ctx == "outline":
                         if target > 0:
@@ -2342,7 +2019,6 @@ class GraphExecutor:
                 presets=[{"name": k, **v} for k, v in self.presets.items()],
                 skills=sskills,
                 conversation_history=self.conversation_history,
-                execution_mode=self.execution_mode,
                 prev_stage_files=list(prev_files),
                 run_subfolder=run_folder,
             )
@@ -2428,13 +2104,24 @@ class GraphExecutor:
             )
         })
 
-        # 小说模式：按目标章数动态计算上限（每章预留3轮：创作+审查+润色+重写）
+        # 小说模式：按阶段动态计算最大轮数
         novel_stage_rounds = getattr(self, '_novel_stage', '')
         if novel_stage_rounds:
             task_text = (self.task or "")
             ch_match = re.search(r'(\d+)\s*[章章]|(\d+)\s*chapters?', task_text)
             target = int(ch_match.group(1)) if ch_match else 0
-            MAX_ROUNDS = max(target * 3, 100) if target > 0 else self.mode_cfg.get("max_rounds", 300)
+            # 🔧 Bug 3 修复：各阶段独立计算 MAX_ROUNDS
+            if novel_stage_rounds == "outline":
+                # 大纲阶段：最多 20 轮，避免无限循环
+                MAX_ROUNDS = self.mode_cfg.get("outline_max_rounds", 20)
+            elif novel_stage_rounds == "writing":
+                # 写作阶段：按章节数 × 3 轮（创作+审查+修改），保底100轮
+                MAX_ROUNDS = max(target * 3, 100) if target > 0 else self.mode_cfg.get("writing_max_rounds", 300)
+            elif novel_stage_rounds == "polish":
+                # 审校阶段：章节数 × 2 轮，保底50轮
+                MAX_ROUNDS = max(target * 2, 50) if target > 0 else self.mode_cfg.get("polish_max_rounds", 100)
+            else:
+                MAX_ROUNDS = self.mode_cfg.get("max_rounds", 100)
         else:
             MAX_ROUNDS = self.mode_cfg.get("max_rounds", 100)
         last_file_count = len(self.saved_files)  # resume 时不会误判停滞
@@ -2485,12 +2172,43 @@ class GraphExecutor:
             round_ctx = {"round": round_idx, "files": list(self.saved_files), "has_loop": has_loop,
                          "user_feedback": list(self.pending_feedback)}
 
+            # 🔧 Bug 1 修复：Manager 已决定退出时，Worker/Reviewer 不再执行
+            phase_skip_flag = False
             for phase_nodes in phases:
+                if phase_skip_flag:
+                    break
+                # 在执行该 phase 前检查：上一轮/本轮已有的 Manager 输出是否包含 [EXIT_LOOP]
+                manager_exited = False
+                for mid in manager_ids:
+                    if mid in self.outputs and self._manager_says_done(self.outputs[mid]):
+                        manager_exited = True
+                        break
+                # 如果 Manager 已退出且当前 phase 包含非 Manager 节点 → 跳过
+                if manager_exited:
+                    has_non_manager = any(nid not in manager_ids for nid in phase_nodes)
+                    if has_non_manager:
+                        yield_func({
+                            "status": "info",
+                            "message": "⏹️  Manager 已决定退出，本轮跳过 Worker/Reviewer"
+                        })
+                        phase_skip_flag = True
+                        break
                 tasks = [run_node(nid, round_ctx) for nid in phase_nodes]
                 results = await asyncio.gather(*tasks)
                 for nid, output in results:
                     if output is not None:
                         self.outputs[nid] = output
+                # 🔧 每个 phase 后检查：如果刚执行的是 Manager phase 且它输出了 [EXIT_LOOP]，后续 Worker/Reviewer phase 跳过
+                if not phase_skip_flag:
+                    for mid in manager_ids:
+                        if mid in self.outputs and self._manager_says_done(self.outputs[mid]):
+                            has_non_manager_left = any(
+                                any(nid2 not in manager_ids for nid2 in pn2)
+                                for pn2 in phases[phases.index(phase_nodes)+1:]
+                            )
+                            if has_non_manager_left:
+                                phase_skip_flag = True
+                                break
 
             # 解析 Manager 指令
             if not getattr(self, '_novel_stage', ''):
@@ -2519,13 +2237,62 @@ class GraphExecutor:
                     for nid, node in self.nodes.items():
                         if node.type == "reviewer" and nid in self.outputs:
                             output = self.outputs[nid]
-                            # 检查 Reviewer 是否明确拒绝（优先检测否定词）
-                            negative_signals = ["需修改", "不通过", "未通过", "拒绝", "不合格", "❌", "严重问题"]
-                            positive_signals = ["通过 ✅", "通过（附带建议）", "✅ 通过"]
-                            has_negative = any(s in output for s in negative_signals)
-                            has_positive = any(s in output for s in positive_signals)
-                            # 有否定信号且没有明确的肯定信号 → 拒绝
-                            if has_negative and not has_positive:
+                            # 🔧 Bug 2 修复：更鲁棒的 Reviewer 结论检测
+                            # 1) 先找"结论行"——"通过"或"✅"或"需修改"或"不通过"所在的行
+                            # 2) 以"结论行"为准，避免长文中出现的"需修改"字样误判
+                            conclusion_line = ""
+                            has_approval_word = False
+                            has_rejection_word = False
+                            for line in output.split('\n'):
+                                stripped = line.strip()
+                                # 检测明确的"通过"信号（含各种格式）
+                                has_approval = (
+                                    ('✅' in stripped and '通过' in stripped) or
+                                    stripped.startswith('通过') or
+                                    stripped.startswith('通过 ✅') or
+                                    stripped.startswith('✅ 通过') or
+                                    stripped.startswith('通过（') or
+                                    stripped.startswith('通过(') or
+                                    (stripped == '通过') or
+                                    (stripped.startswith('通过') and (len(stripped) < 20))
+                                )
+                                # 检测明确的"拒绝/需修改"信号
+                                has_rejection = (
+                                    stripped.startswith('需修改') or
+                                    stripped.startswith('不通过') or
+                                    stripped.startswith('未通过') or
+                                    stripped.startswith('拒绝') or
+                                    stripped.startswith('不合格') or
+                                    stripped.startswith('❌') or
+                                    ('需修改' in stripped and '通过' not in stripped and len(stripped) < 30) or
+                                    ('❌' in stripped and '通过' not in stripped and len(stripped) < 30)
+                                )
+                                if has_approval or has_rejection:
+                                    conclusion_line = stripped
+                                    has_approval_word = has_approval
+                                    has_rejection_word = has_rejection
+                                    break
+                            # 如果没有明确的"结论行"，再做文本整体扫描兜底判断
+                            if not conclusion_line:
+                                has_approval_word = (
+                                    '通过 ✅' in output or
+                                    '✅ 通过' in output or
+                                    '通过（附带建议）' in output or
+                                    output.strip().endswith('通过') or
+                                    output.strip().endswith('通过 ✅') or
+                                    output.strip().endswith('✅')
+                                )
+                                has_rejection_word = (
+                                    '需修改' in output and '通过' not in output[:200] or
+                                    output.strip().startswith('不通过') or
+                                    output.strip().startswith('❌')
+                                )
+                            # 明确的通过信号 → 不拒绝；明确的拒绝信号 → 拒绝
+                            if has_rejection_word and not has_approval_word:
+                                reviewer_rejected = True
+                                break
+                            # 没有通过且没有拒绝 → 默认认为未完成（拒绝）
+                            if not has_approval_word and not has_rejection_word and len(output) < 30:
                                 reviewer_rejected = True
                                 break
                     if reviewer_rejected:
@@ -2640,8 +2407,7 @@ class GraphExecutor:
                                  "to": c.to_node, "toPort": c.to_port, "annotation": c.annotation}
                                 for c in self.connections],
                 "presets": self.presets,
-                "execution_mode": self.execution_mode,
-                "outline_review_mode": getattr(self, 'outline_review_mode', 'auto'),
+                "outline_review_mode": getattr(self, 'outline_review_mode', 'manual'),
                 "skills": self.skills,
                 "active_skills": self.active_skills,
                 "node_icons": self.node_icons,

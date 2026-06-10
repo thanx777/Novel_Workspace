@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from collections import defaultdict
 
 # Import engine core from executor.py
@@ -25,7 +25,7 @@ from executor import (
     call_llm, is_llm_error, resolve_system_prompt,
     extract_and_save_files, get_safe_path, get_full_path,
     _count_chapters, _resolve_workspace_dir,
-    FRAMEWORK_PROMPTS, FRAMEWORK_PROMPTS_STANDARD, FRAMEWORK_PROMPTS_COMPATIBLE,
+    FRAMEWORK_PROMPTS_STANDARD,
     MODE_CONFIG, MAX_TOKENS_BY_TYPE, DEFAULT_MAX_TOKENS, DEFAULT_STAGE_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT,
     ALL_AGENTS, ALL_SKILLS,
@@ -35,6 +35,14 @@ from executor import (
 from agent_loader import load_all_agents as _load_agents, build_role_catalog as _build_catalog, get_agent_by_name as _get_agent
 from skill_loader import load_all_skills as _load_skills, load_skill_content as _load_skill, save_skill as _save_skill, delete_skill as _del_skill, search_skills as _search_skills
 from test_runner import parse_test_instructions, execute_test, terminal_executor_stream, is_dangerous, execute_terminal_force
+
+# V2 API Router（分层大纲 + 知识图谱）
+v2_router = None
+try:
+    from v2_api import router as _v2_router
+    v2_router = _v2_router
+except Exception as _v2_err:
+    print(f"[warn] v2_api 加载失败: {_v2_err}")
 
 # ============================================
 # WebSocket Terminal Manager
@@ -78,6 +86,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载 v2 router
+if v2_router is not None:
+    app.include_router(v2_router)
+    print(f"[info] v2_api router 已挂载（分层大纲 + 知识图谱）routes={len(v2_router.routes)}")
+else:
+    print("[warn] v2_api router 为 None，未挂载")
 
 # ============================================
 # Config helpers
@@ -400,9 +415,8 @@ async def resume_task(folder: str):
         presets=presets_list,
         skills=state.get("skills", []),
         conversation_history=state.get("conversation_history", []),
-        execution_mode=state.get("execution_mode", "standard"),
         run_subfolder=state.get("run_subfolder", folder),
-        outline_review_mode=state.get("outline_review_mode", "auto"),
+        outline_review_mode=state.get("outline_review_mode", "manual"),
     )
     executor.outputs = state.get("outputs", {})
     executor.saved_files = state.get("saved_files", [])
@@ -482,7 +496,7 @@ def update_task(folder: str, body: dict):
 @app.get("/api/prompt-templates")
 def get_prompt_templates():
     frameworks = {}
-    for key, prompt in FRAMEWORK_PROMPTS.items():
+    for key, prompt in FRAMEWORK_PROMPTS_STANDARD.items():
         frameworks[key] = {
             "name": {"manager": "Manager", "worker": "Worker", "reviewer": "Reviewer"}.get(key, key),
             "icon": {"manager": "🎯", "worker": "⚡", "reviewer": "🔍"}.get(key, "🤖"),
@@ -638,8 +652,7 @@ async def _run_graph_task(req: GraphTaskRequest):
         presets=req.presets,
         skills=req.skills,
         conversation_history=req.conversation_history,
-        execution_mode=req.execution_mode,
-        outline_review_mode=getattr(req, 'outline_review_mode', 'auto'),
+        outline_review_mode=getattr(req, 'outline_review_mode', 'manual'),
     )
     q = asyncio.Queue()
     def q_yield(msg):
@@ -782,6 +795,679 @@ async def terminal_websocket(websocket: WebSocket):
             pass
     finally:
         TerminalManager.disconnect(websocket)
+
+# ============================================
+# API — Projects (v2, with SQLite project engine)
+# ============================================
+# 新版项目系统：一个项目文件夹 = 一个独立 SQLite 数据库 + 文件目录
+# 支持：大纲/写作/审校 三阶段灵活切换，AI 助理，暂停恢复，侧边栏实时刷新
+# ============================================
+
+from project_db import (
+    ProjectDB, list_all_projects, create_project, delete_project,
+    get_project_file, read_file_safe, write_file_safe, WORKSPACE_DIR as PDB_WS,
+)
+from project_executor import ProjectExecutor, list_projects_for_api, sync_chapters_to_db
+from assistant import ProjectAssistant
+
+
+class _ProjectCreate(BaseModel):
+    name: str = ""
+    title: str = ""
+    genre: str = ""
+    total_chapters: int = 0
+    outline_review_mode: str = "manual"
+    outline_layers: Optional[dict] = None
+    extra_requirements: str = ""
+    role_presets: Optional[dict] = None
+
+
+class _ProjectRunStage(BaseModel):
+    project_name: str
+    stage: str  # outline | writing | polish
+    task: str = ""
+    outline_review_mode: str = "manual"  # auto | manual（默认 manual：人工确认大纲）
+    outline_layers: Optional[dict] = None
+    presets: List[dict] = []
+
+
+class _ProjectPresets(BaseModel):
+    manager: Optional[dict] = None
+    worker: Optional[dict] = None
+    reviewer: Optional[dict] = None
+    chat: Optional[dict] = None
+
+
+class _AssistantChat(BaseModel):
+    message: str = ""
+    presets: List[dict] = []
+
+
+@app.get("/api/v2/projects")
+def v2_list_projects():
+    """新版项目列表（从 SQLite 读）。"""
+    try:
+        data = list_projects_for_api()
+        return {"projects": data}
+    except Exception as e:
+        return {"projects": [], "error": str(e)}
+
+
+@app.post("/api/v2/projects")
+def v2_create_project(p: _ProjectCreate):
+    """创建新项目。"""
+    try:
+        result = create_project(
+            name=p.name or f"project_{int(time.time())}",
+            title=p.title,
+            genre=p.genre,
+            total_chapters=p.total_chapters,
+            outline_review_mode=p.outline_review_mode,
+        )
+        # 保存额外需求和角色预设到项目文件
+        safe_name = result.get("name", p.name)
+        if p.extra_requirements:
+            write_file_safe(safe_name, "extra_requirements.txt", p.extra_requirements)
+        if p.role_presets and isinstance(p.role_presets, dict):
+            db = ProjectDB(safe_name)
+            db.set_presets(
+                manager=p.role_presets.get("manager"),
+                worker=p.role_presets.get("worker"),
+                reviewer=p.role_presets.get("reviewer"),
+                chat=p.role_presets.get("chat"),
+            )
+            db.close()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/v2/projects/{project_name}")
+def v2_delete_project(project_name: str):
+    """删除项目。"""
+    try:
+        ok = delete_project(project_name)
+        return {"success": ok, "name": project_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class _ProjectPatch(BaseModel):
+    title: Optional[str] = None
+    genre: Optional[str] = None
+    total_chapters: Optional[int] = None
+    outline_review_mode: Optional[str] = None
+
+
+@app.patch("/api/v2/projects/{project_name}")
+def v2_patch_project(project_name: str, body: _ProjectPatch):
+    """部分更新项目信息（标题、题材等）。"""
+    try:
+        db = ProjectDB(project_name)
+        kwargs = {}
+        if body.title is not None:
+            kwargs["title"] = body.title
+        if body.genre is not None:
+            kwargs["genre"] = body.genre
+        if body.total_chapters is not None:
+            kwargs["total_chapters"] = body.total_chapters
+        if body.outline_review_mode is not None:
+            kwargs["outline_review_mode"] = body.outline_review_mode
+        if kwargs:
+            db.update_project(**kwargs)
+        data = db.to_dict()
+        db.close()
+        return {"success": True, "project": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/projects/{project_name}")
+def v2_get_project(project_name: str):
+    """读取单个项目的完整信息（给前端详情页用）。"""
+    try:
+        db = ProjectDB(project_name)
+        data = db.to_dict()
+        db.close()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/projects/{project_name}/presets")
+def v2_get_project_presets(project_name: str):
+    """读取项目的三角色模型预设。"""
+    try:
+        db = ProjectDB(project_name)
+        presets = db.get_presets()
+        db.close()
+        return {"presets": presets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/v2/projects/{project_name}/presets")
+def v2_update_project_presets(project_name: str, body: _ProjectPresets):
+    """保存项目的角色模型预设（部分更新，只传要改的角色）。"""
+    try:
+        db = ProjectDB(project_name)
+        ok = db.set_presets(
+            manager=body.manager,
+            worker=body.worker,
+            reviewer=body.reviewer,
+            chat=body.chat,
+        )
+        updated = db.get_presets()
+        db.close()
+        return {"success": ok, "presets": updated}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/projects/{project_name}/chapters")
+def v2_list_chapters(project_name: str):
+    """章节列表（侧边栏用）。"""
+    try:
+        db = ProjectDB(project_name)
+        chapters = db.list_chapters()
+        db.close()
+        return {"chapters": chapters}
+    except Exception as e:
+        return {"chapters": [], "error": str(e)}
+
+
+@app.get("/api/v2/projects/{project_name}/chapters/{chapter_index}")
+def v2_get_chapter(project_name: str, chapter_index: int):
+    """读取单章正文。"""
+    try:
+        db = ProjectDB(project_name)
+        chapter = db.get_chapter(chapter_index)
+        db.close()
+        if chapter is None:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+        return chapter
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/v2/projects/{project_name}/chapters/{chapter_index}")
+def v2_update_chapter(project_name: str, chapter_index: int, body: dict):
+    """人工编辑章节（标题/摘要/正文）。"""
+    try:
+        db = ProjectDB(project_name)
+        title = body.get("title", "")
+        summary = body.get("summary", "")
+        content = body.get("content", None)
+        status = body.get("status", "drafted")
+        db.upsert_chapter(
+            chapter_index=chapter_index,
+            title=title,
+            summary=summary,
+            status=status,
+            content=content,
+        )
+        db.close()
+        return {"success": True, "chapter_index": chapter_index}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v2/projects/{project_name}/memory")
+def v2_list_memory(project_name: str):
+    """记忆条目列表。"""
+    try:
+        db = ProjectDB(project_name)
+        items = db.list_memory()
+        db.close()
+        return {"memory": items}
+    except Exception as e:
+        return {"memory": [], "error": str(e)}
+
+
+@app.post("/api/v2/projects/{project_name}/memory")
+def v2_add_memory(project_name: str, body: dict):
+    """添加一条记忆。"""
+    try:
+        db = ProjectDB(project_name)
+        mem_type = body.get("type", "note")
+        content = body.get("content", "")
+        chapter_ref = int(body.get("chapter_ref", 0) or 0)
+        db.add_memory(mem_type, content, chapter_ref)
+        db.close()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v2/projects/{project_name}/confirm-outline")
+def v2_confirm_outline(project_name: str):
+    """人工审查大纲后，推进到写作阶段。"""
+    try:
+        db = ProjectDB(project_name)
+        info = db.to_dict()
+        db.close()
+        pe = ProjectExecutor(project_name, [])
+        data = pe.confirm_outline_and_continue()
+        return {"success": True, "stage": "writing", "project": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v2/projects/{project_name}/reject-outline")
+def v2_reject_outline(project_name: str):
+    """审查不通过，停留在 outline 状态，让用户修改/重新生成。"""
+    try:
+        pe = ProjectExecutor(project_name, [])
+        data = pe.reject_outline_and_restart()
+        return {"success": True, "stage": "outline", "project": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v2/projects/run-stage")
+async def v2_run_stage(req: _ProjectRunStage):
+    """启动一个阶段的引擎（流式 SSE 返回）。"""
+    return EventSourceResponse(_v2_run_stage_stream(req))
+
+
+async def _v2_run_stage_stream(req: _ProjectRunStage):
+    """阶段执行的 SSE 流。每次产出事件包含：进度/产出/阶段完成/暂停。"""
+    try:
+        # 先把 outline_review_mode 写入项目元数据
+        if req.outline_review_mode and req.stage == "outline":
+            try:
+                db = ProjectDB(req.project_name)
+                db.update_project(outline_review_mode=req.outline_review_mode)
+                db.close()
+            except Exception:
+                pass
+
+        # 解析 presets：
+        # 优先用请求里的 presets；如果为空，尝试从项目数据库读取
+        presets = list(req.presets or [])
+        if not presets:
+            try:
+                db = ProjectDB(req.project_name)
+                project_presets = db.get_presets()
+                db.close()
+                # 把 DB 里存的是 {manager:{...} 形式，转换为 executor 需要的 list[dict]
+                preset_list = []
+                for role in ("manager", "worker", "reviewer"):
+                    p = project_presets.get(role) or {}
+                    if p and isinstance(p, dict) and p.get("api_key"):
+                        preset_list.append(p)
+                if preset_list:
+                    presets = preset_list
+            except Exception:
+                pass
+
+        executor = ProjectExecutor(req.project_name, presets)
+        q = asyncio.Queue()
+
+        def q_yield(msg):
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                pass
+
+        exec_task = asyncio.create_task(
+            executor.run_stage(
+                stage=req.stage,
+                task=req.task,
+                outline_review_mode=req.outline_review_mode,
+                yield_func=q_yield,
+            )
+        )
+
+        # 发送初始消息
+        q_yield({
+            "status": "start",
+            "stage": req.stage,
+            "project_name": req.project_name,
+            "message": f"开始 {req.stage} 阶段",
+        })
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=0.5)
+                yield {"data": json.dumps(msg, ensure_ascii=False)}
+            except asyncio.TimeoutError:
+                if exec_task.done():
+                    # 清空队列里的剩余消息
+                    while not q.empty():
+                        try:
+                            msg = q.get_nowait()
+                            yield {"data": json.dumps(msg, ensure_ascii=False)}
+                        except asyncio.QueueEmpty:
+                            break
+                    break
+
+        try:
+            result = await exec_task
+            yield {"data": json.dumps({"status": "finished", "result": result, "stage": req.stage}, ensure_ascii=False)}
+        except Exception as e:
+            yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+
+    except Exception as e:
+        yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+
+
+@app.post("/api/v2/projects/{project_name}/stop")
+async def v2_stop_stage(project_name: str):
+    """停止当前项目的引擎执行。"""
+    try:
+        # 粗暴做法：取消全局 executor
+        if GraphExecutor._current_executor:
+            try:
+                GraphExecutor._current_executor.cancelled = True
+            except Exception:
+                pass
+        return {"success": True, "project_name": project_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v2/projects/migrate-old")
+def v2_migrate_old_projects(body: dict = {}):
+    """迁移旧 run_* 目录到新项目系统。支持 dry-run。"""
+    import subprocess
+    dry = "1" if body.get("dry_run", False) else ""
+    force = "1" if body.get("force", False) else ""
+    cmd = ["python", os.path.join(os.path.dirname(os.path.abspath(__file__)), "migration.py")]
+    if dry:
+        cmd.append("--dry-run")
+    if force:
+        cmd.append("--force")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                                cwd=os.path.dirname(os.path.abspath(__file__)))
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================
+# API — Project Assistant (AI Chat)
+# ============================================
+
+@app.post("/api/v2/projects/{project_name}/assistant/chat")
+def v2_assistant_chat(project_name: str, body: _AssistantChat):
+    """项目 AI 助理：结合项目上下文，自然语言问答。"""
+    try:
+        pa = ProjectAssistant(project_name, body.presets or [])
+        reply = pa.chat(body.message)
+        return {"success": True, "reply": reply, "project_name": project_name}
+    except Exception as e:
+        return {"success": False, "reply": f"(助理出错：{e})", "error": str(e)}
+
+
+class _AiAddCharacter(BaseModel):
+    description: str
+    presets: List[dict] = []
+    preset_name: str = ""  # 指定使用哪个预设（AI 对话模型）
+
+
+class _DeleteCharacter(BaseModel):
+    name: str  # 要删除的角色名
+    presets: List[dict] = []
+    preset_name: str = ""
+
+
+def _remove_character_from_md(md: str, name: str) -> Tuple[str, bool]:
+    """
+    从 characters.md 中删除名为 name 的角色块。
+    块定义为：以 N. **name** 开头的行（后跟缩进属性），直到下一个 N. 块或 ## 标题前。
+    返回 (new_md, found)。
+    """
+    lines = md.split("\n")
+    out = []
+    i = 0
+    found = False
+    name_pat = re.compile(r"^\s*\d+[\.、]\s*\**" + re.escape(name) + r"\**\s*[:：]?\s*$")
+    while i < len(lines):
+        line = lines[i]
+        if not found and name_pat.match(line):
+            # 找到目标，删除本行 + 后续缩进行
+            found = True
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                # 下一段编号 或 下一个 ## 标题 → 停止删除
+                if re.match(r"^\s*\d+[\.、]\s*\*", nxt) or nxt.lstrip().startswith("## "):
+                    break
+                # 顶级 # 标题也停止
+                if nxt.lstrip().startswith("# ") and not nxt.lstrip().startswith("## "):
+                    break
+                i += 1
+            # 删完后回退一步以便外层 while 能处理这个新行
+            # 但其实我们已经把它从 out 跳过了，不需要回退
+            continue
+        out.append(line)
+        i += 1
+    return ("\n".join(out), found)
+
+
+@app.post("/api/v2/projects/{project_name}/delete-character")
+def v2_delete_character(project_name: str, body: _DeleteCharacter):
+    """
+    删除指定名称的角色。
+    可选：先用 AI 校验要删除的 name 是否与文件中某个角色匹配（模糊匹配）。
+    """
+    try:
+        if not body.name.strip():
+            return {"success": False, "error": "角色名不能为空"}
+
+        char_path = get_project_file(project_name, "characters.md")
+        if not os.path.exists(char_path):
+            return {"success": False, "error": "characters.md 不存在"}
+
+        with open(char_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # 先按精确名字匹配，找不到则尝试去掉空格
+        target = body.name.strip()
+        new_content, found = _remove_character_from_md(content, target)
+        if not found:
+            # 尝试全角/半角规整
+            for ch in [target.replace(" ", ""), target.replace("：", ":"), target.strip("**")]:
+                new_content, found = _remove_character_from_md(content, ch)
+                if found:
+                    break
+
+        if not found:
+            return {"success": False, "error": f"未找到角色「{target}」"}
+
+        # 清理：把因删除留下的连续空行合并
+        new_content = re.sub(r"\n{3,}", "\n\n", new_content).rstrip() + "\n"
+
+        with open(char_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        # 更新 memory
+        db = ProjectDB(project_name)
+        db.add_memory("character", f"删除角色：{target}", 0)
+        db.close()
+
+        return {
+            "success": True,
+            "removed": target,
+            "file_path": "characters.md",
+            "size": len(new_content),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/v2/projects/{project_name}/ai-add-character")
+def v2_ai_add_character(project_name: str, body: _AiAddCharacter):
+    """
+    使用 AI 把作者的自然语言人物描述，转换为符合 characters.md 格式的 markdown
+    并自动追加到文件中。
+    """
+    try:
+        if not body.description.strip():
+            return {"success": False, "error": "描述不能为空"}
+
+        # 1. 读取现有 characters.md
+        char_path = get_project_file(project_name, "characters.md")
+        existing = ""
+        if os.path.exists(char_path):
+            with open(char_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+
+        # 2. 调 LLM 生成格式化的人物条目
+        pa = ProjectAssistant(project_name, body.presets or [], body.preset_name or "")
+        new_block = pa.format_character(body.description, existing)
+
+        if not new_block or new_block.startswith("<!--"):
+            return {
+                "success": False,
+                "error": new_block or "AI 未能生成人物条目（请检查 AI 对话模型配置）",
+            }
+
+        # 3. 拼接到文件：如果文件为空就先建一个最小骨架，否则追加在末尾
+        if not existing.strip():
+            # 先取一下项目名/标题
+            db = ProjectDB(project_name)
+            info = db.get_project()
+            db.close()
+            proj_title = info.get("title") or project_name
+            new_content = (
+                f"# 《{proj_title}》主要人物设定\n\n"
+                f"## 人物列表\n\n"
+                f"{new_block}\n"
+            )
+        else:
+            # 尝试在「## 人物列表」之后插入；否则直接追加到末尾
+            marker = "## 人物列表"
+            if marker in existing:
+                # 在 人物列表 段尾插入：在该段后下一个 ## 标题之前
+                # 简化策略：把 人物列表 这一段所有内容都取出，在它后面追加
+                parts = existing.split(marker, 1)
+                head = parts[0]  # 包含 # 标题 + 人物列表 标题
+                rest = parts[1]  # 人物列表标题之后的内容
+                # 找到 rest 中下一个 ## 标题位置
+                m = re.search(r"^## ", rest, flags=re.MULTILINE)
+                if m:
+                    body_section = rest[:m.start()]
+                    tail_section = rest[m.start():]
+                    # body_section 末尾去多余空行
+                    body_section = body_section.rstrip() + "\n\n" + new_block + "\n\n"
+                    new_content = head + marker + body_section + tail_section
+                else:
+                    # 没有下一个标题，直接追加
+                    new_content = existing.rstrip() + "\n\n" + new_block + "\n"
+            else:
+                new_content = existing.rstrip() + "\n\n" + new_block + "\n"
+
+        # 4. 写回文件
+        os.makedirs(os.path.dirname(char_path), exist_ok=True)
+        with open(char_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        # 5. 更新 memory
+        db = ProjectDB(project_name)
+        db.add_memory("character", f"AI 添加人物设定（{len(new_block)}字）", 0)
+        db.close()
+
+        return {
+            "success": True,
+            "new_block": new_block,
+            "file_path": "characters.md",
+            "size": len(new_content),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/v2/projects/{project_name}/assistant/suggest-next")
+def v2_assistant_suggest_next(project_name: str, body: dict = {}):
+    """建议下一章节怎么写。"""
+    try:
+        presets = body.get("presets", []) if body else []
+        pa = ProjectAssistant(project_name, presets)
+        reply = pa.suggest_next_chapter()
+        return {"success": True, "reply": reply}
+    except Exception as e:
+        return {"success": False, "reply": "", "error": str(e)}
+
+
+@app.post("/api/v2/projects/{project_name}/assistant/analyze-consistency")
+def v2_assistant_analyze(project_name: str, body: dict = {}):
+    """检查全文一致性问题。"""
+    try:
+        presets = body.get("presets", []) if body else []
+        pa = ProjectAssistant(project_name, presets)
+        reply = pa.analyze_consistency()
+        return {"success": True, "reply": reply}
+    except Exception as e:
+        return {"success": False, "reply": "", "error": str(e)}
+
+
+@app.get("/api/v2/projects/{project_name}/chat")
+def v2_list_chat_history(project_name: str):
+    """对话历史记录。"""
+    try:
+        db = ProjectDB(project_name)
+        chat = db.list_chat()
+        db.close()
+        return {"chat": chat}
+    except Exception as e:
+        return {"chat": [], "error": str(e)}
+
+
+# ============================================
+# API — Raw file access (项目文件直接读写)
+# ============================================
+
+@app.get("/api/v2/projects/{project_name}/file/{file_path:path}")
+def v2_get_project_file(project_name: str, file_path: str):
+    """读取项目内任意文件（outline.md, characters.md 等）。"""
+    try:
+        if ".." in file_path:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        full_path = get_project_file(project_name, file_path)
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"path": file_path, "content": content}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/v2/projects/{project_name}/file/{file_path:path}")
+def v2_put_project_file(project_name: str, file_path: str, body: dict):
+    """写入项目内任意文件。"""
+    try:
+        if ".." in file_path:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        content = body.get("content", "")
+        full_path = get_project_file(project_name, file_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        # 如果是大纲或人物设定，顺便更新 memory 条目
+        db = ProjectDB(project_name)
+        if file_path == "outline.md":
+            db.add_memory("outline", f"outline.md 已手工更新（{len(content)}字）", 0)
+        elif file_path == "characters.md":
+            db.add_memory("character", f"characters.md 已手工更新（{len(content)}字）", 0)
+        db.close()
+        return {"success": True, "file": file_path, "size": len(content)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================
 # Startup
