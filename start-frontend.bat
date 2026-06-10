@@ -1,4 +1,5 @@
 @echo off
-cd /d "D:\Vibecoding\opencodetask\omni-agent-hub\frontend"
-npm run dev
+chcp 65001 >nul
+cd /d "%~dp0frontend"
+npm run dev -- --port 5176
 pause
