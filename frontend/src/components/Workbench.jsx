@@ -465,9 +465,13 @@ export default function Workbench({
 
   // ---- Stop task ----
   const handleStopTask = useCallback(async () => {
-    try { await fetch(`${API_BASE}/stop-task`, { method: "POST" }).catch(() => {}) } catch (e) {}
-    setIsRunning(false); showNotification && showNotification(t("taskStopped"), "info"); loadTasks()
-  }, [showNotification, t, setIsRunning, loadTasks])
+    if (activeProject && stopTask) {
+      await stopTask(activeProject.name)
+    } else {
+      try { await fetch(`${API_BASE}/stop-task`, { method: "POST" }).catch(() => {}) } catch (e) {}
+      setIsRunning(false)
+    }
+  }, [activeProject, stopTask, setIsRunning])
 
   // ---- Task click ----
   const handleTaskClick = useCallback(async (folder) => {

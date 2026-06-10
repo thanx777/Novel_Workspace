@@ -171,9 +171,16 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   }, [showNotification, loadProject])
 
   // ---------- 停止 ----------
+  const runStageAbortRef = useRef(null)  // 当前正在跑的请求，可被 stopTask 取消
+
   const stopTask = useCallback(async (name) => {
     try {
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/stop`, { method: "POST" })
+      // 停止旧引擎
+      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/stop`, { method: "POST" }).catch(() => {})
+      // 停止新引擎
+      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/stop`, { method: "POST" }).catch(() => {})
+      // 中断前端 SSE 请求
+      if (runStageAbortRef.current) { try { runStageAbortRef.current.abort() } catch (e) {} }
       setIsRunning(false)
       showNotification && showNotification(t?.("taskStopped") || "已停止", "info")
       await loadProject(name)
@@ -183,7 +190,6 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   }, [showNotification, loadProject, t])
 
   // ---------- 启动阶段（流式 SSE） ----------
-  const runStageAbortRef = useRef(null)  // 当前正在跑的请求，可被 stopStage 取消
 
   const runStage = useCallback(async ({
     projectName, stage, task = "",

@@ -22,6 +22,9 @@ from memory_pipeline import IngestPipeline
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
 
+# 当前运行的引擎引用（用于 stop 端点取消）
+_running_engine = None
+
 
 # ============================================================
 # 数据模型
@@ -505,6 +508,7 @@ async def outline_generate_stream(name: str, req: OutlineGenerateRequest):
 
 
 async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
+    global _running_engine
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)
     global_presets = _get_global_presets()
@@ -527,6 +531,9 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         genre=_get_project_genre(name),
         yield_func=q_emit,
     )
+
+    global _running_engine
+    _running_engine = engine
 
     q_emit({"status": "start", "stage": "outline", "message": "🚀 开始大纲生成"})
 
@@ -562,6 +569,9 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         yield {"data": json.dumps({"status": "done", "stage": "outline", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+    finally:
+        if _running_engine is engine:
+            _running_engine = None
 
 
 @router.post("/projects/{name}/writing/start/stream")
@@ -571,6 +581,7 @@ async def writing_start_stream(name: str, req: WritingStartRequest):
 
 
 async def _writing_start_stream(name: str, req: WritingStartRequest):
+    global _running_engine
     project_dir = get_project_dir(name)
     db = ProjectDB(name)
     project_presets = db.get_presets()
@@ -597,6 +608,9 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
         genre=_get_project_genre(name),
         yield_func=q_emit,
     )
+
+    global _running_engine
+    _running_engine = engine
 
     q_emit({"status": "start", "stage": "writing", "message": "🚀 开始写作"})
 
@@ -632,6 +646,9 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
         yield {"data": json.dumps({"status": "done", "stage": "writing", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+    finally:
+        if _running_engine is engine:
+            _running_engine = None
 
 
 @router.post("/projects/{name}/review/start/stream")
@@ -664,6 +681,9 @@ async def _review_start_stream(name: str):
         yield_func=q_emit,
     )
 
+    global _running_engine
+    _running_engine = engine
+
     q_emit({"status": "start", "stage": "review", "message": "🚀 开始全局审校"})
 
     exec_task = asyncio.create_task(engine.run_review())
@@ -695,3 +715,17 @@ async def _review_start_stream(name: str):
         yield {"data": json.dumps({"status": "done", "stage": "review", "result": str(result)[:500]}, ensure_ascii=False)}
     except Exception as e:
         yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+    finally:
+        if _running_engine is engine:
+            _running_engine = None
+
+
+@router.post("/projects/{name}/engine/stop")
+async def engine_stop(name: str):
+    """停止当前运行的引擎。"""
+    global _running_engine
+    if _running_engine is not None:
+        _running_engine.cancelled = True
+        _running_engine = None
+        return {"success": True, "message": "引擎已停止"}
+    return {"success": True, "message": "没有正在运行的引擎"}

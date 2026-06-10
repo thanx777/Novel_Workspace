@@ -442,6 +442,11 @@ class WritingEngine(BaseEngine):
         max_consecutive_failures = 5
 
         for ch in range(start_chapter, self.total_chapters + 1):
+            # 检查是否已被用户取消
+            if self.cancelled:
+                self._emit({"status": "writing_cancelled", "chapter": ch, "reason": "用户取消"})
+                break
+
             r = await self.write_chapter(ch)
             results.append(r)
             self._emit({"status": "chapter_completed", "chapter": ch, "progress": f"{ch}/{self.total_chapters}"})

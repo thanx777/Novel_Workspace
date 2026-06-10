@@ -76,6 +76,7 @@ class BaseEngine(ABC):
         self.genre_adapter = GenreAdapter(genre_name=genre)
         self.hallucination_guard = HallucinationGuardAdapter()
         self.yield_func = yield_func or (lambda x: None)
+        self.cancelled = False  # 外部可设置，用于中断 MWR 循环
 
     def _emit(self, data: Dict):
         """发送状态更新。"""
@@ -97,6 +98,11 @@ class BaseEngine(ABC):
         prev_issues_key = None
 
         for round_num in range(1, max_rounds + 1):
+            # 检查是否已被用户取消
+            if self.cancelled:
+                self._emit({"status": "cycle_cancelled", "round": round_num, "reason": "用户取消"})
+                return last_result or ReviewResult(score=0.0, issues=["用户取消"])
+
             self._emit({"status": "mwr_round", "round": round_num, "max_rounds": max_rounds})
 
             # 1. Manager 决定任务
