@@ -25,8 +25,20 @@ Thumbs.db
 backend/config.json
 
 # Workspace runtime data
-backend/workspace/run_*/
-backend/workspace/state.json
+backend/workspace/
+workspace/
+
+# Logs
+logs/
+backend/server.log
+
+# Test artifacts
+_test_*.py
+test_screenshots/
+test_walkthrough/
+
+# Trae internal
+.trae/
 
 # Backup files
 *.bak

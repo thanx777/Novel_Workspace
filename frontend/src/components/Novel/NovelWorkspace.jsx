@@ -46,7 +46,7 @@ export default function NovelWorkspace({
 
   // === Start Task ===
   const handleStartTask = useCallback(async (taskData) => {
-    const { novelTitle, genre, chapterCount, taskInput: extraReq, outlineReviewMode, executionMode: mode } = taskData
+    const { novelTitle, genre, chapterCount, taskInput: extraReq, executionMode: mode } = taskData
     setExecutionMode(mode)
 
     // Build task content
@@ -83,7 +83,6 @@ export default function NovelWorkspace({
           conversation_history: [],
           stage_timeout_seconds: 600,
           execution_mode: mode,
-          outline_review_mode: outlineReviewMode,
           outline_layers: outlineLayers || { L1: true, L2: true, L3: true },
         })
       })

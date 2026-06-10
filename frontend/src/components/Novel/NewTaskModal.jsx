@@ -9,7 +9,6 @@ export default function NewTaskModal({
   const [chapterCount, setChapterCount] = useState("")
   const [taskInput, setTaskInput] = useState("")
   const [genre, setGenre] = useState("")
-  const [outlineReviewMode, setOutlineReviewMode] = useState("auto")
   const [executionMode, setExecutionMode] = useState("lite")
   const [outlineLayers, setOutlineLayers] = useState({ L1: true, L2: true, L3: true })
   const [managerIdx, setManagerIdx] = useState(-1)
@@ -25,7 +24,7 @@ export default function NewTaskModal({
   const handleClose = () => {
     setShow(false)
     setNovelTitle(""); setChapterCount(""); setTaskInput(""); setGenre("")
-    setOutlineReviewMode("auto"); setExecutionMode("lite")
+    setExecutionMode("lite")
     setOutlineLayers({ L1: true, L2: true, L3: true })
     setManagerIdx(-1); setWorkerIdx(-1); setReviewerIdx(-1)
   }
@@ -44,7 +43,6 @@ export default function NewTaskModal({
       genre,
       chapterCount,
       taskInput: taskInput.trim(),
-      outlineReviewMode,
       executionMode,
       outlineLayers: layers,
       managerPreset: presets[managerIdx],
@@ -161,31 +159,6 @@ export default function NewTaskModal({
             )}
           </div>
 
-          {/* Outline review mode */}
-          <div className="form-group">
-            <label> {language === "zh" ? "大纲审核" : "Outline Review"}</label>
-            <div className="mode-selector mode-selector-2">
-              {[
-                { key: "auto", label: language === "zh" ? "AI 自动审核" : "AI Auto Review", desc: language === "zh" ? "AI 自动审核大纲质量" : "AI reviews outline automatically" },
-                { key: "manual", label: language === "zh" ? "人工确认" : "Manual Confirm", desc: language === "zh" ? "生成大纲后暂停，人工确认再继续" : "Pause after outline, manual confirm" },
-              ].map(m => (
-                <div
-                  key={m.key}
-                  className={`mode-card ${outlineReviewMode === m.key ? "active" : ""}`}
-                  onClick={() => setOutlineReviewMode(m.key)}
-                >
-                  <div className="mode-card-radio">
-                    <div className={`radio-dot ${outlineReviewMode === m.key ? "checked" : ""}`} />
-                  </div>
-                  <div className="mode-card-text">
-                    <span className="mode-card-label">{m.label}</span>
-                    <span className="mode-card-desc">{m.desc}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
           {/* Per-role model assignment */}
           <div className="form-group">
             <label> {language === "zh" ? "AI 模型分配" : "AI Model Assignment"}</label>
@@ -242,9 +215,7 @@ export default function NewTaskModal({
           </button>
           <button className="btn btn-primary btn-start" onClick={handleStart}
             disabled={isRunning || !novelTitle.trim() || !chapterCount || !allRolesAssigned}>
-            {isRunning ? " ⏳ ..." : (outlineReviewMode === "manual"
-              ? (language === "zh" ? "生成大纲（人工确认）" : "Generate Outline (Manual)")
-              : (language === "zh" ? "🚀 开始写作" : "🚀 Start Writing"))}
+            {isRunning ? " ⏳ ..." : (language === "zh" ? "🚀 开始写作" : "🚀 Start Writing")}
           </button>
         </div>
       </div>

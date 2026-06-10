@@ -19,6 +19,11 @@ export default function ProjectCenter({
     createProject, deleteProject, loadProject,
     runStage, confirmOutline, rejectOutline, stopTask, isRunning,
     updateChapter, addMemory, assistantChat,
+    // 新引擎 API
+    getEngineState,
+    engineOutlineGenerate, engineOutlineChat, getOutlineState,
+    engineWritingStart, engineWritingChat, getWritingState,
+    engineReviewStart, getReviewState,
     putFile, getFile, migrateOld,
     loadProjectPresets, saveProjectPresets,
   } = projectV2
@@ -52,8 +57,21 @@ export default function ProjectCenter({
   // 阶段启动参数
   const [showStageModal, setShowStageModal] = useState(false)
   const [selectedStage, setSelectedStage] = useState("outline")
+
+  // 引擎状态轮询
+  const [engineState, setEngineState] = useState(null)
+  useEffect(() => {
+    if (!activeProject) { setEngineState(null); return }
+    let timer
+    const poll = async () => {
+      const state = await getEngineState(activeProject.name)
+      if (state) setEngineState(state)
+    }
+    poll()
+    timer = setInterval(poll, 5000) // 5 秒轮询
+    return () => clearInterval(timer)
+  }, [activeProject?.name])
   const [taskInput, setTaskInput] = useState("")
-  const [outlineReviewMode, setOutlineReviewMode] = useState("manual")  // 默认 manual：人工确认大纲
 
   // 日志面板状态
   const [runLogs, setRunLogs] = useState([])
@@ -183,9 +201,8 @@ export default function ProjectCenter({
   // ============ 直接启动写作（不弹模态框；点按钮 = 确认大纲） ============
   const handleStartWritingDirectly = async () => {
     if (!activeProject) return
-    // 1) 先把项目状态推进到 writing（如果还在 outline_review）
-    if (activeProject.current_stage === "outline_review" ||
-        (activeProject.current_stage === "outline" && activeProject.outline_review_mode !== "auto")) {
+    // 1) 先把项目状态推进到 writing（如果还在 outline）
+    if (activeProject.current_stage === "outline") {
       try {
         await confirmOutline(activeProject.name)
       } catch (e) {
@@ -203,7 +220,6 @@ export default function ProjectCenter({
       projectName: activeProject.name,
       stage: "writing",
       task: taskInput,
-      outlineReviewMode: "manual",
       onLogEvent: appendRunLog,
     })
   }
@@ -224,7 +240,6 @@ export default function ProjectCenter({
       projectName: activeProject.name,
       stage: selectedStage,
       task: taskInput,
-      outlineReviewMode,
       onLogEvent: appendRunLog,
     })
   }
@@ -664,31 +679,56 @@ export default function ProjectCenter({
 
         {/* 右：大纲审核提示条（当处于 outline 阶段且需要人工审核时） */}
         <aside className="project-rightbar">
-          {activeProject?.current_stage === "outline" && activeProject?.outline_review_mode !== "auto" && (
-            <div className="review-card">
-              <div className="review-title">📝 大纲等待审核</div>
-              <div className="review-desc">AI 已生成大纲，请检查后决定是否推进到写作阶段。</div>
-              <div className="review-actions">
-                <button className="pc-btn primary" onClick={() => confirmOutline(activeProject.name)}>✓ 确认，开始写作</button>
-                <button className="pc-btn" onClick={() => rejectOutline(activeProject.name)}>✗ 驳回重写</button>
-              </div>
-            </div>
-          )}
           <div className="stage-card">
             <div className="stage-card-title">🎯 当前阶段</div>
             <div className="stage-card-main">
-              {activeProject ? stageLabel(activeProject.current_stage || "outline") : "—"}
+              {engineState ? stageLabel(engineState.current_stage || "outline") : (activeProject ? stageLabel(activeProject.current_stage || "outline") : "—")}
             </div>
             {activeProject && (
               <>
                 <div className="stage-card-sub">
+                  {engineState && (
+                    <>
+                      {engineState.current_stage === "outline" && (
+                        <div>大纲：{engineState.outline?.status || "pending"} · 已完成：{(engineState.outline?.completed_layers || []).join(", ") || "—"}</div>
+                      )}
+                      {engineState.current_stage === "writing" && (
+                        <div>写作进度：{engineState.writing?.progress || "0/0"}</div>
+                      )}
+                      {engineState.current_stage === "review" && (
+                        <div>审校：{engineState.review?.status || "pending"} · 已完成维度：{(engineState.review?.dimensions_done || []).join(", ") || "—"}</div>
+                      )}
+                    </>
+                  )}
                   <div>章节进度：{activeProject.chapters_done || 0} / {activeProject.total_chapters || "?"}</div>
                   <div>总字数：{activeProject.total_words || 0}</div>
                 </div>
                 <div className="stage-actions">
-                  <button className="pc-btn small" onClick={() => { setSelectedStage("outline"); setShowStageModal(true) }}>重新生成大纲</button>
-                  <button className="pc-btn small primary" onClick={handleStartWritingDirectly}>继续写作 ▶</button>
-                  <button className="pc-btn small" onClick={() => { setSelectedStage("polish"); setShowStageModal(true) }}>整体润色</button>
+                  <button className="pc-btn small" disabled={isRunning} onClick={async () => {
+                    if (!activeProject) return
+                    clearRunLogs()
+                    appendRunLog({ status: "info", role: "系统", message: "▶ 准备启动大纲阶段...", timestamp: Date.now() })
+                    setRightPanel("logs")
+                    await engineOutlineGenerate(activeProject.name, { onLogEvent: appendRunLog })
+                  }}>生成大纲</button>
+                  <button className="pc-btn small primary" disabled={isRunning} onClick={async () => {
+                    if (!activeProject) return
+                    clearRunLogs()
+                    appendRunLog({ status: "info", role: "系统", message: "▶ 准备启动写作阶段...", timestamp: Date.now() })
+                    setRightPanel("logs")
+                    await engineWritingStart(activeProject.name, {
+                      startChapter: 1,
+                      totalChapters: activeProject.total_chapters || 100,
+                      onLogEvent: appendRunLog,
+                    })
+                  }}>开始写作 ▶</button>
+                  <button className="pc-btn small" disabled={isRunning} onClick={async () => {
+                    if (!activeProject) return
+                    clearRunLogs()
+                    appendRunLog({ status: "info", role: "系统", message: "▶ 准备启动审校阶段...", timestamp: Date.now() })
+                    setRightPanel("logs")
+                    await engineReviewStart(activeProject.name, { onLogEvent: appendRunLog })
+                  }}>全局审校</button>
                 </div>
               </>
             )}
@@ -756,15 +796,6 @@ export default function ProjectCenter({
                   rows={3}
                 />
               </div>
-              {selectedStage === "outline" && (
-                <div className="editor-field">
-                  <label>大纲审核模式</label>
-                  <select value={outlineReviewMode} onChange={(e) => setOutlineReviewMode(e.target.value)}>
-                    <option value="manual">人工审核（生成后等你确认再写正文）</option>
-                    <option value="auto">自动推进（生成大纲后直接进入写作）</option>
-                  </select>
-                </div>
-              )}
             </div>
             <div className="modal-actions">
               <button className="pc-btn" onClick={() => setShowStageModal(false)}>取消</button>

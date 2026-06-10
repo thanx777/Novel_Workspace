@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { API_BASE } from '../constants'
 
 export default function useNovelTask({ showNotification }) {
@@ -6,7 +6,6 @@ export default function useNovelTask({ showNotification }) {
   const [chapterCount, setChapterCount] = useState('')
   const [genre, setGenre] = useState('')
   const [novelTitle, setNovelTitle] = useState('')
-  const [outlineReviewMode, setOutlineReviewMode] = useState('auto') // 'auto' | 'manual'
   const [isRunning, setIsRunning] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [logs, setLogs] = useState([])
@@ -80,7 +79,6 @@ export default function useNovelTask({ showNotification }) {
           conversation_history: [],
           stage_timeout_seconds: 600,
           execution_mode: 'lite',
-          outline_review_mode: outlineReviewMode,
         })
       })
 
@@ -126,7 +124,7 @@ export default function useNovelTask({ showNotification }) {
     }
     setIsRunningWrapper(false)
     abortRef.current = null
-  }, [novelTitle, genre, chapterCount, taskInput, outlineReviewMode, setIsRunningWrapper, showNotification])
+  }, [novelTitle, genre, chapterCount, taskInput, setIsRunningWrapper, showNotification])
 
   const stopTask = useCallback(async () => {
     if (abortRef.current) abortRef.current.abort()
@@ -143,7 +141,6 @@ export default function useNovelTask({ showNotification }) {
     genre, setGenre,
     taskInput, setTaskInput,
     chapterCount, setChapterCount,
-    outlineReviewMode, setOutlineReviewMode,
     isRunning,
     elapsed,
     logs,

@@ -21,11 +21,22 @@ from typing import Dict, List, Optional, Any, Tuple
 NODE_TYPES = {
     "chapter", "character", "scene", "plot_thread",
     "foreshadowing", "world_fact", "outline_node",
+    # 新增：体裁/节奏相关
+    "genre_rule",    # 体裁规则节点（禁忌、爽点类型、疲劳词、节奏规则）
+    "strand_tag",    # Strand 标签（Quest/Fire/Constellation）
+    "coolpoint",     # 爽点事件（装逼打脸/越级反杀等）
+    "hook",          # 钩子事件（危机钩/悬念钩/情绪钩等）
 }
 
 EDGE_TYPES = {
     "appears_in", "happens_in", "belongs_to",
     "related_to", "foreshadows", "derived_from",
+    # 新增：关系/节奏边
+    "relates_to",    # 角色间关系（师徒/恋人/敌对等）
+    "tagged_as",     # 章节被标注为某 Strand 类型
+    "triggers",      # 钩子触发下一章
+    "pays_off",      # 爽点兑现伏笔
+    "governed_by",   # 受体裁规则约束
 }
 
 # 节点类型颜色（前端用）
@@ -37,6 +48,10 @@ NODE_COLORS = {
     "scene": "#06b6d4",         # 青
     "world_fact": "#6b7280",    # 灰
     "plot_thread": "#eab308",   # 黄
+    "genre_rule": "#ef4444",    # 红
+    "strand_tag": "#14b8a6",    # 蓝绿
+    "coolpoint": "#f59e0b",     # 琥珀
+    "hook": "#8b5cf6",          # 紫罗兰
 }
 
 LAYER_COLORS = {

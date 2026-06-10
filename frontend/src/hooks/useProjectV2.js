@@ -186,7 +186,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   const runStageAbortRef = useRef(null)  // 当前正在跑的请求，可被 stopStage 取消
 
   const runStage = useCallback(async ({
-    projectName, stage, task = "", outlineReviewMode = "manual",
+    projectName, stage, task = "",
     onLogEvent = null,
   }) => {
     if (!projectName) return
@@ -224,7 +224,6 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project_name: projectName, stage, task,
-          outline_review_mode: outlineReviewMode,
           presets: presetsPayload,
         }),
         signal: abortCtrl.signal,
@@ -396,6 +395,207 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     }
   }, [])
 
+  // ---------- 引擎状态 ----------
+  const getEngineState = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/state`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      return await resp.json()
+    } catch (e) {
+      return null
+    }
+  }, [])
+
+  // ---------- 引擎：启动大纲生成（SSE 流式） ----------
+  const engineOutlineGenerate = useCallback(async (name, { layer = "", requirements = "", onLogEvent = null } = {}) => {
+    setIsRunning(true)
+    const abortCtrl = new AbortController()
+    runStageAbortRef.current = abortCtrl
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/outline/generate/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ layer, requirements }),
+        signal: abortCtrl.signal,
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error("No stream reader")
+      const decoder = new TextDecoder()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value)
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (data.status === "done") showNotification && showNotification("大纲生成完成", "success")
+              if (data.status === "error") showNotification && showNotification(data.message || "大纲生成出错", "error")
+            } catch (e) {}
+          }
+        }
+      }
+      await loadProject(name)
+    } catch (e) {
+      if (e?.name === "AbortError") {
+        if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止大纲生成", timestamp: Date.now() })
+      } else {
+        showNotification && showNotification("大纲生成失败: " + e.message, "error")
+      }
+    } finally {
+      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      setIsRunning(false)
+    }
+  }, [showNotification, loadProject])
+
+  // ---------- 引擎：大纲 AI 对话 ----------
+  const engineOutlineChat = useCallback(async (name, message, layer = "") => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/outline/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, layer }),
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json()
+      return data.response || ""
+    } catch (e) {
+      showNotification && showNotification("大纲对话失败: " + e.message, "error")
+      return ""
+    }
+  }, [showNotification])
+
+  // ---------- 引擎：启动写作（SSE 流式） ----------
+  const engineWritingStart = useCallback(async (name, { startChapter = 1, totalChapters = 0, onLogEvent = null } = {}) => {
+    setIsRunning(true)
+    const abortCtrl = new AbortController()
+    runStageAbortRef.current = abortCtrl
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/writing/start/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start_chapter: startChapter, total_chapters: totalChapters }),
+        signal: abortCtrl.signal,
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error("No stream reader")
+      const decoder = new TextDecoder()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value)
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (data.status === "done") showNotification && showNotification("写作完成", "success")
+              if (data.status === "error") showNotification && showNotification(data.message || "写作出错", "error")
+            } catch (e) {}
+          }
+        }
+      }
+      await loadProject(name)
+    } catch (e) {
+      if (e?.name === "AbortError") {
+        if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止写作", timestamp: Date.now() })
+      } else {
+        showNotification && showNotification("写作失败: " + e.message, "error")
+      }
+    } finally {
+      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      setIsRunning(false)
+    }
+  }, [showNotification, loadProject])
+
+  // ---------- 引擎：写作 AI 对话 ----------
+  const engineWritingChat = useCallback(async (name, message, chapter = 0) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/writing/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, chapter }),
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json()
+      return data.response || ""
+    } catch (e) {
+      showNotification && showNotification("写作对话失败: " + e.message, "error")
+      return ""
+    }
+  }, [showNotification])
+
+  // ---------- 引擎：启动全局审校（SSE 流式） ----------
+  const engineReviewStart = useCallback(async (name, { onLogEvent = null } = {}) => {
+    setIsRunning(true)
+    const abortCtrl = new AbortController()
+    runStageAbortRef.current = abortCtrl
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/review/start/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortCtrl.signal,
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error("No stream reader")
+      const decoder = new TextDecoder()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value)
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (data.status === "done") showNotification && showNotification("全局审校完成", "success")
+              if (data.status === "error") showNotification && showNotification(data.message || "审校出错", "error")
+            } catch (e) {}
+          }
+        }
+      }
+      await loadProject(name)
+    } catch (e) {
+      if (e?.name === "AbortError") {
+        if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止审校", timestamp: Date.now() })
+      } else {
+        showNotification && showNotification("审校失败: " + e.message, "error")
+      }
+    } finally {
+      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      setIsRunning(false)
+    }
+  }, [showNotification, loadProject])
+
+  // ---------- 引擎：获取各阶段状态 ----------
+  const getOutlineState = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/outline/state`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      return await resp.json()
+    } catch (e) { return null }
+  }, [])
+
+  const getWritingState = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/writing/state`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      return await resp.json()
+    } catch (e) { return null }
+  }, [])
+
+  const getReviewState = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/review/state`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      return await resp.json()
+    } catch (e) { return null }
+  }, [])
+
   // ---------- 迁移旧项目 ----------
   const migrateOld = useCallback(async () => {
     try {
@@ -463,5 +663,10 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     putFile, getFile,
     migrateOld,
     loadProjectPresets, saveProjectPresets,
+    // 新引擎 API
+    getEngineState,
+    engineOutlineGenerate, engineOutlineChat, getOutlineState,
+    engineWritingStart, engineWritingChat, getWritingState,
+    engineReviewStart, getReviewState,
   }
 }

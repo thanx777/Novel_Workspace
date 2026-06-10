@@ -5,7 +5,6 @@ import { useState, useMemo } from "react"
  * 将 characters.md 解析为角色卡片，左侧列表 + 右侧预览
  * 支持"卡片视图"和"原始 markdown 视图"切换
  * 支持删除单个角色（带确认弹窗）
- * 支持锁定模式（locked=true 时禁用编辑/AI/删除）
  */
 
 const ROLE_PATTERNS = {
@@ -45,7 +44,6 @@ const ROLE_PATTERNS = {
 
 function detectRole(name, allText) {
   const lower = (name + " " + allText).toLowerCase()
-  // 按优先级匹配
   const priority = ["protagonist", "主角", "antagonist", "反派", "师父", "导师", "爱人", "妻子", "丈夫", "孩子", "配角", "反派"]
   for (const key of priority) {
     if (lower.includes(key.toLowerCase())) {
@@ -57,18 +55,10 @@ function detectRole(name, allText) {
 
 function getInitials(name) {
   if (!name) return "?"
-  // 中文取最后一个字
   if (/[\u4e00-\u9fa5]/.test(name)) return name.slice(-1)
-  // 英文取首字母
   return name.slice(0, 1).toUpperCase()
 }
 
-/**
- * 解析 characters.md → 角色数组
- * 支持两种格式：
- * 1) 1. **名字**  + 缩进属性
- * 2) ## 名字  + 段落属性
- */
 function parseCharacters(markdown) {
   if (!markdown || !markdown.trim()) return []
   const lines = markdown.split("\n")
@@ -80,7 +70,6 @@ function parseCharacters(markdown) {
     const line = lines[i]
     const trimmed = line.trim()
 
-    // 跳过空行和顶级标题
     if (trimmed.startsWith("# ") || trimmed.startsWith("## ")) {
       if (trimmed.startsWith("## ") && !trimmed.includes("列表") && !trimmed.includes("关系")) {
         section = trimmed.replace(/^##\s+/, "").trim()
@@ -90,33 +79,20 @@ function parseCharacters(markdown) {
     if (trimmed.startsWith("#")) continue
     if (!trimmed) continue
 
-    // 数字编号格式: 1. **名字**
     const numMatch = trimmed.match(/^\d+[\.、]\s*\**(.{1,30}?)\**\s*[:：]?\s*$/)
     if (numMatch) {
       if (current) characters.push(current)
-      current = {
-        name: numMatch[1].trim(),
-        section,
-        attributes: [],
-        raw: [line],
-      }
+      current = { name: numMatch[1].trim(), section, attributes: [], raw: [line] }
       continue
     }
 
-    // 二级标题作为角色名
     const headingMatch = trimmed.match(/^###\s+(.+)$/)
     if (headingMatch) {
       if (current) characters.push(current)
-      current = {
-        name: headingMatch[1].replace(/\*\*/g, "").trim(),
-        section,
-        attributes: [],
-        raw: [line],
-      }
+      current = { name: headingMatch[1].replace(/\*\*/g, "").trim(), section, attributes: [], raw: [line] }
       continue
     }
 
-    // 属性行: - 性格：xxx
     const attrMatch = trimmed.match(/^[-*]\s*\*?\*?(.+?)\*?\*?[：:]\s*(.+)$/)
     if (attrMatch && current) {
       current.attributes.push({ key: attrMatch[1].trim(), value: attrMatch[2].trim() })
@@ -124,13 +100,11 @@ function parseCharacters(markdown) {
       continue
     }
 
-    // 跳过关系网段落（在"人物关系网"section下的短句）
     if (current) current.raw.push(line)
   }
 
   if (current) characters.push(current)
 
-  // 给每个角色推断 role
   for (const c of characters) {
     const allText = c.attributes.map(a => a.key + a.value).join(" ")
     c.role = detectRole(c.name, allText)
@@ -144,25 +118,20 @@ export default function CharacterPanel({
   language = "zh",
   onChange = null,
   onSave = null,
-  onDeleteCharacter = null,  // (name) => Promise
-  locked = false,             // 锁定时禁用所有改动
-  lockedReason = "",          // 锁定原因（用于 UI 提示）
+  onDeleteCharacter = null,
 }) {
-  const [viewMode, setViewMode] = useState("cards") // cards | raw
+  const [viewMode, setViewMode] = useState("cards")
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(markdown)
 
-  // 删除确认
-  const [pendingDelete, setPendingDelete] = useState(null) // {name, idx} | null
+  const [pendingDelete, setPendingDelete] = useState(null)
   const [deleting, setDeleting] = useState(false)
 
   const characters = useMemo(() => parseCharacters(markdown), [markdown])
   const selected = characters[selectedIdx] || null
 
-  // 编辑模式切换
   const toggleEdit = () => {
-    if (locked) return
     if (viewMode === "raw" && editing && onChange) {
       onChange(draft)
     }
@@ -173,7 +142,7 @@ export default function CharacterPanel({
   }
 
   const handleDeleteClick = (c, idx) => {
-    if (locked || !onDeleteCharacter) return
+    if (!onDeleteCharacter) return
     setPendingDelete({ name: c.name, idx })
   }
 
@@ -183,7 +152,6 @@ export default function CharacterPanel({
     try {
       const result = await onDeleteCharacter(pendingDelete.name)
       if (result?.success !== false) {
-        // 调整 selectedIdx：删除后索引变化
         if (pendingDelete.idx <= selectedIdx && selectedIdx > 0) {
           setSelectedIdx(selectedIdx - 1)
         } else if (characters.length <= 1) {
@@ -202,7 +170,6 @@ export default function CharacterPanel({
         <div className="char-panel-header">
           <span className="char-panel-title">
             👤 {language === "zh" ? "人物设定（原始 markdown）" : "Characters (Raw Markdown)"}
-            {locked && <span className="char-locked-badge" title={lockedReason}>🔒</span>}
           </span>
           <div className="char-panel-actions">
             <button className="pc-btn small" onClick={() => setViewMode("cards")}>
@@ -211,31 +178,24 @@ export default function CharacterPanel({
             <button
               className={`pc-btn small ${editing ? "primary" : ""}`}
               onClick={toggleEdit}
-              disabled={locked}
-              title={locked ? lockedReason : ""}
             >
               {editing
                 ? (language === "zh" ? "✏️ 编辑中..." : "✏️ Editing...")
                 : (language === "zh" ? "✎ 编辑" : "Edit")}
             </button>
-            {onSave && !locked && (
+            {onSave && (
               <button className="pc-btn primary small" onClick={onSave}>
                 💾 {language === "zh" ? "保存" : "Save"}
               </button>
             )}
           </div>
         </div>
-        {locked && (
-          <div className="char-locked-banner">
-            🔒 {lockedReason || (language === "zh" ? "已锁定" : "Locked")}
-          </div>
-        )}
         <div className="char-panel-raw-body">
           <textarea
             className="editor-textarea"
             value={editing ? draft : markdown}
             onChange={(e) => setDraft(e.target.value)}
-            readOnly={!editing || locked}
+            readOnly={!editing}
             placeholder="# Characters..."
           />
         </div>
@@ -249,27 +209,18 @@ export default function CharacterPanel({
         <span className="char-panel-title">
           👤 {language === "zh" ? "人物设定" : "Characters"}
           <span className="char-panel-count">{characters.length} {language === "zh" ? "位" : ""}</span>
-          {locked && <span className="char-locked-badge" title={lockedReason}>🔒</span>}
         </span>
         <div className="char-panel-actions">
-          <button className="pc-btn small" onClick={() => setViewMode("raw")}
-            disabled={locked}
-            title={locked ? lockedReason : ""}>
+          <button className="pc-btn small" onClick={() => setViewMode("raw")}>
             📝 {language === "zh" ? "原始 markdown" : "Raw Markdown"}
           </button>
-          {onSave && !locked && (
+          {onSave && (
             <button className="pc-btn primary small" onClick={onSave}>
               💾 {language === "zh" ? "保存" : "Save"}
             </button>
           )}
         </div>
       </div>
-
-      {locked && (
-        <div className="char-locked-banner">
-          🔒 {lockedReason || (language === "zh" ? "已锁定" : "Locked")}
-        </div>
-      )}
 
       {characters.length === 0 ? (
         <div className="char-panel-empty">
@@ -289,7 +240,6 @@ export default function CharacterPanel({
         </div>
       ) : (
         <div className="char-panel-body">
-          {/* 左侧：角色列表 */}
           <div className="char-list">
             {characters.map((c, i) => (
               <div key={i}
@@ -311,7 +261,7 @@ export default function CharacterPanel({
                     </div>
                   )}
                 </div>
-                {onDeleteCharacter && !locked && (
+                {onDeleteCharacter && (
                   <button className="char-card-delete"
                     title={language === "zh" ? "删除此角色" : "Delete this character"}
                     onClick={(e) => { e.stopPropagation(); handleDeleteClick(c, i) }}>
@@ -322,7 +272,6 @@ export default function CharacterPanel({
             ))}
           </div>
 
-          {/* 右侧：详情预览 */}
           <div className="char-detail">
             {selected && (
               <>
@@ -341,7 +290,7 @@ export default function CharacterPanel({
                       )}
                     </div>
                   </div>
-                  {onDeleteCharacter && !locked && (
+                  {onDeleteCharacter && (
                     <button className="char-detail-delete"
                       title={language === "zh" ? "删除此角色" : "Delete this character"}
                       onClick={() => handleDeleteClick(selected, selectedIdx)}>
@@ -370,7 +319,6 @@ export default function CharacterPanel({
         </div>
       )}
 
-      {/* 删除确认弹窗 */}
       {pendingDelete && (
         <div className="modal-overlay" onClick={() => !deleting && setPendingDelete(null)}>
           <div className="pc-modal danger-modal" onClick={(e) => e.stopPropagation()}

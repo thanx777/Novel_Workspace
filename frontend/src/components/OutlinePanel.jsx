@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useRef } from "react"
 
 const LAYER_META = {
   L1: { icon: "📚", label: "L1 完整版", color: "#1c1917" },
@@ -31,6 +31,11 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   const [status, setStatus] = useState({})  // 3 层状态
   const [selectedCh, setSelectedCh] = useState(null)
   const [regenerating, setRegenerating] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatInput, setChatInput] = useState("")
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatExpanded, setChatExpanded] = useState(false)
+  const chatEndRef = useRef(null)
 
   // 加载 3 层状态
   const loadStatus = async () => {
@@ -119,6 +124,38 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
     setSelectedCh(ch)
   }
 
+  // AI 对话：发送消息
+  const sendChatMessage = async () => {
+    const msg = chatInput.trim()
+    if (!msg || chatLoading || !projectName) return
+    setChatInput("")
+    setChatLoading(true)
+    setChatMessages(prev => [...prev, { role: "user", content: msg }])
+    try {
+      const body = { message: msg, layer }
+      if (layer === "L3" && selectedCh != null) body.chapter = selectedCh
+      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outline/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      const j = await r.json()
+      setChatMessages(prev => [...prev, { role: "assistant", content: j.response || "（无回复）" }])
+      // 刷新大纲数据
+      await loadStatus()
+      await loadLayer(layer)
+    } catch (e) {
+      setChatMessages(prev => [...prev, { role: "assistant", content: `❌ ${e.message || "请求失败"}` }])
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  // 聊天区域自动滚到底部
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [chatMessages])
+
   return (
     <div className="side-panel outline-panel outline-panel-v2">
       <div className="side-panel-header">
@@ -162,6 +199,50 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
         {layer === "L1" && <L1View view={view} data={data.L1} status={status.L1} goToL3={goToL3} language={language} />}
         {layer === "L2" && <L2View view={view} data={data.L2} status={status.L2} goToL3={goToL3} language={language} />}
         {layer === "L3" && <L3View view={view} data={data.L3} selectedCh={selectedCh} setSelectedCh={setSelectedCh} onRegenerate={onRegenerate} regenerating={regenerating} language={language} />}
+
+        {/* AI 对话 */}
+        <div className="outline-chat">
+          <div className="outline-chat-header" onClick={() => setChatExpanded(!chatExpanded)}>
+            <span>💬 {language === "zh" ? "AI 对话" : "AI Chat"}</span>
+            <span className="outline-chat-toggle">{chatExpanded ? "▾" : "▸"}</span>
+          </div>
+          {chatExpanded && (
+            <div className="outline-chat-body">
+              <div className="outline-chat-messages">
+                {chatMessages.length === 0 && (
+                  <div className="outline-chat-hint">{language === "zh" ? "输入反馈或修改指令，AI 将帮你调整大纲" : "Type feedback or instructions, AI will help modify the outline"}</div>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div key={i} className={`outline-chat-msg ${m.role}`}>
+                    <span className="outline-chat-msg-role">{m.role === "user" ? "🧑" : "🤖"}</span>
+                    <span className="outline-chat-msg-content">{m.content}</span>
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="outline-chat-msg assistant">
+                    <span className="outline-chat-msg-role">🤖</span>
+                    <span className="outline-chat-msg-content loading">{language === "zh" ? "思考中…" : "Thinking…"}</span>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="outline-chat-input-row">
+                <input
+                  type="text"
+                  className="outline-chat-input"
+                  value={chatInput}
+                  onChange={e => setChatInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage() } }}
+                  placeholder={language === "zh" ? "输入修改意见…" : "Type feedback…"}
+                  disabled={chatLoading}
+                />
+                <button className="outline-chat-send" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()}>
+                  ➤
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
