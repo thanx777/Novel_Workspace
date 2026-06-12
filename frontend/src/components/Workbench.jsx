@@ -1,18 +1,15 @@
 import { useState, useEffect, useCallback } from "react"
 import LogPanel from "./LogPanel"
-import CharacterPanel from "./CharacterPanel"
 import OutlinePanel from "./OutlinePanel"
 import KnowledgeGraphView from "./KnowledgeGraphView"
 import { API_BASE } from "../constants"
 import useProjectV2 from "../hooks/useProjectV2"
-import useNovelReader from "../hooks/useNovelReader"
-import TaskDetailModal from "./TaskDetailModal"
 
 export default function Workbench({
   t, language,
   isDark, setIsDark, setLanguage, setShowWorkspaceSettings, setShowPresetSidebar, showPresetSidebar,
-  presets, showNotification,
-  isRunning, setIsRunning,
+  presets, defaultPreset, showNotification,
+  isRunning, setIsRunning, runningStage,
   agentCatalog,
   projectV2,
 }) {
@@ -20,25 +17,20 @@ export default function Workbench({
   const {
     projects, activeProject, loadingList, loadingDetail,
     createProject, deleteProject, loadProject,
-    runStage, confirmOutline, rejectOutline, stopTask,
-    updateChapter, addMemory, assistantChat, aiAddCharacter, deleteCharacter,
+    confirmOutline, rejectOutline, confirmWriting, confirmReview, stopTask,
+    updateChapter, addMemory, assistantChat,
     putFile, getFile, loadProjectPresets, saveProjectPresets,
     fetchProjects,
     // 新引擎 API
     getEngineState,
+    loadRunLogs, clearRunLogs,
     engineOutlineGenerate, engineOutlineChat, getOutlineState,
     engineWritingStart, engineWritingChat, getWritingState,
     engineReviewStart, getReviewState,
+    kgRefreshKey,
   } = projectV2 || {}
 
-  // ---- Task/Chapter State (legacy) ----
-  const [tasks, setTasks] = useState([])
-  const [activeTaskFolder, setActiveTaskFolder] = useState("")
-  const [selectedTask, setSelectedTask] = useState(null)
-  const [taskDetail, setTaskDetail] = useState(null)
-
   // ---- Editor State ----
-  const [logs, setLogs] = useState([])
   const [elapsed, setElapsed] = useState(0)
 
   // ---- Sidebar State ----
@@ -57,7 +49,18 @@ export default function Workbench({
       return next.length > 500 ? next.slice(-500) : next
     })
   }, [])
-  const clearRunLogs = useCallback(() => setRunLogs([]), [])
+  const clearRunLogsLocal = useCallback(() => {
+    setRunLogs([])
+    if (activeProject?.name && clearRunLogs) {
+      clearRunLogs(activeProject.name)
+    }
+  }, [activeProject?.name, clearRunLogs])
+
+  // 切换项目时加载历史日志
+  useEffect(() => {
+    if (!activeProject?.name || !loadRunLogs) { setRunLogs([]); return }
+    loadRunLogs(activeProject.name).then(logs => setRunLogs(logs))
+  }, [activeProject?.name])
 
   // ---- Editor Content State ----
   const [chapterDraft, setChapterDraft] = useState("")
@@ -70,31 +73,20 @@ export default function Workbench({
   // Sync editDraft when chapterDraft changes
   useEffect(() => { setEditDraft(chapterDraft) }, [chapterDraft])
   const [outlineDraft, setOutlineDraft] = useState("")
-  const [charactersDraft, setCharactersDraft] = useState("")
-
   // ---- Create Project Modal ----
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState("")
-  const [newTitle, setNewTitle] = useState("")
   const [newGenre, setNewGenre] = useState("")
-  const [newChapterCount, setNewChapterCount] = useState(20)
-  const [newWritingMode, setNewWritingMode] = useState("lite")
-  const [newOutlineLayers, setNewOutlineLayers] = useState({ L1: true, L2: true, L3: true })
+  const [newExtraReqs, setNewExtraReqs] = useState("")
   const [newManagerIdx, setNewManagerIdx] = useState(-1)
   const [newWorkerIdx, setNewWorkerIdx] = useState(-1)
   const [newReviewerIdx, setNewReviewerIdx] = useState(-1)
   const [newChatPreset, setNewChatPreset] = useState("")  // AI 对话模型（用于人物输入等）
-  const [newExtraReqs, setNewExtraReqs] = useState("")
+  const [showModelConfig, setShowModelConfig] = useState(false)  // 模型配置折叠
 
   const GENRES_ZH = ["玄幻", "都市", "言情", "仙侠", "科幻", "历史", "武侠", "悬疑", "恐怖", "喜剧", "都市爽文", "系统流"]
   const GENRES_EN = ["Fantasy", "Urban", "Romance", "Xianxia", "Sci-Fi", "Historical", "Martial Arts", "Suspense", "Horror", "Comedy", "Urban Fantasy", "System Flow"]
   const GENRES = language === "zh" ? GENRES_ZH : GENRES_EN
-
-  // ---- Stage Modal ----
-  const [showStageModal, setShowStageModal] = useState(false)
-  const [selectedStage, setSelectedStage] = useState("outline")
-  const [taskInput, setTaskInput] = useState("")
-  const [executionMode, setExecutionMode] = useState("standard")
 
   // ---- 引擎状态轮询 ----
   const [engineState, setEngineState] = useState(null)
@@ -111,7 +103,7 @@ export default function Workbench({
     return () => clearInterval(timer)
   }, [activeProject?.name])
 
-  // KG 数据轮询
+  // KG 数据轮询 + kgRefreshKey 触发即时刷新
   useEffect(() => {
     if (!activeProject?.name) { setKgData(null); return }
     let timer
@@ -124,7 +116,7 @@ export default function Workbench({
     fetchKg()
     timer = setInterval(fetchKg, 15000)
     return () => clearInterval(timer)
-  }, [activeProject?.name])
+  }, [activeProject?.name, kgRefreshKey])
 
   // ---- Assistant ----
   const [assistantInput, setAssistantInput] = useState("")
@@ -134,22 +126,13 @@ export default function Workbench({
   // ---- Model Config ----
   const [projectPresets, setProjectPresets] = useState({ manager: {}, worker: {}, reviewer: {} })
   const [aiChatPreset, setAiChatPreset] = useState("")  // AI 对话模型预设名
-  const [aiCharInput, setAiCharInput] = useState("")    // AI 人物输入框内容
-  const [aiCharLoading, setAiCharLoading] = useState(false)  // AI 添加人物 loading
 
   // ---- Project Config Editing ----
   const [editProjectName, setEditProjectName] = useState("")
   const [editProjectTitle, setEditProjectTitle] = useState("")
   const [editProjectGenre, setEditProjectGenre] = useState("")
   const [editTotalChapters, setEditTotalChapters] = useState(20)
-  const [editExecutionMode, setEditExecutionMode] = useState("lite")
   const [editExtraReqs, setEditExtraReqs] = useState("")
-
-  // ---- Novel Reader (for legacy task) ----
-  const {
-    chapters: legacyChapters, fileContent,
-    activeFile, loadFiles, loadChapter, saveFile
-  } = useNovelReader(activeTaskFolder)
 
   // ---- Elapsed timer ----
   useEffect(() => {
@@ -163,15 +146,6 @@ export default function Workbench({
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
     return h > 0 ? `${h}h ${m}m ${sec}s` : `${m}m ${sec}s`
   }
-
-  // ---- Load tasks (legacy) ----
-  const loadTasks = useCallback(async () => {
-    try {
-      const resp = await fetch(`${API_BASE}/tasks`)
-      if (resp.ok) { const data = await resp.json(); setTasks(data.tasks || []) }
-    } catch (e) { console.error("Failed to load tasks:", e) }
-  }, [])
-  useEffect(() => { loadTasks() }, [loadTasks])
 
   // ---- Load project presets ----
   useEffect(() => {
@@ -193,7 +167,6 @@ export default function Workbench({
     setActiveSidePanel("chapters")
     setActiveRightPanel("chapter-editor")
     setOutlineDraft("")
-    setCharactersDraft("")
     setChapterDraft("")
     setChapterTitle("")
     setChapterSummary("")
@@ -234,18 +207,20 @@ export default function Workbench({
     showNotification && showNotification("大纲已保存", "success")
   }, [activeProject, outlineDraft, putFile, showNotification])
 
-  // ---- Save characters ----
-  const handleSaveCharacters = useCallback(async () => {
-    if (!activeProject) return
-    await putFile(activeProject.name, "characters.md", charactersDraft)
-    showNotification && showNotification("人物设定已保存", "success")
-  }, [activeProject, charactersDraft, putFile, showNotification])
-
   // ---- Open outline editor ----
   const handleOpenOutline = useCallback(async () => {
     if (!activeProject) return
-    const content = await getFile(activeProject.name, "outline.md")
-    setOutlineDraft(content || "")
+    // 读取三层大纲合并显示
+    const [l1, l2, l3] = await Promise.all([
+      getFile(activeProject.name, "outline_L1.md"),
+      getFile(activeProject.name, "outline_L2.md"),
+      getFile(activeProject.name, "outline_L3.md"),
+    ])
+    const parts = []
+    if (l1) parts.push(l1.startsWith("#") ? l1 : "# L1 完整版大纲\n\n" + l1)
+    if (l2) parts.push(l2.startsWith("#") ? l2 : "# L2 网文版大纲\n\n" + l2)
+    if (l3) parts.push(l3.startsWith("#") ? l3 : "# L3 单章细纲\n\n" + l3)
+    setOutlineDraft(parts.join("\n\n---\n\n") || "")
     setActiveSidePanel("outline")
     setActiveRightPanel("outline-editor")
   }, [activeProject, getFile])
@@ -256,19 +231,18 @@ export default function Workbench({
     setActiveSidePanel("outline")
     // 自动加载大纲内容以显示在侧边面板
     if (!outlineDraft) {
-      const content = await getFile(activeProject.name, "outline.md")
-      setOutlineDraft(content || "")
+      const [l1, l2, l3] = await Promise.all([
+        getFile(activeProject.name, "outline_L1.md"),
+        getFile(activeProject.name, "outline_L2.md"),
+        getFile(activeProject.name, "outline_L3.md"),
+      ])
+      const parts = []
+      if (l1) parts.push(l1.startsWith("#") ? l1 : "# L1 完整版大纲\n\n" + l1)
+      if (l2) parts.push(l2.startsWith("#") ? l2 : "# L2 网文版大纲\n\n" + l2)
+      if (l3) parts.push(l3.startsWith("#") ? l3 : "# L3 单章细纲\n\n" + l3)
+      setOutlineDraft(parts.join("\n\n---\n\n") || "")
     }
   }, [activeProject, getFile, outlineDraft])
-
-  // ---- Open characters editor ----
-  const handleOpenCharacters = useCallback(async () => {
-    if (!activeProject) return
-    const content = await getFile(activeProject.name, "characters.md")
-    setCharactersDraft(content || "")
-    setActiveSidePanel("characters")
-    setActiveRightPanel("characters-editor")
-  }, [activeProject, getFile])
 
   // ---- Open project config ----
   const handleOpenProjectConfig = useCallback(() => {
@@ -277,7 +251,6 @@ export default function Workbench({
     setEditProjectTitle(activeProject.title || "")
     setEditProjectGenre(activeProject.genre || "")
     setEditTotalChapters(activeProject.total_chapters || 20)
-    setEditExecutionMode(activeProject.execution_mode || "lite")
     // 加载附加要求
     getFile(activeProject.name, "extra_requirements.txt").then(content => {
       setEditExtraReqs(content || "")
@@ -296,7 +269,6 @@ export default function Workbench({
           title: editProjectTitle,
           genre: editProjectGenre,
           total_chapters: Number(editTotalChapters) || 20,
-          execution_mode: editExecutionMode,
         }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -309,7 +281,7 @@ export default function Workbench({
     } catch (e) {
       showNotification && showNotification("保存失败: " + e.message, "error")
     }
-  }, [activeProject, editProjectTitle, editProjectGenre, editTotalChapters, editExecutionMode, editExtraReqs, loadProject, showNotification, putFile])
+  }, [activeProject, editProjectTitle, editProjectGenre, editTotalChapters, editExtraReqs, loadProject, showNotification, putFile])
 
   // ---- Create project ----
   const handleCreateProject = useCallback(async () => {
@@ -318,58 +290,40 @@ export default function Workbench({
       return
     }
     const rolePresets = {}
+    // 如果有默认预设，自动应用到所有角色
+    const defaultPresetObj = defaultPreset ? presets?.find(p => p.name === defaultPreset) : null
     if (newManagerIdx >= 0 && presets?.[newManagerIdx]) rolePresets.manager = presets[newManagerIdx]
+    else if (defaultPresetObj) rolePresets.manager = defaultPresetObj
     if (newWorkerIdx >= 0 && presets?.[newWorkerIdx]) rolePresets.worker = presets[newWorkerIdx]
+    else if (defaultPresetObj) rolePresets.worker = defaultPresetObj
     if (newReviewerIdx >= 0 && presets?.[newReviewerIdx]) rolePresets.reviewer = presets[newReviewerIdx]
+    else if (defaultPresetObj) rolePresets.reviewer = defaultPresetObj
     // AI 对话模型：按名字查找预设对象
     if (newChatPreset && presets) {
       const found = presets.find(p => p.name === newChatPreset)
       if (found) rolePresets.chat = found
+    } else if (defaultPresetObj) {
+      rolePresets.chat = defaultPresetObj
     }
     const result = await createProject({
       name: newName.trim(),
-      title: newTitle.trim(),
+      title: "",  // 标题由大纲生成阶段产生
       genre: newGenre,
-      total_chapters: Number(newChapterCount) || 20,
-      execution_mode: newWritingMode,
-      outline_layers: newOutlineLayers,
+      total_chapters: 20,
+      outline_layers: { L1: true, L2: true, L3: true },
       extra_requirements: newExtraReqs.trim(),
       role_presets: rolePresets,
     })
     if (result) {
-      setNewName(""); setNewTitle(""); setNewGenre(""); setNewChapterCount(20)
-      setNewWritingMode("lite")
-      setNewOutlineLayers({ L1: true, L2: true, L3: true })
+      setNewName("")
+      setNewGenre("")
+      setNewExtraReqs("")
       setNewManagerIdx(-1); setNewWorkerIdx(-1); setNewReviewerIdx(-1)
       setNewChatPreset("")
-      setNewExtraReqs("")
+      setShowModelConfig(false)
       setShowCreate(false)
     }
-  }, [newName, newTitle, newGenre, newChapterCount, newWritingMode, newOutlineLayers, newManagerIdx, newWorkerIdx, newReviewerIdx, newChatPreset, newExtraReqs, createProject, showNotification, presets])
-
-  // ---- Start stage ----
-  const handleStartStage = useCallback(async () => {
-    if (!activeProject || !runStage) {
-      showNotification && showNotification("请先选择项目", "error")
-      return
-    }
-    setShowStageModal(false)
-    // 清空之前的日志并切换到日志面板
-    clearRunLogs()
-    appendRunLog({
-      status: "info", role: "系统",
-      message: `准备启动 ${selectedStage} 阶段...`,
-      timestamp: Date.now(),
-    })
-    setActiveRightPanel("logs")
-    await runStage({
-      projectName: activeProject.name,
-      stage: selectedStage,
-      task: taskInput,
-      executionMode,
-      onLogEvent: appendRunLog,
-    })
-  }, [activeProject, selectedStage, taskInput, executionMode, runStage, showNotification, clearRunLogs, appendRunLog])
+  }, [newName, newGenre, newExtraReqs, newManagerIdx, newWorkerIdx, newReviewerIdx, newChatPreset, createProject, showNotification, presets, defaultPreset])
 
   // ---- Assistant chat ----
   const handleAssistantSend = useCallback(async () => {
@@ -380,31 +334,6 @@ export default function Workbench({
     setAssistantLoading(false)
     setAssistantInput("")
   }, [activeProject, assistantInput, assistantChat])
-
-  // ---- AI 添加人物 ----
-  const handleAiAddCharacter = useCallback(async () => {
-    if (!activeProject || !aiCharInput.trim() || aiCharLoading) return
-    setAiCharLoading(true)
-    try {
-      const result = await aiAddCharacter(activeProject.name, aiCharInput.trim(), aiChatPreset)
-      if (result?.success) {
-        // 刷新人物文件 + 角色面板
-        const content = await getFile(activeProject.name, "characters.md")
-        setCharactersDraft(content || "")
-        setAiCharInput("")
-      }
-    } finally {
-      setAiCharLoading(false)
-    }
-  }, [activeProject, aiCharInput, aiCharLoading, aiAddCharacter, aiChatPreset, getFile])
-
-  // ---- 删除单个角色 ----
-  const handleDeleteCharacter = useCallback(async (charName) => {
-    if (!activeProject) {
-      return { success: false }
-    }
-    return await deleteCharacter(activeProject.name, charName)
-  }, [activeProject, deleteCharacter])
 
   // ---- Delete project (with confirmation modal) ----
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(null)
@@ -433,69 +362,13 @@ export default function Workbench({
     showNotification && showNotification("记忆已添加", "success")
   }, [activeProject, addMemory, showNotification])
 
-  // ---- Resume task (legacy) ----
-  const handleResumeTask = useCallback(async (folder) => {
-    setActiveTaskFolder(folder)
-    try {
-      const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(folder)}/resume`, {
-        method: "POST", headers: { "Content-Type": "application/json" }
-      })
-      if (resp.ok) {
-        setIsRunning(true)
-        const reader = resp.body.getReader()
-        const decoder = new TextDecoder()
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          for (const line of decoder.decode(value).split("\n")) {
-            if (line.startsWith("data: ")) {
-              try {
-                const data = JSON.parse(line.replace("data: ", ""))
-                setLogs(prev => [...prev, data])
-                if (data.status === "done") { showNotification && showNotification(t("taskCompleted"), "success"); setIsRunning(false) }
-                if (data.status === "paused") { showNotification && showNotification(data.message || t("taskPaused"), "info"); setIsRunning(false) }
-              } catch (e) {}
-            }
-          }
-        }
-        loadFiles(); loadTasks()
-      }
-    } catch (e) { setIsRunning(false) }
-  }, [showNotification, t, setIsRunning, loadFiles, loadTasks])
-
   // ---- Stop task ----
   const handleStopTask = useCallback(async () => {
     if (activeProject && stopTask) {
       await stopTask(activeProject.name)
-    } else {
-      try { await fetch(`${API_BASE}/stop-task`, { method: "POST" }).catch(() => {}) } catch (e) {}
-      setIsRunning(false)
     }
+    setIsRunning(false)
   }, [activeProject, stopTask, setIsRunning])
-
-  // ---- Task click ----
-  const handleTaskClick = useCallback(async (folder) => {
-    setActiveTaskFolder(folder)
-    try {
-      const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(folder)}`)
-      if (resp.ok) {
-        const data = await resp.json()
-        setTaskDetail(data)
-        setSelectedTask(folder)
-      }
-    } catch (e) { console.error("Failed to load task detail:", e) }
-  }, [])
-
-  // ---- Delete task ----
-  const handleDeleteTask = useCallback(async (folder) => {
-    if (!confirm(t("deleteConfirm"))) return
-    try {
-      await fetch(`${API_BASE}/tasks/${encodeURIComponent(folder)}`, { method: "DELETE" })
-      showNotification && showNotification(t("taskDeleted"), "success")
-      if (activeTaskFolder === folder) setActiveTaskFolder("")
-      loadTasks()
-    } catch (e) { showNotification && showNotification("Delete failed: " + e.message, "error") }
-  }, [t, activeTaskFolder, loadTasks, showNotification])
 
   // ---- Stage label ----
   const stageLabel = (s) => ({ outline: "大纲制作", writing: "正文写作", polish: "润色审校", completed: "已完成" }[s] || s)
@@ -540,9 +413,6 @@ export default function Workbench({
           </button>
           {activeProject && (
             <>
-              <button className="wb-btn" onClick={() => { setSelectedStage(activeProject?.current_stage || "outline"); setShowStageModal(true) }}>
-                ▶ {language === "zh" ? "启动阶段" : "Run Stage"}
-              </button>
               <button className={`wb-btn ${activeRightPanel === "logs" ? "active" : ""}`}
                 onClick={() => setActiveRightPanel(activeRightPanel === "logs" ? "chapter-editor" : "logs")}
                 title={language === "zh" ? "运行日志" : "Run Logs"}>
@@ -568,11 +438,6 @@ export default function Workbench({
               {activeProject.chapters_done || 0}/{activeProject.total_chapters || "?"} {language === "zh" ? "章" : "ch"}
             </span>
           )}
-          <select value={executionMode} onChange={e => setExecutionMode(e.target.value)} className="wb-select">
-            <option value="lite">{language === "zh" ? "精简" : "Lite"}</option>
-            <option value="standard">{language === "zh" ? "标准" : "Standard"}</option>
-            <option value="pro">{language === "zh" ? "完整" : "Full"}</option>
-          </select>
           <div className="toolbar-divider" />
           <button className="toolbar-btn lang-toggle" onClick={() => setLanguage(l => l === "zh" ? "en" : "zh")}>
             {language === "en" ? "中文" : "EN"}
@@ -651,8 +516,6 @@ export default function Workbench({
                       onClick={() => {
                         if (tab.key === "outline") {
                           handleOpenOutline()
-                        } else if (tab.key === "characters") {
-                          handleOpenCharacters()
                         } else if (tab.key === "logs") {
                           setActiveSidePanel(tab.key)
                           setActiveRightPanel("logs")
@@ -745,41 +608,24 @@ export default function Workbench({
                           </div>
                         )}
 
-                        {/* 人物介绍 — 从 characters.md 解析 */}
+                        {/* 人物介绍 — 从 KG 角色节点实时读取 */}
                         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 8 }}>
                           <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6, opacity: 0.7 }}>
                             👤 {language === "zh" ? "人物介绍" : "Character Profiles"}
                           </div>
                           {(() => {
-                            const chars = (charactersDraft || "").trim()
-                            if (!chars) {
-                              return <div style={{ fontSize: 10, opacity: 0.5 }}>{language === "zh" ? "暂无人物设定" : "No characters yet"}</div>
+                            const kgChars = (kgData?.nodes || []).filter(n => n.type === "character")
+                            if (kgChars.length === 0) {
+                              return <div style={{ fontSize: 10, opacity: 0.5 }}>{language === "zh" ? "暂无角色" : "No characters yet"}</div>
                             }
-                            // 简单解析：提取每个角色名和第一行描述
-                            const charLines = chars.split("\n")
-                            const charCards = []
-                            let currentName = ""
-                            let currentDesc = []
-                            for (const line of charLines) {
-                              const trimmed = line.trim()
-                              if (!trimmed) continue
-                              const numMatch = trimmed.match(/^\d+[\.、]\s*\**(.{1,20}?)\**\s*[:：]?\s*$/)
-                              const h3Match = trimmed.match(/^###\s+(.+)$/)
-                              if (numMatch || h3Match) {
-                                if (currentName) charCards.push({ name: currentName, desc: currentDesc.join(" ").slice(0, 80) })
-                                currentName = numMatch ? numMatch[1].trim() : h3Match[1].replace(/\*\*/g, "").trim()
-                                currentDesc = []
-                              } else if (currentName) {
-                                const attrMatch = trimmed.match(/^[-*]\s*(.+?[：:]\s*.+)$/)
-                                if (attrMatch) currentDesc.push(attrMatch[1])
-                              }
-                            }
-                            if (currentName) charCards.push({ name: currentName, desc: currentDesc.join(" ").slice(0, 80) })
-                            if (charCards.length === 0) return <div style={{ fontSize: 10, opacity: 0.5 }}>{language === "zh" ? "暂无人物设定" : "No characters yet"}</div>
-                            return charCards.slice(0, 10).map((c, i) => (
-                              <div key={i} style={{ marginBottom: 6, padding: "4px 6px", background: "var(--bg-surface)", borderRadius: 4 }}>
-                                <div style={{ fontSize: 11, fontWeight: 600 }}>{c.name}</div>
-                                {c.desc && <div style={{ fontSize: 9, opacity: 0.7, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.desc}</div>}
+                            return kgChars.slice(0, 10).map(c => (
+                              <div key={c.id} style={{ marginBottom: 6, padding: "4px 6px", background: "var(--bg-surface)", borderRadius: 4 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6ee7b7" }}>{c.label}</div>
+                                {c.summary && c.summary !== c.label && (
+                                  <div style={{ fontSize: 9, opacity: 0.7, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {c.summary.slice(0, 80)}
+                                  </div>
+                                )}
                               </div>
                             ))
                           })()}
@@ -787,56 +633,37 @@ export default function Workbench({
                       </div>
                     </div>
                   )}
-                  {/* 人物 */}
+                  {/* 人物 — 从 KG 角色节点自动生成 */}
                   {activeSidePanel === "characters" && (
                     <div className="side-panel">
-                      <div className="side-panel-header">👤 {language === "zh" ? "人物设定" : "Characters"}</div>
+                      <div className="side-panel-header">👤 {language === "zh" ? "人物" : "Characters"}</div>
                       <div className="side-panel-body">
-                        <button className="wb-btn" style={{ width: "100%", marginBottom: 8 }}
-                          onClick={handleOpenCharacters}>
-                          ✏️ {language === "zh" ? "编辑人物" : "Edit Characters"}
-                        </button>
-
-                        {/* AI 添加角色 - 分隔区 */}
-                        <div className="ai-char-section">
-                          <div className="ai-char-section-title">
-                            🤖 {language === "zh" ? "AI 添加角色" : "AI Add Character"}
-                          </div>
-                          <div className="ai-char-model">
-                            {language === "zh" ? "模型：" : "Model: "}
-                            <span className="ai-char-model-name">
-                              {aiChatPreset
-                                ? aiChatPreset
-                                : (presets?.[0]?.name || (language === "zh" ? "未配置" : "Not configured"))}
-                            </span>
-                          </div>
-                          <textarea
-                            className="ai-char-textarea"
-                            value={aiCharInput}
-                            onChange={(e) => setAiCharInput(e.target.value)}
-                            placeholder={language === "zh"
-                                  ? "用自然语言描述新角色：\n姓名、性格、说话习惯、动机、关系……\nAI 会自动按格式写入 characters.md"
-                                  : "Describe a new character in natural language:\nname, personality, speech, motivation, relations…\nAI will auto-format and append to characters.md"}
-                            rows={4}
-                            disabled={aiCharLoading}
-                            onKeyDown={(e) => {
-                              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                                e.preventDefault()
-                                handleAiAddCharacter()
-                              }
-                            }}
-                          />
-                          <button className="ai-char-btn"
-                            onClick={handleAiAddCharacter}
-                            disabled={!aiCharInput.trim() || aiCharLoading}>
-                            {aiCharLoading
-                              ? (language === "zh" ? "⏳ AI 正在生成..." : "⏳ Generating...")
-                              : (language === "zh" ? "🤖 AI 添加角色" : "🤖 AI Add Character")}
-                          </button>
-                          <div className="ai-char-hint">
-                            {language === "zh" ? "Ctrl/⌘+Enter 快速提交" : "Ctrl/⌘+Enter to submit"}
-                          </div>
-                        </div>
+                        {/* KG 角色列表 — 实时从知识图谱读取 */}
+                        {(() => {
+                          const kgChars = (kgData?.nodes || []).filter(n => n.type === "character")
+                          if (kgChars.length === 0) {
+                            return <div style={{ fontSize: 10, opacity: 0.5, padding: 8 }}>
+                              {language === "zh" ? "暂无角色，生成大纲或写作后自动提取" : "No characters yet. Auto-extracted from outline/writing."}
+                            </div>
+                          }
+                          return kgChars.map(c => (
+                            <div key={c.id} style={{ marginBottom: 6, padding: "6px 8px", background: "var(--bg-surface)", borderRadius: 4 }}>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: "#6ee7b7" }}>
+                                {c.label}
+                              </div>
+                              {c.summary && c.summary !== c.label && (
+                                <div style={{ fontSize: 9, opacity: 0.7, marginTop: 2, lineHeight: 1.4 }}>
+                                  {c.summary.slice(0, 120)}
+                                </div>
+                              )}
+                              {c.attrs && Object.entries(c.attrs).map(([k, v]) => (
+                                <div key={k} style={{ fontSize: 9, opacity: 0.6, marginTop: 1 }}>
+                                  <span style={{ fontWeight: 500 }}>{k}：</span>{String(v).slice(0, 60)}
+                                </div>
+                              ))}
+                            </div>
+                          ))
+                        })()}
                       </div>
                     </div>
                   )}
@@ -878,17 +705,27 @@ export default function Workbench({
                           const stageOrder = { outline: 0, writing: 1, review: 2, polish: 2, done: 3, completed: 3 }
                           const curIdx = stageOrder[curStage] ?? 0
                           return [
-                            { key: "outline", label: "📖 " + (language === "zh" ? "大纲阶段" : "Outline"), desc: language === "zh" ? "MWR 循环生成大纲" : "MWR cycle outline generation", btnLabel: language === "zh" ? "生成大纲" : "Generate Outline" },
-                            { key: "writing", label: "✍️ " + (language === "zh" ? "写作阶段" : "Writing"), desc: language === "zh" ? "逐章 MWR 写作+润色" : "Per-chapter MWR write+polish", btnLabel: language === "zh" ? "开始写作" : "Start Writing" },
-                            { key: "review", label: "🔍 " + (language === "zh" ? "审校阶段" : "Review"), desc: language === "zh" ? "按维度全局审校" : "Dimension-based global review", btnLabel: language === "zh" ? "全局审校" : "Global Review" },
+                            { key: "outline", label: "📖 " + (language === "zh" ? "大纲阶段" : "Outline"), desc: language === "zh" ? "MWR 循环生成大纲" : "MWR cycle outline generation", btnLabel: language === "zh" ? "生成大纲" : "Generate Outline", confirmLabel: language === "zh" ? "确认大纲" : "Confirm Outline" },
+                            { key: "writing", label: "✍️ " + (language === "zh" ? "写作阶段" : "Writing"), desc: language === "zh" ? "逐章 MWR 写作+润色" : "Per-chapter MWR write+polish", btnLabel: language === "zh" ? "开始写作" : "Start Writing", confirmLabel: language === "zh" ? "确认写作" : "Confirm Writing" },
+                            { key: "review", label: "🔍 " + (language === "zh" ? "审校阶段" : "Review"), desc: language === "zh" ? "按维度全局审校" : "Dimension-based global review", btnLabel: language === "zh" ? "全局审校" : "Global Review", confirmLabel: language === "zh" ? "确认完成" : "Confirm Done" },
                           ].map((stage) => {
                             const stageIdx = stageOrder[stage.key] ?? 0
                             const isCurrent = curStage === stage.key || (curStage === "polish" && stage.key === "review")
                             const isCompleted = stageIdx < curIdx
+                            const isDone = curStage === "done" || curStage === "completed"
+                            const isRunningThisStage = isRunning && runningStage === stage.key
+                            // 是否可以操作此阶段（当前阶段或已完成阶段可重新运行）
+                            const canOperate = isCurrent || isCompleted
+
                             const handleEngineAction = async () => {
                               if (!activeProject) return
+                              if (isRunningThisStage) {
+                                // 正在运行 → 停止
+                                await stopTask(activeProject.name)
+                                return
+                              }
                               // 清空日志并切换到日志面板
-                              clearRunLogs()
+                              clearRunLogsLocal()
                               appendRunLog({
                                 status: "info", role: "系统",
                                 message: `▶ 准备启动 ${stage.label} 阶段...`,
@@ -896,7 +733,9 @@ export default function Workbench({
                               })
                               setActiveRightPanel("logs")
                               if (stage.key === "outline" && engineOutlineGenerate) {
-                                await engineOutlineGenerate(activeProject.name, { onLogEvent: appendRunLog })
+                                // 读取项目要求传给大纲生成
+                                const reqs = await getFile(activeProject.name, "extra_requirements.txt")
+                                await engineOutlineGenerate(activeProject.name, { requirements: reqs || "", onLogEvent: appendRunLog })
                               } else if (stage.key === "writing" && engineWritingStart) {
                                 await engineWritingStart(activeProject.name, {
                                   startChapter: 1,
@@ -907,6 +746,18 @@ export default function Workbench({
                                 await engineReviewStart(activeProject.name, { onLogEvent: appendRunLog })
                               }
                             }
+
+                            const handleConfirm = async () => {
+                              if (!activeProject) return
+                              if (stage.key === "outline") {
+                                await confirmOutline(activeProject.name)
+                              } else if (stage.key === "writing") {
+                                await confirmWriting(activeProject.name)
+                              } else if (stage.key === "review") {
+                                await confirmReview(activeProject.name)
+                              }
+                            }
+
                             return (
                               <div key={stage.key} className={`wb-stage-item ${isCurrent ? "current" : ""} ${isCompleted ? "done" : ""}`}>
                                 <div className="wb-stage-header">
@@ -916,18 +767,31 @@ export default function Workbench({
                                   {isCompleted && <span className="wb-stage-badge done">{language === "zh" ? "已完成" : "Done"}</span>}
                                 </div>
                                 <div className="wb-stage-desc">{stage.desc}</div>
-                                <button
-                                  className="wb-btn"
-                                  style={{ marginTop: 6, width: "100%", fontSize: 11 }}
-                                  onClick={handleEngineAction}
-                                  disabled={isRunning}
-                                >
-                                  {isCurrent
-                                    ? (language === "zh" ? "继续生成" : "Continue")
-                                    : isCompleted
-                                      ? (language === "zh" ? "重新生成" : "Re-run")
-                                      : stage.btnLabel}
-                                </button>
+                                <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                                  <button
+                                    className={`wb-btn ${isRunningThisStage ? "wb-btn-stop" : ""}`}
+                                    style={{ flex: 1, fontSize: 11 }}
+                                    onClick={handleEngineAction}
+                                    disabled={isRunning && !isRunningThisStage}
+                                  >
+                                    {isRunningThisStage
+                                      ? (language === "zh" ? "⏹ 停止" : "⏹ Stop")
+                                      : isCurrent
+                                        ? (language === "zh" ? "▶ 继续生成" : "▶ Continue")
+                                        : isCompleted
+                                          ? (language === "zh" ? "🔄 重新生成" : "🔄 Re-run")
+                                          : stage.btnLabel}
+                                  </button>
+                                  {isCurrent && !isRunning && (
+                                    <button
+                                      className="wb-btn"
+                                      style={{ flex: 1, fontSize: 11, background: "var(--accent, #4f8cff)", color: "#fff" }}
+                                      onClick={handleConfirm}
+                                    >
+                                      ✓ {stage.confirmLabel}
+                                    </button>
+                                  )}
+                                </div>
                               </div>
                             )
                           })
@@ -941,7 +805,7 @@ export default function Workbench({
                       <div className="side-panel-header">
                         📜 {language === "zh" ? "运行日志" : "Run Logs"}
                         <button className="wb-btn-sm" title={language === "zh" ? "清空" : "Clear"}
-                          onClick={clearRunLogs}>
+                          onClick={clearRunLogsLocal}>
                           🗑
                         </button>
                       </div>
@@ -1015,7 +879,7 @@ export default function Workbench({
                   isRunning={isRunning}
                   elapsed={elapsed}
                   language={language}
-                  onClear={clearRunLogs}
+                  onClear={clearRunLogsLocal}
                   emptyMessage={
                     language === "zh"
                       ? "启动一个项目阶段后，AI 生成过程会实时显示在这里。"
@@ -1156,16 +1020,6 @@ export default function Workbench({
             </div>
           )}
 
-          {/* 人物编辑器 */}
-          {activeProject && activeRightPanel === "characters-editor" && (
-            <CharacterPanel
-              markdown={charactersDraft}
-              language={language}
-              onSave={handleSaveCharacters}
-              onDeleteCharacter={handleDeleteCharacter}
-            />
-          )}
-
           {/* AI 助理 */}
           {activeProject && activeRightPanel === "assistant-editor" && (
             <div className="editor-wrap">
@@ -1239,25 +1093,6 @@ export default function Workbench({
                   <div className="editor-field">
                     <label>{language === "zh" ? "预计章节数" : "Estimated Chapters"}</label>
                     <input type="number" value={editTotalChapters} onChange={(e) => setEditTotalChapters(e.target.value)} min={1} max={999} />
-                  </div>
-
-                  {/* 写作模式 */}
-                  <div className="editor-field">
-                    <label>{language === "zh" ? "写作模式" : "Writing Mode"}</label>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      {[
-                        { key: "lite", label: language === "zh" ? "标准" : "Standard", desc: language === "zh" ? "精简提示词" : "Compact" },
-                        { key: "pro", label: language === "zh" ? "兼容" : "Compatible", desc: language === "zh" ? "详细提示词" : "Detailed" },
-                        { key: "pro_polish", label: language === "zh" ? "完整" : "Full", desc: language === "zh" ? "润色循环" : "Polish loop" },
-                      ].map(m => (
-                        <div key={m.key}
-                          onClick={() => setEditExecutionMode(m.key)}
-                          style={{ flex: 1, padding: "6px 8px", border: editExecutionMode === m.key ? "2px solid var(--accent)" : "1px solid var(--border)", borderRadius: 6, cursor: "pointer", textAlign: "center", fontSize: 12 }}>
-                          <div style={{ fontWeight: 600 }}>{m.label}</div>
-                          <div style={{ fontSize: 10, opacity: 0.6 }}>{m.desc}</div>
-                        </div>
-                      ))}
-                    </div>
                   </div>
 
                   {/* 附加要求 */}
@@ -1354,7 +1189,7 @@ export default function Workbench({
               isRunning={isRunning}
               elapsed={elapsed}
               language={language}
-              onClear={clearRunLogs}
+              onClear={clearRunLogsLocal}
               activeProject={activeProject}
             />
           )}
@@ -1365,148 +1200,88 @@ export default function Workbench({
       {/* 新建项目 Modal */}
       {showCreate && (
         <div className="modal-overlay" onClick={() => setShowCreate(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560, maxHeight: "90vh", overflowY: "auto" }}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
             <div className="modal-title">{language === "zh" ? "新建项目" : "New Project"}</div>
             <div className="modal-body">
               <div className="editor-field">
                 <label>{language === "zh" ? "项目名称 *" : "Project Name *"}</label>
                 <input value={newName} onChange={(e) => setNewName(e.target.value)}
-                  placeholder="e.g. my_novel" />
+                  placeholder={language === "zh" ? "例如：my_novel" : "e.g. my_novel"} />
               </div>
+
+              {/* 小说题材（与 InkOS 体裁系统集成） */}
               <div className="editor-field">
-                <label>{language === "zh" ? "小说标题" : "Novel Title"}</label>
-                <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder={language === "zh" ? "例如：星际大海" : "e.g. Star Chronicles"} />
-              </div>
-              <div className="editor-field">
-                <label>{language === "zh" ? "题材" : "Genre"}</label>
+                <label>{language === "zh" ? "小说题材（可选）" : "Genre (optional)"}</label>
                 <select value={newGenre} onChange={(e) => setNewGenre(e.target.value)} className="wb-select" style={{ width: "100%" }}>
-                  <option value="">{language === "zh" ? "选择题材（可选）" : "Select genre (optional)"}</option>
+                  <option value="">{language === "zh" ? "选择题材" : "Select genre"}</option>
                   {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
                 </select>
-              </div>
-              <div className="editor-field">
-                <label>{language === "zh" ? "预计章节数" : "Estimated Chapters"}</label>
-                <input type="number" value={newChapterCount} onChange={(e) => setNewChapterCount(e.target.value)} min={1} max={999} />
-              </div>
-
-              {/* Writing mode */}
-              <div className="editor-field">
-                <label>{language === "zh" ? "写作模式" : "Writing Mode"}</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {[
-                    { key: "lite", label: language === "zh" ? "标准" : "Standard", desc: language === "zh" ? "精简提示词" : "Compact" },
-                    { key: "pro", label: language === "zh" ? "兼容" : "Compatible", desc: language === "zh" ? "详细提示词" : "Detailed" },
-                    { key: "pro_polish", label: language === "zh" ? "完整" : "Full", desc: language === "zh" ? "润色循环" : "Polish loop" },
-                  ].map(m => (
-                    <div key={m.key}
-                      onClick={() => setNewWritingMode(m.key)}
-                      style={{ flex: 1, padding: "8px 10px", border: newWritingMode === m.key ? "2px solid var(--accent)" : "1px solid var(--border)", borderRadius: 6, cursor: "pointer", textAlign: "center" }}>
-                      <div style={{ fontWeight: 600, fontSize: 13 }}>{m.label}</div>
-                      <div style={{ fontSize: 10, opacity: 0.6 }}>{m.desc}</div>
-                    </div>
-                  ))}
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  {language === "zh" ? "选择题材后，AI 会注入对应的体裁写作指南和审校维度" : "Genre selection injects tailored writing guides and review dimensions"}
                 </div>
               </div>
 
-              {/* 3 层大纲开关 */}
+              {/* 项目要求（传给大纲生成阶段） */}
               <div className="editor-field">
-                <label>{language === "zh" ? "三层大纲（三个同时进行）" : "3-Layer Outline (parallel)"}</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {[
-                    { key: "L1", icon: "📚", label: "L1", desc: language === "zh" ? "完整版" : "Full", color: "#1c1917" },
-                    { key: "L2", icon: "🚀", label: "L2", desc: language === "zh" ? "网文版" : "Web", color: "#c2410c" },
-                    { key: "L3", icon: "📝", label: "L3", desc: language === "zh" ? "单章细纲" : "Detail", color: "#0c4a6e" },
-                  ].map(layer => {
-                    const enabled = newOutlineLayers[layer.key]
-                    const disabled = layer.key === "L1" ? false : (!newOutlineLayers.L1)
-                    return (
-                      <div key={layer.key}
-                        onClick={() => {
-                          if (disabled) return
-                          if (layer.key === "L1") {
-                            // L1 关闭时强制关闭 L2/L3
-                            setNewOutlineLayers({
-                              L1: !enabled,
-                              L2: !enabled ? newOutlineLayers.L2 : false,
-                              L3: !enabled ? newOutlineLayers.L3 : false,
-                            })
-                          } else {
-                            setNewOutlineLayers({ ...newOutlineLayers, [layer.key]: !enabled })
-                          }
-                        }}
-                        className="outline-layer-card"
-                        style={{
-                          flex: 1, padding: "10px 8px",
-                          border: enabled ? `2px solid ${layer.color}` : "1px solid var(--border)",
-                          borderRadius: 8, cursor: disabled ? "not-allowed" : "pointer",
-                          textAlign: "center", opacity: disabled ? 0.4 : 1,
-                          background: enabled ? `${layer.color}15` : "transparent",
-                        }}>
-                        <div style={{ fontSize: 22, marginBottom: 2 }}>{layer.icon}</div>
-                        <div style={{ fontWeight: 700, fontSize: 13, color: enabled ? layer.color : "var(--text)" }}>{layer.label}</div>
-                        <div style={{ fontSize: 10, opacity: 0.7 }}>{layer.desc}</div>
-                        <div style={{ fontSize: 10, marginTop: 2, color: enabled ? layer.color : "var(--text-muted)" }}>
-                          {enabled ? "✓ ON" : "○ OFF"}
+                <label>{language === "zh" ? "项目要求（可选）" : "Project Requirements (optional)"}</label>
+                <textarea value={newExtraReqs} onChange={(e) => setNewExtraReqs(e.target.value)}
+                  placeholder={language === "zh"
+                    ? "描述你想写的小说类型、风格、核心设定等，AI 会据此生成大纲。\n例如：修仙题材，主角从凡人开始，节奏要快，要有爽点"
+                    : "Describe the novel type, style, core settings, etc. AI will generate outline accordingly.\ne.g., Cultivation theme, MC starts as mortal, fast pacing, exciting moments"}
+                  rows={5} className="editor-textarea" />
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  {language === "zh"
+                    ? "小说标题和题材会在大纲生成阶段自动确定"
+                    : "Novel title and genre will be determined during outline generation"}
+                </div>
+              </div>
+
+              {/* 模型配置（折叠） */}
+              <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 8 }}>
+                <button className="wb-btn" style={{ width: "100%", fontSize: 12, opacity: 0.7 }}
+                  onClick={() => setShowModelConfig(!showModelConfig)}>
+                  {showModelConfig ? "▼" : "▶"} {language === "zh" ? "AI 模型配置（高级）" : "AI Model Config (Advanced)"}
+                </button>
+                {showModelConfig && (
+                  <div style={{ marginTop: 8 }}>
+                    {!presets || presets.length === 0 ? (
+                      <div style={{ opacity: 0.6, fontSize: 12, padding: 8, background: "var(--bg-surface)", borderRadius: 6 }}>
+                        {language === "zh" ? "请先在预设面板配置 API 预设" : "Please configure API presets first"}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {[
+                          { role: "manager", label: language === "zh" ? "🧠 管理者" : "🧠 Manager", idx: newManagerIdx, setIdx: setNewManagerIdx },
+                          { role: "worker", label: language === "zh" ? "✍️ 写手" : "✍️ Writer", idx: newWorkerIdx, setIdx: setNewWorkerIdx },
+                          { role: "reviewer", label: language === "zh" ? "🔍 审校" : "🔍 Reviewer", idx: newReviewerIdx, setIdx: setNewReviewerIdx },
+                        ].map(r => (
+                          <div key={r.role} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ minWidth: 80, fontSize: 12 }}>{r.label}</span>
+                            <select value={r.idx} onChange={e => r.setIdx(parseInt(e.target.value))}
+                              className="wb-select" style={{ flex: 1 }}>
+                              <option value={-1}>{language === "zh" ? "— 默认 —" : "— Default —"}</option>
+                              {presets.map((p, i) => (
+                                <option key={i} value={i}>{p.name} ({p.model})</option>
+                              ))}
+                            </select>
+                          </div>
+                        ))}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ minWidth: 80, fontSize: 12 }}>
+                            💬 {language === "zh" ? "对话模型" : "Chat Model"}
+                          </span>
+                          <select value={newChatPreset} onChange={e => setNewChatPreset(e.target.value)}
+                            className="wb-select" style={{ flex: 1 }}>
+                            <option value="">{language === "zh" ? "— 默认 —" : "— Default —"}</option>
+                            {presets.map((p, i) => (
+                              <option key={i} value={p.name}>{p.name} ({p.model})</option>
+                            ))}
+                          </select>
                         </div>
                       </div>
-                    )
-                  })}
-                </div>
-                <div style={{ fontSize: 10, opacity: 0.6, marginTop: 4 }}>
-                  {language === "zh" ? "关闭 L1 将自动级联关闭 L2/L3" : "Turning off L1 cascades to L2/L3"}
-                </div>
-              </div>
-
-              {/* Per-role model assignment */}
-              <div className="editor-field">
-                <label>{language === "zh" ? "AI 模型分配" : "AI Model Assignment"}</label>
-                {!presets || presets.length === 0 ? (
-                  <div style={{ opacity: 0.6, fontSize: 12, padding: 8, background: "var(--bg-surface)", borderRadius: 6 }}>
-                    {language === "zh" ? "请先配置 API 预设" : "Please configure an API preset first"}
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {[
-                      { role: "manager", label: language === "zh" ? "🧠 管理者 (Manager)" : "🧠 Manager", idx: newManagerIdx, setIdx: setNewManagerIdx },
-                      { role: "worker", label: language === "zh" ? "✍️ 写手 (Worker)" : "✍️ Worker", idx: newWorkerIdx, setIdx: setNewWorkerIdx },
-                      { role: "reviewer", label: language === "zh" ? "🔍 审校 (Reviewer)" : "🔍 Reviewer", idx: newReviewerIdx, setIdx: setNewReviewerIdx },
-                    ].map(r => (
-                      <div key={r.role} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ minWidth: 120, fontSize: 12 }}>{r.label}</span>
-                        <select value={r.idx} onChange={e => r.setIdx(parseInt(e.target.value))}
-                          className="wb-select" style={{ flex: 1 }}>
-                          <option value={-1}>{language === "zh" ? "— 选择模型 —" : "— Select model —"}</option>
-                          {presets.map((p, i) => (
-                            <option key={i} value={i}>{p.name} ({p.model})</option>
-                          ))}
-                        </select>
-                      </div>
-                    ))}
-                    {/* AI 对话模型（用于人物添加等轻量对话） */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ minWidth: 120, fontSize: 12 }}>
-                        💬 {language === "zh" ? "AI 对话模型" : "AI Chat Model"}
-                      </span>
-                      <select value={newChatPreset} onChange={e => setNewChatPreset(e.target.value)}
-                        className="wb-select" style={{ flex: 1 }}
-                        title={language === "zh" ? "用于侧边栏 AI 人物添加等轻量对话" : "For sidebar AI character input and other lightweight chat"}>
-                        <option value="">{language === "zh" ? "— 选择模型 —" : "— Select model —"}</option>
-                        {presets.map((p, i) => (
-                          <option key={i} value={p.name}>{p.name} ({p.model})</option>
-                        ))}
-                      </select>
-                    </div>
+                    )}
                   </div>
                 )}
-              </div>
-
-              {/* Extra requirements */}
-              <div className="editor-field">
-                <label>{language === "zh" ? "附加要求（可选）" : "Extra Requirements (optional)"}</label>
-                <textarea value={newExtraReqs} onChange={(e) => setNewExtraReqs(e.target.value)}
-                  placeholder={language === "zh" ? "例如：节奏要快，要有爽点" : "e.g., Fast pacing, exciting moments"}
-                  rows={3} className="editor-textarea" />
               </div>
 
               <div className="modal-actions">
@@ -1520,50 +1295,6 @@ export default function Workbench({
             </div>
           </div>
         </div>
-      )}
-
-      {/* 启动阶段 Modal */}
-      {showStageModal && activeProject && (
-        <div className="modal-overlay" onClick={() => setShowStageModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">▶ {language === "zh" ? "启动阶段" : "Run Stage"}</div>
-            <div className="modal-body">
-              <div className="editor-field">
-                <label>{language === "zh" ? "阶段" : "Stage"}</label>
-                <select value={selectedStage} onChange={(e) => setSelectedStage(e.target.value)}>
-                  <option value="outline">{language === "zh" ? "大纲制作" : "Outline"}</option>
-                  <option value="writing">{language === "zh" ? "正文写作" : "Writing"}</option>
-                  <option value="polish">{language === "zh" ? "润色审校" : "Polish"}</option>
-                </select>
-              </div>
-              <div className="editor-field">
-                <label>{language === "zh" ? "附加指令（可选）" : "Additional Instructions (optional)"}</label>
-                <textarea value={taskInput} onChange={(e) => setTaskInput(e.target.value)}
-                  placeholder={language === "zh" ? "例：第3章需要重点描写战斗场景" : "e.g. Chapter 5 should focus on battle scenes"}
-                  rows={3} />
-              </div>
-              <div className="modal-actions">
-                <button className="pc-btn" onClick={() => setShowStageModal(false)}>
-                  {language === "zh" ? "取消" : "Cancel"}
-                </button>
-                <button className="pc-btn primary" onClick={handleStartStage}>
-                  ▶ {language === "zh" ? "启动" : "Run"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Task Detail Modal (legacy) */}
-      {selectedTask && taskDetail && (
-        <TaskDetailModal
-          t={t} language={language} presets={presets}
-          taskFolder={selectedTask} taskDetail={taskDetail}
-          onClose={() => { setSelectedTask(null); setTaskDetail(null) }}
-          onResume={() => { setSelectedTask(null); setTaskDetail(null); handleResumeTask(selectedTask) }}
-          isRunning={isRunning} showNotification={showNotification}
-        />
       )}
 
       {/* 项目删除确认弹窗 */}
