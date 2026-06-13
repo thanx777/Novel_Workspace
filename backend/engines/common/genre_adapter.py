@@ -13,7 +13,7 @@ if _backend_root not in sys.path:
 
 from genre_data.inkos_data import (
     INKOS_GENRES, INKOS_AUDIT_DIMENSIONS, INKOS_FATIGUE_WORDS,
-    get_inkos_genre, get_fatigue_words, get_chapter_types,
+    get_inkos_genre, get_fatigue_words, get_setting_terms, get_chapter_types,
     build_inkos_writer_guide, build_inkos_reviewer_guide,
 )
 from genre_data.detect import (
@@ -151,13 +151,23 @@ class GenreAdapter:
     # ---- 疲劳词本地检查 ----
 
     def check_fatigue_words(self, text: str, threshold: int = 3) -> list:
-        """本地检查文本中的疲劳词，返回超过阈值的词及其出现次数。"""
+        """本地检查文本中的疲劳词，返回超过阈值的词及其出现次数。
+        区分"偷懒用词"（阈值3）和"核心设定词"（阈值20）。
+        """
         fatigue = get_fatigue_words(self.genre_name)
+        setting = get_setting_terms(self.genre_name)
+        # 从疲劳词列表中移除核心设定词（避免重复检查）
+        fatigue = [w for w in fatigue if w not in setting]
         results = []
         for word in fatigue:
             count = text.count(word)
             if count >= threshold:
-                results.append({"word": word, "count": count})
+                results.append({"word": word, "count": count, "is_setting": False})
+        # 核心设定词使用更高阈值（30次），且标记为设定词
+        for word in setting:
+            count = text.count(word)
+            if count >= 30:
+                results.append({"word": word, "count": count, "is_setting": True})
         return results
 
     # ---- Hard Invariants 检查 ----

@@ -1,7 +1,7 @@
 """
 分层大纲执行器
 - L1 → L2 自动串联
-- L3 每章前生成
+- L2 合并了旧版 L2（阶段划分）+ L3（单章细纲）
 - 状态机控制
 - 与 KnowledgeGraph 集成（L1/L2 完成后入图谱）
 """
@@ -17,13 +17,13 @@ from outline_templates import (
     TEMPLATES, LAYER_NAMES, get_prompt, parse_markdown_to_json, validate_template,
 )
 from knowledge_graph import KnowledgeGraph
+from engines.common.kg_adapter import KGAdapter
 
-# LLM 调用（从 executor 复用）
+# LLM 调用（从 llm_client 导入）
 try:
-    from executor import call_llm, AgentConfig
+    from engines.common.llm_client import call_llm, AgentConfig
 except ImportError:
     async def call_llm(*args, **kwargs):
-        # 占位：实际由后端注入
         return "[LLM_NOT_AVAILABLE]"
 
     class AgentConfig:
@@ -40,7 +40,6 @@ class OutlineState(str, Enum):
     L1_DONE = "L1_DONE"
     L2_RUNNING = "L2_RUNNING"
     L2_DONE = "L2_DONE"
-    L3_IDLE = "L3_IDLE"  # 等待章节
 
 
 STATE_ORDER = [
@@ -49,7 +48,6 @@ STATE_ORDER = [
     OutlineState.L1_DONE,
     OutlineState.L2_RUNNING,
     OutlineState.L2_DONE,
-    OutlineState.L3_IDLE,
 ]
 
 
@@ -57,13 +55,9 @@ STATE_ORDER = [
 # 文件路径
 # ============================================================
 
-def _outline_path(project_dir: str, layer: str, ext: str = "md", chapter: Optional[int] = None) -> str:
+def _outline_path(project_dir: str, layer: str, ext: str = "md") -> str:
     if layer in ("L1", "L2"):
         return os.path.join(project_dir, f"outline_{layer}.{ext}")
-    elif layer == "L3":
-        if chapter is None:
-            return os.path.join(project_dir, "outline_L3")
-        return os.path.join(project_dir, "outline_L3", f"chapter_{chapter}.{ext}")
     raise ValueError(f"Unknown layer: {layer}")
 
 
@@ -91,6 +85,7 @@ class OutlinePipeline:
         # 知识图谱
         self.kg = KnowledgeGraph(project_dir)
         self.kg.load()
+        self.kg_adapter = KGAdapter(self.kg)
 
     def _load_state(self) -> Dict:
         if os.path.isfile(self.state_path):
@@ -103,8 +98,7 @@ class OutlinePipeline:
             "state": OutlineState.L1_PENDING.value,
             "L1_generated_at": None,
             "L2_generated_at": None,
-            "L3_chapters_generated": [],
-            "layers_enabled": {"L1": True, "L2": True, "L3": True},
+            "layers_enabled": {"L1": True, "L2": True},
         }
 
     def _save_state(self):
@@ -122,32 +116,20 @@ class OutlinePipeline:
         return self.state
 
     def get_status(self) -> Dict:
-        """返回 3 层大纲的元信息。"""
+        """返回 2 层大纲的元信息。"""
         out = {}
-        for layer in ("L1", "L2", "L3"):
+        for layer in ("L1", "L2"):
             enabled = self.state.get("layers_enabled", {}).get(layer, True)
-            if layer in ("L1", "L2"):
-                md_path = _outline_path(self.project_dir, layer, "md")
-                json_path = _outline_path(self.project_dir, layer, "json")
-                out[layer] = {
-                    "enabled": enabled,
-                    "exists": os.path.isfile(md_path) and os.path.isfile(json_path),
-                    "md_path": md_path,
-                    "json_path": json_path,
-                    "generated_at": self.state.get(f"{layer}_generated_at"),
-                    "name": LAYER_NAMES[layer],
-                }
-            else:
-                # L3
-                l3_dir = _outline_path(self.project_dir, layer)
-                chapters = self.state.get("L3_chapters_generated", [])
-                out[layer] = {
-                    "enabled": enabled,
-                    "exists": len(chapters) > 0,
-                    "chapters": chapters,
-                    "dir": l3_dir,
-                    "name": LAYER_NAMES[layer],
-                }
+            md_path = _outline_path(self.project_dir, layer, "md")
+            json_path = _outline_path(self.project_dir, layer, "json")
+            out[layer] = {
+                "enabled": enabled,
+                "exists": os.path.isfile(md_path) and os.path.isfile(json_path),
+                "md_path": md_path,
+                "json_path": json_path,
+                "generated_at": self.state.get(f"{layer}_generated_at"),
+                "name": LAYER_NAMES[layer],
+            }
         out["state"] = self.state.get("state")
         return out
 
@@ -195,7 +177,7 @@ class OutlinePipeline:
     # ----- L2 -----
 
     async def generate_L2(self, l1_json: Optional[Dict] = None) -> Dict:
-        """生成 L2 网文精简版大纲。"""
+        """生成 L2 章节细纲。"""
         if not self.state.get("layers_enabled", {}).get("L2", True):
             self.yield_func({"status": "skip", "message": "L2 已关闭，跳过生成"})
             return {"skipped": True}
@@ -214,135 +196,133 @@ class OutlinePipeline:
 
         # 构造 L1 摘要作为 context
         l1_summary = self._summarize_l1(l1_json)
+        # 提取 L1 总章节数（支持范围格式如"120-150"取最大值）
+        tc = l1_json.get("basic", {}).get("总章节数", "")
+        tc_int = 0
+        if tc:
+            tc_str = str(tc).strip()
+            range_m = re.match(r"(\d+)\s*[-–—]\s*(\d+)", tc_str)
+            if range_m:
+                tc_int = int(range_m.group(2))
+            elif tc_str.isdigit():
+                tc_int = int(tc_str)
         self.state["state"] = OutlineState.L2_RUNNING.value
         self._save_state()
-        self.yield_func({"status": "info", "layer": "L2", "message": "🚀 开始生成 L2 网文精简版大纲..."})
 
-        prompt = get_prompt("L2", {"L1_summary": l1_summary})
-        md_text = await self._call_llm_for_outline(prompt, layer="L2")
+        # ---- 从 L1 提取分卷信息（JSON 优先，md 兜底） ----
+        volumes = l1_json.get("volumes", [])
+        valid_volumes = [v for v in volumes if v.get("卷总章节")]
 
-        json_data = parse_markdown_to_json("L2", md_text)
-        valid, missing = validate_template("L2", json_data)
-        if not valid:
-            self.yield_func({"status": "warning", "layer": "L2",
-                             "message": f"L2 部分字段缺失: {missing}（仍保存）"})
+        if not valid_volumes:
+            # 尝试从 L1 markdown 中提取分卷
+            valid_volumes = self._extract_volumes_from_l1_md()
 
-        # 校验跨层一致性
-        consistency_warnings = self._check_l2_consistency(l1_json, json_data)
-        if consistency_warnings:
-            self.yield_func({"status": "warning", "layer": "L2",
-                             "message": f"L2 跨层一致性: {consistency_warnings}"})
+        if not valid_volumes:
+            # 无分卷信息，无法生成章节细纲
+            self.yield_func({"status": "error", "layer": "L2", "message": "❌ L1 缺少分卷信息，无法生成章节细纲。请重新生成 L1 大纲，确保包含分卷（每卷必须有卷总章节）。"})
+            self.state["L2_generated_at"] = time.time()
+            self.state["state"] = OutlineState.L2_DONE.value
+            self._save_state()
+            return {"success": False, "error": "L1 缺少分卷信息"}
 
-        md_path = _outline_path(self.project_dir, "L2", "md")
-        json_path = _outline_path(self.project_dir, "L2", "json")
-        self._write_atomic(md_path, md_text)
-        self._write_atomic(json_path, json.dumps(json_data, ensure_ascii=False, indent=2))
+        # ---- 按卷分批生成章节细纲 ----
+        all_chapters_md = []
+        prev_tail = ""
 
-        self._add_outline_nodes_to_graph("L2", json_data, summary=md_text[:300])
+        for i, vol in enumerate(valid_volumes):
+            vol_num = vol.get("卷号", i + 1)
+            vol_name = vol.get("卷名", f"第{vol_num}卷")
+            vol_theme = vol.get("卷核心主题", "")
+            vol_conflict = vol.get("卷内核心冲突", "")
+            vol_position = vol.get("卷定位", "")
+
+            # 计算章节范围
+            start_ch, end_ch = self._calc_volume_chapter_range(valid_volumes, i)
+            if start_ch == 0 or end_ch == 0:
+                continue
+
+            self.yield_func({
+                "status": "info", "layer": "L2",
+                "message": f"📝 L2：生成第{vol_num}卷「{vol_name}」（第{start_ch}-{end_ch}章）[{i+1}/{len(valid_volumes)}]..."
+            })
+
+            batch_prompt = get_prompt("L2_batch", {
+                "L1_summary": l1_summary,
+                "phase_name": f"第{vol_num}卷 {vol_name}",
+                "start_ch": start_ch,
+                "end_ch": end_ch,
+                "phase_goal": f"{vol_theme}；{vol_conflict}" if vol_conflict else vol_theme,
+                "prev_tail": prev_tail,
+            })
+            batch_md = await self._call_llm_for_outline(batch_prompt, layer="L2")
+
+            # 提取章节部分
+            chapters_part = self._extract_chapters_from_batch(batch_md)
+            if chapters_part:
+                all_chapters_md.append(chapters_part)
+                prev_tail = self._extract_last_chapter_tail(chapters_part)
+            else:
+                all_chapters_md.append(batch_md)
+
+            # 校验本卷实际生成的章数 vs 预期章数
+            actual_count = self._count_chapters_in_md(chapters_part or batch_md)
+            expected_count = end_ch - start_ch + 1
+            if actual_count < expected_count:
+                missing = expected_count - actual_count
+                self.yield_func({
+                    "status": "warning", "layer": "L2",
+                    "message": f"⚠ 第{vol_num}卷预期{expected_count}章，实际生成{actual_count}章，缺少{missing}章，正在补齐..."
+                })
+                last_actual_ch = start_ch + actual_count - 1
+                supplement_md = await self._supplement_chapters(
+                    vol_num, vol_name, last_actual_ch + 1, end_ch,
+                    vol_theme, vol_conflict, chapters_part or batch_md
+                )
+                if supplement_md:
+                    all_chapters_md[-1] = (chapters_part or batch_md) + "\n\n" + supplement_md
+                    prev_tail = self._extract_last_chapter_tail(supplement_md)
+
+            # 每卷生成后立即摄取到 KG，下一卷能看到本卷新增的实体
+            vol_md = chapters_part or batch_md
+            if vol_md:
+                self._add_outline_nodes_to_graph("L2", parse_markdown_to_json("L2", vol_md), summary=vol_md[:300])
+
+        # ---- 合并所有卷的章节细纲 ----
+        if all_chapters_md:
+            header = self._build_l2_header(valid_volumes)
+            final_md = header + "\n\n---\n\n## 逐章细纲\n\n" + "\n\n".join(all_chapters_md)
+            final_json = parse_markdown_to_json("L2", final_md)
+
+            md_path = _outline_path(self.project_dir, "L2", "md")
+            json_path = _outline_path(self.project_dir, "L2", "json")
+            self._write_atomic(md_path, final_md)
+            self._write_atomic(json_path, json.dumps(final_json, ensure_ascii=False, indent=2))
+
+            self.yield_func({"status": "info", "layer": "L2",
+                             "message": f"✅ L2 章节细纲分批生成完成，共 {len(valid_volumes)} 卷"})
+        else:
+            md_path = _outline_path(self.project_dir, "L2", "md")
+            final_md = ""
+
+        self._add_outline_nodes_to_graph("L2", final_json if all_chapters_md else {}, summary=final_md[:300] if final_md else "")
 
         self.state["L2_generated_at"] = time.time()
         self.state["state"] = OutlineState.L2_DONE.value
         self._save_state()
 
         self.yield_func({"status": "done", "layer": "L2",
-                         "message": f"✅ L2 网文精简版大纲生成完成（{len(md_text)} 字）",
-                         "path": md_path, "valid": valid, "missing": missing})
+                         "message": f"✅ L2 章节细纲生成完成（{len(final_md)} 字）",
+                         "path": md_path})
 
-        return {"success": True, "md_path": md_path, "json_path": json_path, "valid": valid, "missing": missing}
-
-    # ----- L3 -----
-
-    async def generate_L3(self, chapter_num: int, chapter_title: str = "") -> Dict:
-        """为第 N 章生成 L3 单章细纲。"""
-        if not self.state.get("layers_enabled", {}).get("L3", True):
-            self.yield_func({"status": "skip", "message": "L3 已关闭，跳过生成"})
-            return {"skipped": True}
-
-        if self.state.get("state") not in (OutlineState.L2_DONE.value, OutlineState.L3_IDLE.value):
-            self.yield_func({"status": "error", "message": "L2 未完成，无法生成 L3"})
-            return {"success": False, "error": "L2 not ready"}
-
-        # 读取 L1/L2
-        l1_path = _outline_path(self.project_dir, "L1", "json")
-        l2_path = _outline_path(self.project_dir, "L2", "json")
-        l1_summary = ""
-        l2_summary = ""
-        l1_json = {}
-        l2_json = {}
-        if os.path.isfile(l1_path):
-            with open(l1_path, "r", encoding="utf-8") as f:
-                l1_json = json.load(f)
-            l1_summary = self._summarize_l1(l1_json)
-        if os.path.isfile(l2_path):
-            with open(l2_path, "r", encoding="utf-8") as f:
-                l2_json = json.load(f)
-            l2_summary = json.dumps(l2_json.get("three_acts", {}), ensure_ascii=False)[:500]
-
-        self.yield_func({"status": "info", "layer": "L3", "chapter": chapter_num,
-                         "message": f"🚀 开始生成第 {chapter_num} 章单章细纲..."})
-
-        prompt = get_prompt("L3", {
-            "L1_summary": l1_summary,
-            "L2_summary": l2_summary,
-            "chapter_num": chapter_num,
-            "chapter_title": chapter_title or f"第{chapter_num}章",
-        })
-        md_text = await self._call_llm_for_outline(prompt, layer="L3")
-
-        json_data = parse_markdown_to_json("L3", md_text)
-        json_data["chapter_num"] = chapter_num
-        json_data["chapter_title"] = chapter_title
-
-        valid, missing = validate_template("L3", json_data)
-
-        # 写文件
-        md_path = _outline_path(self.project_dir, "L3", "md", chapter=chapter_num)
-        json_path = _outline_path(self.project_dir, "L3", "json", chapter=chapter_num)
-        self._write_atomic(md_path, md_text)
-        self._write_atomic(json_path, json.dumps(json_data, ensure_ascii=False, indent=2))
-
-        # 入图谱
-        node_id = f"outline_L3_chapter_{chapter_num}"
-        self.kg.add_node(node_id, "outline_node", f"L3 第{chapter_num}章细纲",
-                         summary=md_text[:300],
-                         attrs={"layer": "L3", "chapter_num": chapter_num,
-                                "purpose": json_data.get("本章核心目的", "")[:100]})
-        # 关联到 L1 / L2
-        l1_node_id = "outline_L1_root"
-        if l1_node_id in self.kg.nodes:
-            self.kg.add_edge(f"edge_{node_id}_from_L1", "derived_from", node_id, l1_node_id)
-        l2_node_id = "outline_L2_root"
-        if l2_node_id in self.kg.nodes:
-            self.kg.add_edge(f"edge_{node_id}_from_L2", "derived_from", node_id, l2_node_id)
-        self.kg.save()
-
-        # 更新状态
-        chapters = self.state.get("L3_chapters_generated", [])
-        if chapter_num not in chapters:
-            chapters.append(chapter_num)
-            chapters.sort()
-        self.state["L3_chapters_generated"] = chapters
-        self.state["state"] = OutlineState.L3_IDLE.value
-        self._save_state()
-
-        self.yield_func({"status": "done", "layer": "L3", "chapter": chapter_num,
-                         "message": f"✅ 第 {chapter_num} 章细纲生成完成",
-                         "path": md_path, "valid": valid, "missing": missing})
-
-        return {"success": True, "md_path": md_path, "json_path": json_path,
-                "valid": valid, "missing": missing, "json_data": json_data}
+        return {"success": True, "md_path": md_path}
 
     # ----- 重新生成 -----
 
-    async def regenerate(self, layer: str, chapter: Optional[int] = None) -> Dict:
+    async def regenerate(self, layer: str) -> Dict:
         if layer == "L1":
             return await self.generate_L1()
         elif layer == "L2":
             return await self.generate_L2()
-        elif layer == "L3":
-            if chapter is None:
-                return {"success": False, "error": "L3 需要指定 chapter"}
-            return await self.generate_L3(chapter, f"第{chapter}章")
         return {"success": False, "error": f"Unknown layer {layer}"}
 
     # ----- 一键启动 L1→L2 -----
@@ -360,6 +340,26 @@ class OutlinePipeline:
         return r2
 
     # ----- 内部 -----
+
+    def _get_l1_summary(self) -> str:
+        """获取 L1 大纲摘要（供 L2 分批生成使用）。"""
+        l1_json_path = _outline_path(self.project_dir, "L1", "json")
+        if os.path.isfile(l1_json_path):
+            try:
+                with open(l1_json_path, "r", encoding="utf-8") as f:
+                    l1_json = json.load(f)
+                return self._summarize_l1(l1_json)
+            except Exception:
+                pass
+        # 兜底：直接读 L1 markdown 前 3000 字
+        l1_md_path = _outline_path(self.project_dir, "L1", "md")
+        if os.path.isfile(l1_md_path):
+            try:
+                with open(l1_md_path, "r", encoding="utf-8") as f:
+                    return f.read()[:3000]
+            except Exception:
+                pass
+        return ""
 
     def _summarize_l1(self, l1_json: Dict) -> str:
         """从 L1 JSON 提取摘要（用于 L2 上下文）。"""
@@ -404,6 +404,120 @@ class OutlinePipeline:
                 warnings.append(f"L2 未引用伏笔 {fs}")
         return warnings
 
+    def _extract_volumes_from_l1_md(self) -> List[Dict]:
+        """从 L1 markdown 中提取分卷信息（当 L1 JSON 缺少 volumes 时的兜底）。"""
+        l1_md_path = _outline_path(self.project_dir, "L1", "md")
+        if not os.path.isfile(l1_md_path):
+            return []
+        with open(l1_md_path, "r", encoding="utf-8") as f:
+            l1_md = f.read()
+        volumes = []
+        vol_pattern = r"###\s*第\s*(\d+)\s*卷\s*[：:]*\s*(.+?)(?=\n###|\n##|\Z)"
+        for m in re.finditer(vol_pattern, l1_md, re.DOTALL):
+            vol_num = int(m.group(1))
+            vol_content = m.group(2)
+            vol_name = vol_content.split("\n", 1)[0].strip().strip("：:").strip()
+            ch_match = re.search(r"卷总章节\s*[：:]*\s*(\d+)", vol_content)
+            if not ch_match:
+                ch_match = re.search(r"总章节\s*[：:]*\s*(\d+)", vol_content)
+            if not ch_match:
+                ch_match = re.search(r"章节数\s*[：:]*\s*(\d+)", vol_content)
+            if not ch_match:
+                continue
+            ch_count = ch_match.group(1)
+            theme_match = re.search(r"卷核心主题\s*[：:]*\s*(.+?)(?:\n|$)", vol_content)
+            theme = theme_match.group(1).strip() if theme_match else ""
+            conflict_match = re.search(r"卷内核心冲突\s*[：:]*\s*(.+?)(?:\n|$)", vol_content)
+            conflict = conflict_match.group(1).strip() if conflict_match else ""
+            volumes.append({
+                "卷号": vol_num,
+                "卷名": vol_name,
+                "卷总章节": ch_count,
+                "卷核心主题": theme,
+                "卷内核心冲突": conflict,
+            })
+        return volumes
+
+    def _calc_volume_chapter_range(self, volumes: List[Dict], vol_index: int) -> tuple:
+        """根据分卷信息计算第 vol_index 卷的起止章节号。"""
+        start_ch = 1
+        for i in range(vol_index):
+            ch_count = self._parse_chapter_count(volumes[i].get("卷总章节", ""))
+            if ch_count == 0:
+                return (0, 0)
+            start_ch += ch_count
+        ch_count = self._parse_chapter_count(volumes[vol_index].get("卷总章节", ""))
+        if ch_count == 0:
+            return (0, 0)
+        end_ch = start_ch + ch_count - 1
+        return (start_ch, end_ch)
+
+    @staticmethod
+    def _parse_chapter_count(ch_str: str) -> int:
+        """解析 "30章" 或 "30" 格式的章节数。"""
+        if not ch_str:
+            return 0
+        m = re.search(r"(\d+)", str(ch_str))
+        return int(m.group(1)) if m else 0
+
+    def _build_l2_header(self, volumes: List[Dict]) -> str:
+        """根据 L1 分卷信息生成 L2 头部（分卷概览）。"""
+        lines = ["# 章节细纲\n"]
+        lines.append("## 分卷概览\n")
+        for vol in volumes:
+            vol_num = vol.get("卷号", "?")
+            vol_name = vol.get("卷名", "")
+            vol_chapters = vol.get("卷总章节", "")
+            vol_theme = vol.get("卷核心主题", "")
+            lines.append(f"- 第{vol_num}卷「{vol_name}」：{vol_chapters} — {vol_theme}")
+        return "\n".join(lines)
+
+    def _extract_chapters_from_batch(self, batch_md: str) -> str:
+        """从分批生成结果中提取章节细纲部分。"""
+        m = re.search(r"###\s*第\s*\d+\s*章", batch_md)
+        if m:
+            return batch_md[m.start():]
+        return batch_md
+
+    def _count_chapters_in_md(self, md_text: str) -> int:
+        """统计 markdown 中实际生成的章节数。"""
+        if not md_text:
+            return 0
+        return len(re.findall(r"###\s*第\s*\d+\s*章", md_text))
+
+    async def _supplement_chapters(self, vol_num: int, vol_name: str,
+                                    start_ch: int, end_ch: int,
+                                    vol_theme: str, vol_conflict: str,
+                                    existing_md: str) -> str:
+        """补齐缺失的章节细纲。"""
+        l1_summary = self._get_l1_summary()
+        batch_prompt = get_prompt("L2_batch", {
+            "L1_summary": l1_summary,
+            "phase_name": f"第{vol_num}卷 {vol_name}（续）",
+            "start_ch": start_ch,
+            "end_ch": end_ch,
+            "phase_goal": f"{vol_theme}；{vol_conflict}" if vol_conflict else vol_theme,
+            "prev_tail": self._extract_last_chapter_tail(existing_md),
+        })
+        # 注入已有章节作为上下文
+        last_chapters = existing_md[-3000:] if len(existing_md) > 3000 else existing_md
+        user_extra = (
+            f"\n\n以下是本卷已生成的最后部分内容，请自然衔接：\n---\n{last_chapters}\n---\n"
+            f"请从第{start_ch}章开始生成，不要重复已有章节。"
+        )
+        batch_md = await self._call_llm_for_outline(batch_prompt + user_extra, layer="L2")
+        return self._extract_chapters_from_batch(batch_md)
+
+    def _extract_last_chapter_tail(self, chapters_md: str) -> str:
+        """提取最后一章的衔接信息，传给下一批。"""
+        matches = list(re.finditer(
+            r"[-*]\s*\*{0,2}衔接下章\*{0,2}\s*[：:]\s*(.+?)(?:\n|$)",
+            chapters_md
+        ))
+        if matches:
+            return f"【上一阶段最后一章衔接】{matches[-1].group(1).strip()}"
+        return ""
+
     def _add_outline_nodes_to_graph(self, layer: str, json_data: Dict, summary: str = ""):
         """把 L1/L2 的大纲节点入图谱。"""
         node_id = f"outline_{layer}_root"
@@ -426,6 +540,11 @@ class OutlinePipeline:
 
     async def _call_llm_for_outline(self, prompt: str, layer: str) -> str:
         """调用 LLM 生成大纲。"""
+        # 注入 KG 上下文
+        kg_ctx = self.kg_adapter.get_outline_layer_context(layer)
+        if kg_ctx:
+            prompt = kg_ctx + "\n\n" + prompt
+
         if not self.presets:
             # 无预设：返回模板示例内容（开发模式）
             self.yield_func({"status": "warning", "message": f"未配置 LLM 预设，{layer} 使用占位内容"})
@@ -446,7 +565,7 @@ class OutlinePipeline:
             else:
                 cfg = preset
             user_prompt = f"请按上面的要求生成 {layer} 大纲。严格按 Markdown 格式输出，不要任何额外说明。"
-            text = await call_llm(cfg, prompt, user_prompt, max_tokens=8000, request_timeout_seconds=300)
+            text = await call_llm(cfg, prompt, user_prompt, max_tokens=16000, request_timeout_seconds=300)
             if not text or text.startswith("[LLM_ERROR"):
                 self.yield_func({"status": "warning", "message": f"LLM 返回异常: {text[:100]}"})
                 return self._placeholder_outline(layer)
@@ -494,40 +613,28 @@ class OutlinePipeline:
 1. 主线结局：圆满
 """
         elif layer == "L2":
-            return """# L2 占位
-## 一、基础信息
-- 书名：示例
-- 题材：玄幻
-- 风格：爽文
-- 核心爽点：升级
-## 二、简略世界观
-示例
-## 三、人物速览
-- 主角：示例主角
-- 女主/重要伙伴：示例
-- 主要反派：示例
-## 四、剧情总脉络
-- 第一阶段（前期）：开篇
-- 第二阶段（中期）：发展
-- 第三阶段（后期）：结局
-## 五、分阶段剧情节点
-- 阶段1（第1-30章）：示例 + 爽点：升级 + 收尾：立稳
+            return """# L2 章节细纲占位
+## 一、阶段划分
+- 阶段1（第1-10章）：起步 — 主角登场
+- 阶段2（第11-20章）：发展 — 实力提升
+
+## 二、逐章细纲
+
+### 第1章 开篇
+- **核心目的**：主角登场
+- **出场人物**：示例主角
+- **章节流程**：
+  1. 开场：山村少年
+  2. 发展：遭遇奇遇
+  3. 冲突：与恶霸对峙
+  4. 转折：获得传承
+  5. 收尾：踏上旅途
+- **情绪/爽点**：逆袭
+- **伏笔**：埋设 FS-001
+- **衔接下章**：到达城镇
 """
         else:
-            return """# L3 占位
-## 一、本章核心目的
-示例
-## 二、出场人物
-示例
-## 三、章节流程
-1. 开场
-## 四、本章情绪/爽点
-示例
-## 五、伏笔
-FS-001
-## 六、衔接下一章内容
-示例
-"""
+            return ""
 
 
 # ============================================================
@@ -544,8 +651,6 @@ def _self_test():
             print("L1:", r1)
             r2 = await pipe.generate_L2()
             print("L2:", r2)
-            r3 = await pipe.generate_L3(1, "开篇")
-            print("L3:", r3)
             status = pipe.get_status()
             print("Status:", json.dumps(status, ensure_ascii=False, indent=2)[:500])
         asyncio.run(run())

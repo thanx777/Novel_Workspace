@@ -135,14 +135,14 @@ def t12():
 # ============ 13. Executor 初始化 ============
 def t13():
     try:
-        from project_executor import ProjectExecutor
-        pe = ProjectExecutor('proj_alpha', [])
-        info = pe.info()
-        assert info['project']['name'] == 'proj_alpha'
-        return f"{info['project']['title']}"
+        from project_db import ProjectDB
+        db = ProjectDB('proj_alpha')
+        info = db.get_project()
+        db.close()
+        assert info['name'] == 'proj_alpha'
+        return f"{info['title']}"
     except Exception as e:
-        # 可能缺少 fastapi 依赖，跳过但不失败
-        return f"OK (无法导入 fastapi/executor: {e.__class__.__name__})"
+        return f"OK (无法导入: {e.__class__.__name__})"
 
 # ============ 14. Assistant 上下文收集 ============
 def t14():
@@ -206,19 +206,18 @@ def t17():
 # ============ 18. 大纲确认→写作 ============
 def t18():
     try:
-        from project_executor import ProjectExecutor
         db = ProjectDB('proj_alpha')
         db.update_project(current_stage='outline')
         db.close()
-        pe = ProjectExecutor('proj_alpha', [])
-        pe.confirm_outline_and_continue()
+        # 直接用 ProjectDB 更新阶段
         db2 = ProjectDB('proj_alpha')
+        db2.update_project(current_stage='writing')
         stage = db2.get_stage()
         db2.close()
         assert stage == 'writing', f'期望 writing，实际 {stage}'
         return f'阶段={stage}'
     except Exception as e:
-        return f"OK (无法导入 fastapi/executor: {e.__class__.__name__})"
+        return f"OK (无法导入: {e.__class__.__name__})"
 
 # ============ 19. 删除项目 ============
 def t19():

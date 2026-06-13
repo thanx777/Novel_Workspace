@@ -13,9 +13,8 @@ import os
 import re
 from typing import List, Dict, Optional
 
-from executor import AgentConfig, call_llm
-from project_db import ProjectDB, get_project_dir, read_file_safe
-from project_executor import get_project_file
+from engines.common.llm_client import AgentConfig, call_llm
+from project_db import ProjectDB, get_project_dir, read_file_safe, get_project_file
 
 
 # ============================================================

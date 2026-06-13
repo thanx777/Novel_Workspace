@@ -250,7 +250,7 @@ export default function Workbench({
     setEditProjectName(activeProject.name || "")
     setEditProjectTitle(activeProject.title || "")
     setEditProjectGenre(activeProject.genre || "")
-    setEditTotalChapters(activeProject.total_chapters || 20)
+    setEditTotalChapters(activeProject.total_chapters || 0)
     // 加载附加要求
     getFile(activeProject.name, "extra_requirements.txt").then(content => {
       setEditExtraReqs(content || "")
@@ -268,7 +268,7 @@ export default function Workbench({
         body: JSON.stringify({
           title: editProjectTitle,
           genre: editProjectGenre,
-          total_chapters: Number(editTotalChapters) || 20,
+          total_chapters: Number(editTotalChapters) || 0,
         }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -309,8 +309,8 @@ export default function Workbench({
       name: newName.trim(),
       title: "",  // 标题由大纲生成阶段产生
       genre: newGenre,
-      total_chapters: 20,
-      outline_layers: { L1: true, L2: true, L3: true },
+      total_chapters: 0,
+      outline_layers: { L1: true, L2: true },
       extra_requirements: newExtraReqs.trim(),
       role_presets: rolePresets,
     })
@@ -435,7 +435,7 @@ export default function Workbench({
           {isRunning && <span className="wb-timer">⏱ {formatTime(elapsed)}</span>}
           {activeProject && (
             <span className="wb-progress">
-              {activeProject.chapters_done || 0}/{activeProject.total_chapters || "?"} {language === "zh" ? "章" : "ch"}
+              {activeProject.chapters_done || 0}/{activeProject.total_chapters || "待定"} {language === "zh" ? "章" : "ch"}
             </span>
           )}
           <div className="toolbar-divider" />
@@ -484,7 +484,7 @@ export default function Workbench({
                         {stageLabel(p.current_stage || "outline")}
                       </span>
                       <span>{p.genre || ""}</span>
-                      <span>{p.chapters_done || 0}/{p.total_chapters || "?"} 章</span>
+                      <span>{p.chapters_done || 0}/{p.total_chapters || "待定"} 章</span>
                     </div>
                     {active && (
                       <div style={{ position: "absolute", right: 4, top: 4, display: "flex", gap: 2 }}>
@@ -516,6 +516,8 @@ export default function Workbench({
                       onClick={() => {
                         if (tab.key === "outline") {
                           handleOpenOutline()
+                        } else if (tab.key === "characters") {
+                          setActiveSidePanel(tab.key)
                         } else if (tab.key === "logs") {
                           setActiveSidePanel(tab.key)
                           setActiveRightPanel("logs")
@@ -682,7 +684,7 @@ export default function Workbench({
                               {stageLabel(activeProject.current_stage || engineState?.current_stage || "outline")}
                             </span>
                             <span style={{ fontSize: 11, opacity: 0.7 }}>
-                              {activeProject.chapters_done || 0}/{activeProject.total_chapters || 0} {language === "zh" ? "章" : "chapters"}
+                              {activeProject.chapters_done || 0}/{activeProject.total_chapters || "待定"} {language === "zh" ? "章" : "chapters"}
                             </span>
                           </div>
                           {/* 引擎状态详情 */}
@@ -739,7 +741,7 @@ export default function Workbench({
                               } else if (stage.key === "writing" && engineWritingStart) {
                                 await engineWritingStart(activeProject.name, {
                                   startChapter: 1,
-                                  totalChapters: activeProject.total_chapters || 100,
+                                  totalChapters: activeProject.total_chapters || 0,
                                   onLogEvent: appendRunLog,
                                 })
                               } else if (stage.key === "review" && engineReviewStart) {
@@ -962,7 +964,7 @@ export default function Workbench({
                             {stageLabel(activeProject.current_stage || "outline")}
                           </span>
                           <span style={{ marginLeft: 8 }}>
-                            {activeProject.chapters_done || 0}/{activeProject.total_chapters || "?"} {language === "zh" ? "章" : "ch"}
+                            {activeProject.chapters_done || 0}/{activeProject.total_chapters || "待定"} {language === "zh" ? "章" : "ch"}
                           </span>
                         </div>
                       </div>

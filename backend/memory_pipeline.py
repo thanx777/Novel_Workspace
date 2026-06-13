@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any, Callable
 from knowledge_graph import KnowledgeGraph
 
 try:
-    from executor import call_llm
+    from engines.common.llm_client import call_llm
 except ImportError:
     async def call_llm(*args, **kwargs):
         return "[LLM_NOT_AVAILABLE]"

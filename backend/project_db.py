@@ -240,21 +240,13 @@ class ProjectDB:
         now = fmt_time()
         if not row:
             self.conn.execute(
-                "INSERT INTO projects (name, title, total_chapters, current_stage, outline_review_mode, execution_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.project_name, self.project_name, 0, "outline", "auto", "lite", now, now)
+                "INSERT INTO projects (name, title, total_chapters, current_stage, outline_review_mode, execution_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '', ?, ?)",
+                (self.project_name, self.project_name, 0, "outline", "auto", now, now)
             )
             self.conn.commit()
 
     def _now(self) -> str:
         return fmt_time()
-
-    def _row_to_dict(self, row) -> Optional[Dict]:
-        if row is None:
-            return None
-        return dict(row)
-
-    def _rows_to_list(self, rows) -> List[Dict]:
-        return [dict(r) for r in rows]
 
     def _row_to_dict(self, row) -> Optional[Dict]:
         if row is None:
@@ -305,16 +297,6 @@ class ProjectDB:
         """获取当前阶段"""
         project = self.get_project()
         return project.get("current_stage", "outline") or "outline"
-
-    def get_presets(self) -> Dict[str, Dict]:
-        """获取项目的角色预设：{manager, worker, reviewer, chat}"""
-        info = self.get_project()
-        return {
-            "manager": info.get("manager_preset") or {},
-            "worker": info.get("worker_preset") or {},
-            "reviewer": info.get("reviewer_preset") or {},
-            "chat": info.get("chat_preset") or {},
-        }
 
     def get_outline_layers(self) -> Dict[str, bool]:
         """获取大纲 3 层开关，默认全开。"""
@@ -456,7 +438,7 @@ class ProjectDB:
         """获取项目进度摘要"""
         project = self.get_project()
         chapters = self.list_chapters()
-        total = project.get("total_chapters", 0) or len(chapters) or 0
+        total = project.get("total_chapters", 0) or 0
         done = len([c for c in chapters if c.get("status") in ("drafted", "reviewed", "final", "revised")])
         total_words = sum(c.get("word_count", 0) for c in chapters)
         return {
@@ -682,6 +664,8 @@ def list_all_projects() -> List[Dict]:
                 "title": info.get("title", name),
                 "genre": info.get("genre", ""),
                 "total_chapters": info.get("total_chapters", 0),
+                "chapters_done": progress.get("done", 0),
+                "total_words": progress.get("total_words", 0),
                 "current_stage": info.get("current_stage", "outline"),
                 "created_at": info.get("created_at", ""),
                 "updated_at": info.get("updated_at", ""),
@@ -698,7 +682,7 @@ def list_all_projects() -> List[Dict]:
 
 
 def create_project(name: str, title: str = "", genre: str = "",
-                   total_chapters: int = 0, execution_mode: str = "lite",
+                   total_chapters: int = 0,
                    outline_review_mode: str = "manual",
                    outline_layers: Optional[Dict[str, bool]] = None) -> Dict:
     """创建新项目"""
@@ -711,7 +695,6 @@ def create_project(name: str, title: str = "", genre: str = "",
         title=title or safe_name,
         genre=genre,
         total_chapters=total_chapters,
-        execution_mode=execution_mode,
         outline_review_mode=outline_review_mode,
     )
     if outline_layers:
@@ -723,14 +706,47 @@ def create_project(name: str, title: str = "", genre: str = "",
 
 
 def delete_project(name: str) -> bool:
-    """删除项目（删除整个文件夹）"""
+    """删除项目（删除整个文件夹）。Windows 上 SQLite 文件可能被占用，需要重试。"""
     p = os.path.join(PROJECTS_DIR, name)
     if not os.path.exists(p):
         return False
     import shutil
+    import time
+    # 先尝试关闭可能残留的数据库连接
     try:
-        shutil.rmtree(p)
-        return True
-    except Exception as e:
-        print(f"[DB] delete_project error: {e}")
-        return False
+        db = ProjectDB(name)
+        db.close()
+    except Exception:
+        pass
+    # 重试删除（Windows 上 SQLite 文件可能被短暂锁定）
+    for attempt in range(5):
+        try:
+            shutil.rmtree(p)
+            return True
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(0.3)
+            else:
+                print(f"[DB] delete_project error after retries: {e}")
+                # 最后一次尝试：逐个删除文件，跳过被锁定的
+                try:
+                    for root, dirs, files in os.walk(p, topdown=False):
+                        for f in files:
+                            fp = os.path.join(root, f)
+                            try:
+                                os.remove(fp)
+                            except Exception:
+                                pass
+                        for d in dirs:
+                            dp = os.path.join(root, d)
+                            try:
+                                os.rmdir(dp)
+                            except Exception:
+                                pass
+                    try:
+                        os.rmdir(p)
+                    except Exception:
+                        pass
+                    return not os.path.exists(p)
+                except Exception:
+                    return False

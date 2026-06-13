@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { API_FORMATS } from '../constants'
 import TestResultCard from './TestResultCard'
 
-export function PresetPanel({ t, language, presets, showAddPreset, setShowAddPreset, newPresetName, setNewPresetName, newPresetConfig, setNewPresetConfig, handleAddPreset, handleDeletePreset, editingPreset, setEditingPreset, editPresetConfig, setEditPresetConfig, handleUpdatePreset, runTestConnection, testConnState, testConnResult, selectedNode, updateNodeConfig, openEditPreset, showNotification, setConfirmDialog, applyPresetToAll, allNodes }) {
+export function PresetPanel({ t, language, presets, defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset, showAddPreset, setShowAddPreset, newPresetName, setNewPresetName, newPresetConfig, setNewPresetConfig, handleAddPreset, handleDeletePreset, editingPreset, setEditingPreset, editPresetConfig, setEditPresetConfig, handleUpdatePreset, runTestConnection, testConnState, testConnResult, selectedNode, updateNodeConfig, openEditPreset, showNotification, setConfirmDialog, applyPresetToAll, allNodes }) {
   return (
     <div className="sidebar-section preset-section">
       <div className="sidebar-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -56,11 +56,27 @@ export function PresetPanel({ t, language, presets, showAddPreset, setShowAddPre
       )}
       {presets.map((preset, i) => (
         <div key={i} className="model-card" onClick={() => { if (selectedNode) updateNodeConfig(selectedNode, { preset_name: preset.name }); openEditPreset(preset.name) }}>
-          <div className="model-dot" style={{ background: '#58a6ff' }} />
+          <div className="model-dot" style={{ background: defaultPreset === preset.name ? '#f59e0b' : '#58a6ff' }} />
           <div className="model-info">
-            <div className="model-name">{preset.name}</div>
+            <div className="model-name" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {preset.name}
+              {defaultPreset === preset.name && <span style={{ fontSize: 9, background: '#f59e0b', color: '#fff', padding: '0 4px', borderRadius: 3, fontWeight: 600 }}>默认</span>}
+            </div>
             <div className="model-id">{preset.model}</div>
           </div>
+          <button className="preset-apply-all-btn"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (defaultPreset === preset.name) {
+                handleClearDefaultPreset()
+              } else {
+                handleSetDefaultPreset(preset.name)
+              }
+            }}
+            title={defaultPreset === preset.name ? '取消默认' : '设为默认（新项目自动使用）'}
+            style={defaultPreset === preset.name ? { background: '#f59e0b', color: '#fff' } : {}}>
+            {defaultPreset === preset.name ? '★' : '☆'}
+          </button>
           {allNodes && allNodes.length > 0 && (
             <button className="preset-apply-all-btn"
               onClick={(e) => { e.stopPropagation(); applyPresetToAll(preset.name); showNotification(`已应用 "${preset.name}" 到全部 ${allNodes.length} 个节点`, 'success') }}

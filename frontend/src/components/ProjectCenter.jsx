@@ -17,7 +17,7 @@ export default function ProjectCenter({
   const {
     projects, activeProject, loadingList, loadingDetail,
     createProject, deleteProject, loadProject,
-    runStage, confirmOutline, rejectOutline, stopTask, isRunning,
+    confirmOutline, rejectOutline, confirmWriting, confirmReview, stopTask, isRunning,
     updateChapter, addMemory, assistantChat,
     // 新引擎 API
     getEngineState,
@@ -33,7 +33,6 @@ export default function ProjectCenter({
   const [newName, setNewName] = useState("")
   const [newTitle, setNewTitle] = useState("")
   const [newGenre, setNewGenre] = useState("")
-  const [newChapterCount, setNewChapterCount] = useState(20)
 
   // 当前所选章节 / 面板
   const [selectedChapterIndex, setSelectedChapterIndex] = useState(null)
@@ -122,10 +121,10 @@ export default function ProjectCenter({
       name: newName.trim(),
       title: newTitle.trim(),
       genre: newGenre.trim(),
-      total_chapters: Number(newChapterCount) || 20,
+      total_chapters: 0,
     })
     if (result) {
-      setNewName(""); setNewTitle(""); setNewGenre(""); setNewChapterCount(20)
+      setNewName(""); setNewTitle(""); setNewGenre("");
       setShowCreate(false)
     }
   }
@@ -216,10 +215,9 @@ export default function ProjectCenter({
       message: `▶ 准备启动 正文写作 阶段（已确认大纲）...`,
     })
     setRightPanel("logs")
-    await runStage({
-      projectName: activeProject.name,
-      stage: "writing",
-      task: taskInput,
+    await engineWritingStart(activeProject.name, {
+      startChapter: 1,
+      totalChapters: activeProject.total_chapters || 0,
       onLogEvent: appendRunLog,
     })
   }
@@ -236,12 +234,24 @@ export default function ProjectCenter({
       message: `准备启动 ${stageLabels[selectedStage] || selectedStage} 阶段...`,
     })
     setRightPanel("logs")
-    await runStage({
-      projectName: activeProject.name,
-      stage: selectedStage,
-      task: taskInput,
-      onLogEvent: appendRunLog,
-    })
+    // 根据阶段调用对应的新引擎函数
+    if (selectedStage === "outline") {
+      await engineOutlineGenerate(activeProject.name, {
+        layer: "",
+        requirements: taskInput,
+        onLogEvent: appendRunLog,
+      })
+    } else if (selectedStage === "writing") {
+      await engineWritingStart(activeProject.name, {
+        startChapter: 1,
+        totalChapters: activeProject.total_chapters || 0,
+        onLogEvent: appendRunLog,
+      })
+    } else if (selectedStage === "polish" || selectedStage === "review") {
+      await engineReviewStart(activeProject.name, {
+        onLogEvent: appendRunLog,
+      })
+    }
   }
 
   // ============ AI 助理 ============
@@ -334,9 +344,9 @@ export default function ProjectCenter({
             {projects.map((p) => {
               const active = activeProject?.name === p.name
               const stageTxt = stageLabel(p.current_stage || "outline")
-              const done = typeof p.total_chapters === "number"
+              const done = p.total_chapters > 0
                 ? `${p.chapters_done || 0} / ${p.total_chapters}`
-                : "—"
+                : `${p.chapters_done || 0} / 待定`
               return (
                 <div
                   key={p.name}
@@ -700,7 +710,7 @@ export default function ProjectCenter({
                       )}
                     </>
                   )}
-                  <div>章节进度：{activeProject.chapters_done || 0} / {activeProject.total_chapters || "?"}</div>
+                  <div>章节进度：{activeProject.chapters_done || 0} / {activeProject.total_chapters || "待定"}</div>
                   <div>总字数：{activeProject.total_words || 0}</div>
                 </div>
                 <div className="stage-actions">
@@ -760,9 +770,8 @@ export default function ProjectCenter({
                 <label>题材</label>
                 <input value={newGenre} onChange={(e) => setNewGenre(e.target.value)} placeholder="例：玄幻 / 科幻 / 都市" />
               </div>
-              <div className="editor-field">
-                <label>预计章节数</label>
-                <input type="number" value={newChapterCount} onChange={(e) => setNewChapterCount(e.target.value)} />
+              <div className="editor-field" style={{color: '#888', fontSize: '12px'}}>
+                章节数由大纲生成时自动确定
               </div>
             </div>
             <div className="modal-actions">

@@ -320,7 +320,7 @@ export default function NovelWorkspace({
                       <span className={`task-status task-${task.status}`}>
                         {task.status === 'completed' ? t('done') : task.status === 'in_progress' ? t('running') : t('paused')}
                       </span>
-                      <span className="task-chapters">{task.chapters_done}/{task.total_chapters}</span>
+                      <span className="task-chapters">{task.chapters_done}/{task.total_chapters || '待定'}</span>
                     </div>
                   </div>
                   <div className="task-actions">

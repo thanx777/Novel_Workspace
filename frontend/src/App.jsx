@@ -1,4 +1,4 @@
-﻿﻿import { useState, useEffect, useCallback } from "react"
+﻿import { useState, useEffect, useCallback } from "react"
 import "./App.css"
 import "./styles/kg_v2.css"
 import translations from "./translations"
@@ -12,7 +12,6 @@ import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./componen
 function App() {
   const [language, setLanguage] = useState("zh")
   const [isDark, setIsDark] = useState(false)
-  const [isRunning, setIsRunning] = useState(false)
   const [agentCatalog, setAgentCatalog] = useState([])
   const [notification, setNotification] = useState(null)
   const [confirmDialog, setConfirmDialog] = useState(null)
@@ -120,6 +119,9 @@ function App() {
                 t={t} language={language}
                 isDark={isDark}
                 presets={presetHook.presets}
+                defaultPreset={presetHook.defaultPreset}
+                handleSetDefaultPreset={presetHook.handleSetDefaultPreset}
+                handleClearDefaultPreset={presetHook.handleClearDefaultPreset}
                 showAddPreset={presetHook.showAddPreset} setShowAddPreset={presetHook.setShowAddPreset}
                 newPresetName={presetHook.newPresetName} setNewPresetName={presetHook.setNewPresetName}
                 newPresetConfig={presetHook.newPresetConfig} setNewPresetConfig={presetHook.setNewPresetConfig}
@@ -149,8 +151,10 @@ function App() {
           setShowPresetSidebar={setShowPresetSidebar}
           showPresetSidebar={showPresetSidebar}
           presets={presetHook.presets}
+          defaultPreset={presetHook.defaultPreset}
           showNotification={showNotification}
-          isRunning={isRunning} setIsRunning={setIsRunning}
+          isRunning={projectV2.isRunning} setIsRunning={projectV2.setIsRunning}
+          runningStage={projectV2.runningStage}
           agentCatalog={agentCatalog}
           projectV2={projectV2}
         />

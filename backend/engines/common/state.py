@@ -91,6 +91,9 @@ class EngineState:
         stage = self._data.setdefault("writing", {})
         rounds = stage.setdefault("rounds", [])
         rounds.append({"round": round_num, "chapter": chapter, "action": action, "score": score, "issues": issues})
+        # 只保留最近200轮记录，避免无限增长
+        if len(rounds) > 200:
+            stage["rounds"] = rounds[-200:]
         stage["current_chapter"] = chapter
         self.save()
 

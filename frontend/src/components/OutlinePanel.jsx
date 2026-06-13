@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react"
 
 const LAYER_META = {
-  L1: { icon: "📚", label: "L1 完整版", color: "#1c1917" },
-  L2: { icon: "🚀", label: "L2 网文版", color: "#c2410c" },
-  L3: { icon: "📝", label: "L3 单章细纲", color: "#0c4a6e" },
+  L1: { icon: "📚", label: "L1 全书大纲", color: "#1c1917" },
+  L2: { icon: "📝", label: "L2 章节细纲", color: "#c2410c" },
 }
 
 const VIEW_META = {
@@ -15,10 +14,6 @@ const VIEW_META = {
   L2: [
     { key: "md",     icon: "📝", label: "Markdown" },
     { key: "tree",   icon: "🌲", label: "树形" },
-    { key: "matrix", icon: "⚡", label: "爽点矩阵" },
-  ],
-  L3: [
-    { key: "list",   icon: "📋", label: "列表" },
     { key: "map",    icon: "🗺", label: "章节地图" },
     { key: "fslink", icon: "🔗", label: "伏笔链路" },
   ],
@@ -27,8 +22,8 @@ const VIEW_META = {
 export default function OutlinePanel({ t, language, projectName, API_BASE, showNotification }) {
   const [layer, setLayer] = useState("L1")
   const [view, setView] = useState("md")
-  const [data, setData] = useState({})  // {L1: {md, json_data}, L2: {md, json_data}, L3: {chapters: [...]}}
-  const [status, setStatus] = useState({})  // 3 层状态
+  const [data, setData] = useState({})  // {L1: {md, json_data}, L2: {md, json_data}}
+  const [status, setStatus] = useState({})  // 2 层状态
   const [selectedCh, setSelectedCh] = useState(null)
   const [regenerating, setRegenerating] = useState(false)
   const [chatMessages, setChatMessages] = useState([])
@@ -37,7 +32,7 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   const [chatExpanded, setChatExpanded] = useState(false)
   const chatEndRef = useRef(null)
 
-  // 加载 3 层状态
+  // 加载 2 层状态
   const loadStatus = async () => {
     if (!projectName) return
     try {
@@ -45,7 +40,7 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
       const j = await r.json()
       setStatus(j)
       // 默认选中第一个存在的层
-      for (const k of ["L1", "L2", "L3"]) {
+      for (const k of ["L1", "L2"]) {
         if (j[k]?.exists) { setLayer(k); break }
       }
     } catch (e) { console.error(e) }
@@ -55,32 +50,10 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   const loadLayer = async (targetLayer) => {
     if (!projectName) return
     try {
-      if (targetLayer === "L3") {
-        // 加载所有章节细纲列表
-        const r = await fetch(`${API_BASE}/api/v2/projects/${encodeURIComponent(projectName)}/outlines/L3`)
-        // 实际是 layer 路径，需要 L3 路径下提供 list 接口；这里改用 status
-        const statusR = await fetch(`${API_BASE}/api/v2/projects/${encodeURIComponent(projectName)}/outlines`)
-        const status = await statusR.json()
-        const chapters = status.L3?.chapters || []
-        // 加载每个章节的细纲
-        const chapterData = {}
-        for (const ch of chapters) {
-          const chR = await fetch(`${API_BASE}/api/v2/projects/${encodeURIComponent(projectName)}/outlines/L3?chapter=${ch}`)
-          if (chR.ok) {
-            const chData = await chR.json()
-            chapterData[ch] = chData
-          }
-        }
-        setData(prev => ({ ...prev, L3: { chapters: chapterData } }))
-        if (chapters.length > 0 && !selectedCh) {
-          setSelectedCh(chapters[0])
-        }
-      } else {
-        const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${targetLayer}`)
-        if (r.ok) {
-          const j = await r.json()
-          setData(prev => ({ ...prev, [targetLayer]: j }))
-        }
+      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${targetLayer}`)
+      if (r.ok) {
+        const j = await r.json()
+        setData(prev => ({ ...prev, [targetLayer]: j }))
       }
     } catch (e) { console.error(e) }
   }
@@ -99,14 +72,12 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   }, [layer])
 
   // 重新生成
-  const onRegenerate = async (chapter) => {
+  const onRegenerate = async () => {
     if (!projectName) return
     setRegenerating(true)
     showNotification?.(language === "zh" ? "🔄 正在重新生成..." : "🔄 Regenerating...", "info")
     try {
-      const url = chapter
-        ? `${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/L3/regenerate?chapter=${chapter}`
-        : `${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${layer}/regenerate`
+      const url = `${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${layer}/regenerate`
       await fetch(url, { method: "POST" })
       await loadStatus()
       await loadLayer(layer)
@@ -118,12 +89,6 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
     }
   }
 
-  // 切到 L3
-  const goToL3 = (ch) => {
-    setLayer("L3")
-    setSelectedCh(ch)
-  }
-
   // AI 对话：发送消息
   const sendChatMessage = async () => {
     const msg = chatInput.trim()
@@ -133,7 +98,6 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
     setChatMessages(prev => [...prev, { role: "user", content: msg }])
     try {
       const body = { message: msg, layer }
-      if (layer === "L3" && selectedCh != null) body.chapter = selectedCh
       const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outline/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -166,9 +130,9 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
         </button>
       </div>
 
-      {/* 3 层 Tab */}
+      {/* 2 层 Tab */}
       <div className="outline-tabs">
-        {["L1", "L2", "L3"].map(k => {
+        {["L1", "L2"].map(k => {
           const m = LAYER_META[k]
           const s = status[k] || {}
           return (
@@ -196,9 +160,8 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
 
       <div className="side-panel-body">
         {/* 内容渲染 */}
-        {layer === "L1" && <L1View view={view} data={data.L1} status={status.L1} goToL3={goToL3} language={language} />}
-        {layer === "L2" && <L2View view={view} data={data.L2} status={status.L2} goToL3={goToL3} language={language} />}
-        {layer === "L3" && <L3View view={view} data={data.L3} selectedCh={selectedCh} setSelectedCh={setSelectedCh} onRegenerate={onRegenerate} regenerating={regenerating} language={language} />}
+        {layer === "L1" && <L1View view={view} data={data.L1} status={status.L1} language={language} />}
+        {layer === "L2" && <L2View view={view} data={data.L2} status={status.L2} language={language} />}
 
         {/* AI 对话 */}
         <div className="outline-chat">
@@ -251,17 +214,17 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
 // ============================================================
 // L1 视图
 // ============================================================
-function L1View({ view, data, status, goToL3, language }) {
+function L1View({ view, data, status, language }) {
   if (!status?.exists) {
-    return <div className="outline-empty">📚 L1 完整版大纲尚未生成</div>
+    return <div className="outline-empty">📚 L1 全书大纲尚未生成</div>
   }
   if (view === "md") return <MarkdownView text={data?.md || ""} />
-  if (view === "tree") return <L1TreeView data={data?.json_data} goToL3={goToL3} language={language} />
+  if (view === "tree") return <L1TreeView data={data?.json_data} language={language} />
   if (view === "graph") return <div className="outline-graph-hint">🕸 关系网视图请切换到"🕸 知识图谱"标签页查看完整效果</div>
   return null
 }
 
-function L1TreeView({ data, goToL3, language }) {
+function L1TreeView({ data, language }) {
   if (!data) return <div className="outline-empty">暂无结构化数据</div>
   const basic = data.basic || {}
   const worldview = data.worldview || {}
@@ -307,139 +270,66 @@ function L1TreeView({ data, goToL3, language }) {
 }
 
 // ============================================================
-// L2 视图
+// L2 视图（合并版：阶段划分 + 逐章细纲）
 // ============================================================
 function L2View({ view, data, status, language }) {
   if (!status?.exists) {
-    return <div className="outline-empty">🚀 L2 网文精简版大纲尚未生成</div>
+    return <div className="outline-empty">📝 L2 章节细纲尚未生成</div>
   }
   if (view === "md") return <MarkdownView text={data?.md || ""} />
   if (view === "tree") {
     const j = data?.json_data || {}
+    const chapters = j.chapters || []
+    const phases = j.phases || []
     return (
       <div className="outline-tree">
-        <TreeNode icon="📘" title="基础信息" defaultOpen>
-          {Object.entries(j.basic || {}).map(([k, v]) => v && <TreeLeaf key={k} label={k} value={v} />)}
-        </TreeNode>
-        <TreeNode icon="🌍" title="简略世界观" defaultOpen>
-          <TreeLeaf label="" value={j.world_brief || "（无）"} />
-        </TreeNode>
-        <TreeNode icon="👥" title="人物速览" defaultOpen>
-          {Object.entries(j.characters || {}).map(([k, v]) => v && <TreeLeaf key={k} label={k} value={v} />)}
-        </TreeNode>
-        <TreeNode icon="🎬" title="三幕" defaultOpen>
-          {Object.entries(j.three_acts || {}).map(([k, v]) => v && <TreeLeaf key={k} label={k} value={v} />)}
-        </TreeNode>
-        <TreeNode icon="⚡" title="阶段节点">
-          {(j.phases || []).map((p, i) => (
+        <TreeNode icon="🎬" title={`阶段划分（${phases.length}）`} defaultOpen>
+          {phases.map((p, i) => (
             <TreeLeaf key={i} label={`阶段${p.阶段号 || i+1}（${p.章节范围 || ""}）`}
-              value={`爽点：${p.爽点 || ""} | ${p.剧情要点 || ""}`} />
+              value={p.核心目标 || ""} />
+          ))}
+        </TreeNode>
+        <TreeNode icon="📝" title={`逐章细纲（${chapters.length}）`}>
+          {chapters.map((ch, i) => (
+            <TreeNode key={i} icon="📄" title={`第${ch.chapter_num || i+1}章 ${ch.title || ""}`}>
+              {ch["核心目的"] && <TreeLeaf label="核心目的" value={ch["核心目的"]} />}
+              {ch["出场人物"] && <TreeLeaf label="出场人物" value={ch["出场人物"]} />}
+              {ch["章节流程"] && <TreeLeaf label="章节流程" value={ch["章节流程"]} />}
+              {ch["情绪/爽点"] && <TreeLeaf label="情绪/爽点" value={ch["情绪/爽点"]} />}
+              {ch["伏笔"] && <TreeLeaf label="伏笔" value={ch["伏笔"]} />}
+              {ch["衔接下章"] && <TreeLeaf label="衔接下章" value={ch["衔接下章"]} />}
+            </TreeNode>
           ))}
         </TreeNode>
       </div>
     )
   }
-  if (view === "matrix") return <HookMatrix data={data?.json_data} language={language} />
-  return null
-}
-
-function HookMatrix({ data, language }) {
-  if (!data) return <div className="outline-empty">暂无数据</div>
-  const phases = data.phases || []
-  const hookTypes = ["升级", "打脸", "逆袭", "甜宠", "解谜", "反转"]
-  // 解析每个阶段的爽点
-  return (
-    <div className="hook-matrix">
-      <div className="hook-matrix-title">⚡ 爽点矩阵</div>
-      <table>
-        <thead>
-          <tr>
-            <th></th>
-            {phases.map((p, i) => <th key={i}>阶段 {i+1}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {hookTypes.map(hook => (
-            <tr key={hook}>
-              <th>{hook}</th>
-              {phases.map((p, i) => {
-                const text = `${p.爽点 || ""} ${p.剧情要点 || ""}`
-                const hit = text.includes(hook)
-                return <td key={i} className={hit ? "hit" : ""}>{hit ? "⚡" : ""}</td>
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-// ============================================================
-// L3 视图
-// ============================================================
-function L3View({ view, data, selectedCh, setSelectedCh, onRegenerate, regenerating, language }) {
-  if (!data?.chapters || Object.keys(data.chapters).length === 0) {
-    return <div className="outline-empty">📝 还没有单章细纲，开始写作后会自动生成</div>
-  }
-  const chapterList = Object.keys(data.chapters).map(Number).sort((a, b) => a - b)
-  const current = data.chapters[selectedCh]
-
-  if (view === "list") {
-    return (
-      <div className="l3-list-view">
-        <div className="l3-chapter-list">
-          {chapterList.map(ch => (
-            <div key={ch} className={`l3-chapter-row ${selectedCh === ch ? "active" : ""}`}
-              onClick={() => setSelectedCh(ch)}>
-              <span className="l3-ch-num">Ch{ch}</span>
-              <span className="l3-ch-title">{data.chapters[ch]?.json_data?.chapter_title || `第${ch}章`}</span>
-            </div>
-          ))}
-        </div>
-        <div className="l3-detail">
-          {current ? (
-            <>
-              <div className="l3-detail-header">
-                <h4>第 {selectedCh} 章：{current.json_data?.chapter_title || ""}</h4>
-                <button onClick={() => onRegenerate(selectedCh)} disabled={regenerating}>🔄 重新生成</button>
-              </div>
-              <MarkdownView text={current.md || ""} />
-            </>
-          ) : <div className="outline-empty">选择左侧章节查看细纲</div>}
-        </div>
-      </div>
-    )
-  }
-
   if (view === "map") {
     // 章节地图：横轴=章号，纵轴=情绪曲线
-    const points = chapterList.map(ch => {
-      const text = data.chapters[ch]?.md || ""
-      const mood = (text.match(/(爽|虐|喜|悲|惊|反转|高潮|低谷)/g) || []).length
-      return { ch, mood, title: data.chapters[ch]?.json_data?.chapter_title || `Ch${ch}` }
+    const j = data?.json_data || {}
+    const chapters = j.chapters || []
+    const points = chapters.map((ch, i) => {
+      const text = `${ch["情绪/爽点"] || ""} ${ch["核心目的"] || ""}`
+      const mood = (text.match(/(爽|虐|喜|悲|惊|反转|高潮|低谷|逆袭|打脸|升级)/g) || []).length
+      return { ch: ch.chapter_num || i + 1, mood, title: ch.title || `Ch${ch.chapter_num || i+1}` }
     })
     const maxMood = Math.max(1, ...points.map(p => p.mood))
     return (
       <div className="l3-map">
         <div className="l3-map-title">🗺 章节地图</div>
         <svg width="100%" height="280" viewBox="0 0 800 280" className="l3-map-svg">
-          {/* 网格线 */}
           {[1,2,3,4].map(i => <line key={i} x1="40" y1={i*50} x2="780" y2={i*50} stroke="#e2e8f0" />)}
-          {/* 折线 */}
           <polyline points={points.map((p, i) => {
             const x = 40 + (i / Math.max(1, points.length-1)) * 740
             const y = 200 - (p.mood / maxMood) * 150
             return `${x},${y}`
-          }).join(" ")} fill="none" stroke="#a855f7" strokeWidth="2" />
-          {/* 节点 */}
+          }).join(" ")} fill="none" stroke="#c2410c" strokeWidth="2" />
           {points.map((p, i) => {
             const x = 40 + (i / Math.max(1, points.length-1)) * 740
             const y = 200 - (p.mood / maxMood) * 150
             return (
               <g key={p.ch}>
-                <circle cx={x} cy={y} r={5 + p.mood} fill="#a855f7"
-                  onClick={() => setSelectedCh(p.ch)} style={{ cursor: "pointer" }} />
+                <circle cx={x} cy={y} r={5 + p.mood} fill="#c2410c" style={{ cursor: "default" }} />
                 <text x={x} y={260} textAnchor="middle" fontSize="11" fill="#475569">Ch{p.ch}</text>
               </g>
             )
@@ -450,31 +340,34 @@ function L3View({ view, data, selectedCh, setSelectedCh, onRegenerate, regenerat
       </div>
     )
   }
-
   if (view === "fslink") {
-    // 伏笔链路
-    return <ForeshadowingLink chapters={data.chapters} chapterList={chapterList} />
+    const j = data?.json_data || {}
+    const chapters = j.chapters || []
+    return <ForeshadowingLink chapters={chapters} />
   }
-
   return null
 }
 
-function ForeshadowingLink({ chapters, chapterList }) {
+function ForeshadowingLink({ chapters }) {
   // 解析每章伏笔
   const fsByCh = {}
-  for (const ch of chapterList) {
-    const text = chapters[ch]?.md || ""
-    const setFs = [...text.matchAll(/埋设[：:]\s*(FS-\d+)/g)].map(m => m[1])
-    const payFs = [...text.matchAll(/回收[：:]\s*(FS-\d+)/g)].map(m => m[1])
-    fsByCh[ch] = { set: setFs, pay: payFs }
+  const chapterList = chapters.map((ch, i) => ch.chapter_num || i + 1)
+  for (const ch of chapters) {
+    const chNum = ch.chapter_num || 1
+    const text = `${ch["伏笔"] || ""}`
+    const setFs = [...text.matchAll(/埋设[：:]*\s*(FS-\d+)/g)].map(m => m[1])
+    const payFs = [...text.matchAll(/回收[：:]*\s*(FS-\d+)/g)].map(m => m[1])
+    fsByCh[chNum] = { set: setFs, pay: payFs }
   }
-  // 所有伏笔 ID
   const allFs = new Set()
   for (const ch of chapterList) {
     fsByCh[ch].set.forEach(x => allFs.add(x))
     fsByCh[ch].pay.forEach(x => allFs.add(x))
   }
   const fsList = [...allFs]
+  if (fsList.length === 0) {
+    return <div className="outline-empty">暂无伏笔数据</div>
+  }
   return (
     <div className="l3-fslink">
       <div className="l3-fslink-title">🔗 伏笔链路</div>
@@ -487,8 +380,8 @@ function ForeshadowingLink({ chapters, chapterList }) {
           <div key={fs} className="fs-row">
             <div className="fs-cell fs-label">{fs}</div>
             {chapterList.map(ch => {
-              const isSet = fsByCh[ch].set.includes(fs)
-              const isPay = fsByCh[ch].pay.includes(fs)
+              const isSet = fsByCh[ch]?.set.includes(fs)
+              const isPay = fsByCh[ch]?.pay.includes(fs)
               return (
                 <div key={ch} className="fs-cell">
                   {isSet && <span className="fs-dot fs-set" title="埋下">●</span>}

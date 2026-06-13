@@ -143,7 +143,7 @@ class ProjectExecutor:
     """
 
     def __init__(self, project_name: str, presets: List[dict],
-                 total_chapters: int = 100, genre: str = "", title: str = ""):
+                 total_chapters: int = 0, genre: str = "", title: str = ""):
         self.project_name = project_name
         self.total_chapters = total_chapters
         self.genre = genre
@@ -222,7 +222,7 @@ class ProjectExecutor:
         info = self.db.get_project()
         project_title = info.get("title") or self.project_name
         project_genre = info.get("genre") or self.genre or ""
-        project_chapters = info.get("total_chapters") or self.total_chapters or 100
+        project_chapters = info.get("total_chapters") or self.total_chapters or 0
 
         # 如果 outline/writing 阶段有前置文件，让引擎能读到
         prev_stage_files = self._collect_prev_stage_files(stage)
@@ -619,7 +619,7 @@ def list_projects_for_api() -> List[Dict]:
 
 
 def create_project_for_api(name: str, title: str = "", genre: str = "",
-                           total_chapters: int = 100) -> Dict:
+                           total_chapters: int = 0) -> Dict:
     return create_project(name=name, title=title, genre=genre, total_chapters=total_chapters)
 
 

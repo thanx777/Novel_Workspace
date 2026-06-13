@@ -6,34 +6,38 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import time
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
-from collections import defaultdict
 
-# Import engine core from executor.py
-from executor import (
-    WORKSPACE_DIR, PROJECTS_DIR,
-    AgentConfig, NodeInfo, ConnectionInfo,
-    GraphTaskRequest, OptimizePromptRequest,
-    FileContent, WorkspaceConfig,
-    GraphExecutor,
-    call_llm, is_llm_error, resolve_system_prompt,
-    extract_and_save_files, get_safe_path, get_full_path,
-    _count_chapters, _resolve_workspace_dir,
-    FRAMEWORK_PROMPTS_STANDARD,
-    MODE_CONFIG, MAX_TOKENS_BY_TYPE, DEFAULT_MAX_TOKENS, DEFAULT_STAGE_TIMEOUT_SECONDS,
-    REQUEST_TIMEOUT,
-    ALL_AGENTS, ALL_SKILLS,
-    load_all_agents, build_role_catalog, get_agent_by_name,
-    load_all_skills, load_skill_content, save_skill, delete_skill, search_skills,
-)
-from agent_loader import load_all_agents as _load_agents, build_role_catalog as _build_catalog, get_agent_by_name as _get_agent
-from skill_loader import load_all_skills as _load_skills, load_skill_content as _load_skill, save_skill as _save_skill, delete_skill as _del_skill, search_skills as _search_skills
+# LLM client (migrated from executor.py)
+from engines.common.llm_client import AgentConfig, call_llm, is_llm_error
+
+# Workspace & file utilities — 同步 project_db 的路径定义
+from project_db import WORKSPACE_DIR as _PDB_WS, PROJECTS_DIR as _PDB_PJ
+WORKSPACE_DIR = _PDB_WS
+PROJECTS_DIR = _PDB_PJ
+
+def _resolve_workspace_dir(path: str, default_name: str) -> str:
+    """Resolve workspace/projects directory path."""
+    if path and path.strip():
+        return os.path.abspath(path.strip())
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), default_name))
+
+def get_full_path(filename: str) -> str:
+    """Get full path for a workspace file."""
+    return os.path.join(WORKSPACE_DIR, filename)
+
+class FileContent(BaseModel):
+    content: str
+
+class WorkspaceConfig(BaseModel):
+    path: str
+from agent_loader import load_all_agents, build_role_catalog, get_agent_by_name
+from skill_loader import load_all_skills, load_skill_content, save_skill, delete_skill, search_skills
 from test_runner import parse_test_instructions, execute_test, terminal_executor_stream, is_dangerous, execute_terminal_force
 
 # V2 API Router（分层大纲 + 知识图谱）
@@ -170,6 +174,26 @@ def update_preset(preset: PresetUpdate):
             _write_config(data)
             return data
     raise HTTPException(status_code=404, detail="Preset not found")
+
+@app.put("/api/presets/default")
+def set_default_preset(name: str):
+    """设置默认预设（新项目自动使用此预设）。"""
+    data = _read_config()
+    # 验证预设存在
+    found = any(p.get("name") == name for p in data.get("presets", []))
+    if not found:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    data["default_preset"] = name
+    _write_config(data)
+    return data
+
+@app.delete("/api/presets/default")
+def clear_default_preset():
+    """清除默认预设。"""
+    data = _read_config()
+    data.pop("default_preset", None)
+    _write_config(data)
+    return data
 
 # ============================================
 # API — Workspace Config
@@ -327,188 +351,19 @@ def delete_project(filename: str):
     raise HTTPException(status_code=404, detail="Project not found")
 
 # ============================================
-# API — Tasks
-# ============================================
-
-@app.get("/api/tasks")
-def list_tasks():
-    tasks = []
-    if not os.path.isdir(WORKSPACE_DIR):
-        return {"tasks": tasks}
-    for entry in sorted(os.listdir(WORKSPACE_DIR), reverse=True):
-        folder = os.path.join(WORKSPACE_DIR, entry)
-        if not os.path.isdir(folder) or not entry.startswith("run_"):
-            continue
-        state_path = os.path.join(folder, "state.json")
-        if not os.path.exists(state_path):
-            continue
-        try:
-            with open(state_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except Exception:
-            continue
-        chapters_done = len(_count_chapters(state.get("saved_files", [])))
-        task_text = state.get("task", "")
-        ch_match = re.search(r"(\d+)\s*[章章]|(\d+)\s*chapters?", task_text)
-        total_ch = int(ch_match.group(1)) if ch_match else 0
-        if chapters_done >= total_ch > 0:
-            status = "completed"
-        elif state.get("round_idx", 0) > 0:
-            status = "in_progress"
-        else:
-            status = "unknown"
-        tasks.append({
-            "folder": entry,
-            "task": task_text[:80],
-            "novel_stage": state.get("novel_stage", ""),
-            "execution_mode": state.get("execution_mode", "standard"),
-            "chapters_done": chapters_done,
-            "total_chapters": total_ch,
-            "round_idx": state.get("round_idx", 0),
-            "updated": state.get("updated", ""),
-            "status": status,
-        })
-    return {"tasks": tasks}
-
-@app.get("/api/tasks/{folder}")
-def get_task_state(folder: str):
-    if ".." in folder or "/" in folder or "\\" in folder:
-        raise HTTPException(status_code=400, detail="Invalid folder")
-    state = GraphExecutor.load_checkpoint(folder)
-    if not state:
-        raise HTTPException(status_code=404, detail="Checkpoint not found")
-    ch_nums = _count_chapters(state.get("saved_files", []))
-    return {
-        "folder": folder,
-        "task": state.get("task", ""),
-        "nodes": state.get("nodes", []),
-        "connections": state.get("connections", []),
-        "presets": state.get("presets", {}),
-        "execution_mode": state.get("execution_mode", "standard"),
-        "novel_stage": state.get("novel_stage", ""),
-        "chapters_done": len(ch_nums),
-        "updated": state.get("updated", ""),
-        "conversation_history": state.get("conversation_history", []),
-    }
-
-@app.post("/api/tasks/{folder}/resume")
-async def resume_task(folder: str):
-    if ".." in folder or "/" in folder or "\\" in folder:
-        raise HTTPException(status_code=400, detail="Invalid folder")
-    state = GraphExecutor.load_checkpoint(folder)
-    if not state:
-        raise HTTPException(status_code=404, detail="Checkpoint not found")
-
-    nodes = [NodeInfo(id=n["id"], type=n["type"], config=n.get("config", {})) for n in state.get("nodes", [])]
-    connections = [ConnectionInfo(
-        id=c["id"], from_node=c.get("from", c.get("from_node", "")),
-        from_port=c.get("fromPort", c.get("from_port", "")),
-        to_node=c.get("to", c.get("to_node", "")),
-        to_port=c.get("toPort", c.get("to_port", "")),
-        annotation=c.get("annotation", ""),
-    ) for c in state.get("connections", [])]
-    presets_list = [v for v in state.get("presets", {}).values()] if isinstance(state.get("presets"), dict) else state.get("presets", [])
-
-    executor = GraphExecutor(
-        nodes=nodes, connections=connections,
-        task=state.get("task", ""),
-        presets=presets_list,
-        skills=state.get("skills", []),
-        conversation_history=state.get("conversation_history", []),
-        run_subfolder=state.get("run_subfolder", folder),
-        outline_review_mode=state.get("outline_review_mode", "manual"),
-    )
-    executor.outputs = state.get("outputs", {})
-    executor.saved_files = state.get("saved_files", [])
-    executor.active_skills = state.get("active_skills", [])
-    executor._novel_stage = state.get("novel_stage", "")
-    executor.node_icons = state.get("node_icons", {})
-    executor.node_roles = state.get("node_roles", {})
-    executor._guard_override = state.get("guard_override", "")
-    executor._consecutive_approvals = state.get("consecutive_approvals", 0)
-    executor._novel_summary = state.get("novel_summary", "")
-    executor._novel_memory = state.get("novel_memory", "")
-    executor._completed_stages = state.get("completed_stages", [])
-    executor._load_memory_from_disk()
-
-    async def event_generator():
-        q = asyncio.Queue()
-        def q_yield(msg):
-            q.put_nowait(msg)
-        # 使用 execute() 而非 _execute_phase_graph()，以正确恢复流水线
-        exec_task = asyncio.create_task(executor.execute(q_yield))
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=0.5)
-                yield {"data": json.dumps(msg, ensure_ascii=False)}
-            except asyncio.TimeoutError:
-                if exec_task.done():
-                    if exec_task.exception():
-                        yield {"data": json.dumps({"status": "error", "message": str(exec_task.exception())}, ensure_ascii=False)}
-                    break
-    return EventSourceResponse(event_generator())
-
-@app.delete("/api/tasks/{folder}")
-def delete_task(folder: str):
-    if ".." in folder or "/" in folder or "\\" in folder:
-        raise HTTPException(status_code=400, detail="Invalid folder")
-    path = os.path.join(WORKSPACE_DIR, folder)
-    if os.path.isdir(path):
-        shutil.rmtree(path)
-        return {"status": "success"}
-    if os.path.exists(path):
-        os.remove(path)
-        return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Task not found")
-
-
-@app.patch("/api/tasks/{folder}")
-def update_task(folder: str, body: dict):
-    if ".." in folder or "/" in folder or "\\" in folder:
-        raise HTTPException(status_code=400, detail="Invalid folder")
-    state_path = os.path.join(WORKSPACE_DIR, folder, "state.json")
-    if not os.path.exists(state_path):
-        raise HTTPException(status_code=404, detail="Task not found")
-    try:
-        with open(state_path, "r", encoding="utf-8") as f:
-            state = json.load(f)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to read state")
-    # Update allowed fields
-    if "task" in body:
-        state["task"] = body["task"]
-    if "execution_mode" in body:
-        state["execution_mode"] = body["execution_mode"]
-    if "nodes" in body:
-        state["nodes"] = body["nodes"]
-    if "presets" in body:
-        state["presets"] = body["presets"]
-    tmp_path = state_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, state_path)
-    return {"status": "success"}
-
-# ============================================
 # API — Prompt Templates & Agent Catalog
 # ============================================
 
 @app.get("/api/prompt-templates")
 def get_prompt_templates():
-    frameworks = {}
-    for key, prompt in FRAMEWORK_PROMPTS_STANDARD.items():
-        frameworks[key] = {
-            "name": {"manager": "Manager", "worker": "Worker", "reviewer": "Reviewer"}.get(key, key),
-            "icon": {"manager": "🎯", "worker": "⚡", "reviewer": "🔍"}.get(key, "🤖"),
-            "desc": prompt[:80].replace("\n", " "),
-            "role": key,
-        }
-    return {"frameworks": frameworks}
+    """提示词模板列表（已迁移到新引擎，此端点保留兼容）。"""
+    return {"frameworks": {}}
 
 @app.get("/api/agent-catalog")
 def get_agent_catalog():
+    agents_list = load_all_agents()
     agents = []
-    for a in ALL_AGENTS:
+    for a in agents_list:
         agents.append({
             "name": a["name"],
             "description": a["description"],
@@ -520,6 +375,10 @@ def get_agent_catalog():
 # ============================================
 # API — Optimize Prompt
 # ============================================
+
+class OptimizePromptRequest(BaseModel):
+    task: str
+    preset: dict
 
 OPTIMIZE_SYSTEM_PROMPT = "You are a task optimizer. Rewrite user input into a clear, structured, executable task description. Preserve all key requirements. Output only the optimized task."
 
@@ -567,14 +426,14 @@ class SkillFindRequest(BaseModel):
 @app.get("/api/skills")
 def api_list_skills():
     try:
-        skills = _load_skills()
+        skills = load_all_skills()
         return {"skills": skills, "status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/skills/{name}")
 def api_get_skill(name: str):
-    skill = _load_skill(name)
+    skill = load_skill_content(name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
     return {"skill": skill, "status": "success"}
@@ -598,80 +457,23 @@ async def api_create_skill(req: SkillCreateRequest):
                 content = result.strip()
         except Exception:
             pass
-    _save_skill(req.name, content, req.description, req.category)
+    save_skill(req.name, content, req.description, req.category)
     return {"status": "success", "name": req.name}
 
 @app.put("/api/skills/{name}")
 def api_update_skill(name: str, req: SkillUpdateRequest):
-    _save_skill(name, req.content, req.description, req.category, req.tags)
+    save_skill(name, req.content, req.description, req.category, req.tags)
     return {"status": "success", "name": name}
 
 @app.delete("/api/skills/{name}")
 def api_delete_skill(name: str):
-    _del_skill(name)
+    delete_skill(name)
     return {"status": "success"}
 
 @app.post("/api/skills/find")
 def api_find_skill(req: SkillFindRequest):
-    results = _search_skills(req.query)
+    results = search_skills(req.query)
     return {"results": results, "status": "success"}
-
-# ============================================
-# API — Run Task & Feedback
-# ============================================
-
-@app.post("/api/run-task/feedback")
-async def send_feedback(feedback: dict):
-    executor = GraphExecutor._current_executor
-    if executor and not executor.cancelled:
-        await executor.feedback_queue.put(feedback.get("message", ""))
-        return {"status": "accepted"}
-    return {"status": "no_active_executor"}
-
-@app.post("/api/stop-task")
-def stop_task():
-    stopped = 0
-    if GraphExecutor._current_executor:
-        GraphExecutor._current_executor.cancelled = True
-        stopped += 1
-    for ex in list(GraphExecutor._active_executors):
-        ex.cancelled = True
-        stopped += 1
-    GraphExecutor._active_executors.clear()
-    return {"status": "stopped", "count": stopped}
-
-@app.post("/api/run-task")
-async def run_task(req: GraphTaskRequest):
-    return EventSourceResponse(_run_graph_task(req))
-
-async def _run_graph_task(req: GraphTaskRequest):
-    executor = GraphExecutor(
-        nodes=req.nodes,
-        connections=req.connections,
-        task=req.task,
-        presets=req.presets,
-        skills=req.skills,
-        conversation_history=req.conversation_history,
-        outline_review_mode=getattr(req, 'outline_review_mode', 'manual'),
-    )
-    q = asyncio.Queue()
-    def q_yield(msg):
-        q.put_nowait(msg)
-    exec_task = asyncio.create_task(executor.execute(q_yield))
-    while True:
-        try:
-            msg = await asyncio.wait_for(q.get(), timeout=0.5)
-            yield {"data": json.dumps(msg, ensure_ascii=False)}
-        except asyncio.TimeoutError:
-            if exec_task.done():
-                while not q.empty():
-                    try:
-                        msg = q.get_nowait()
-                        yield {"data": json.dumps(msg, ensure_ascii=False)}
-                    except asyncio.QueueEmpty:
-                        break
-                break
-    await exec_task
 
 # ============================================
 # API — Test Connection
@@ -805,9 +607,9 @@ async def terminal_websocket(websocket: WebSocket):
 
 from project_db import (
     ProjectDB, list_all_projects, create_project, delete_project,
-    get_project_file, read_file_safe, write_file_safe, WORKSPACE_DIR as PDB_WS,
+    get_project_file, read_file_safe, write_file_safe,
+    WORKSPACE_DIR as PDB_WS, PROJECTS_DIR as PDB_PJ,
 )
-from project_executor import ProjectExecutor, list_projects_for_api, sync_chapters_to_db
 from assistant import ProjectAssistant
 
 
@@ -820,15 +622,6 @@ class _ProjectCreate(BaseModel):
     outline_layers: Optional[dict] = None
     extra_requirements: str = ""
     role_presets: Optional[dict] = None
-
-
-class _ProjectRunStage(BaseModel):
-    project_name: str
-    stage: str  # outline | writing | polish
-    task: str = ""
-    outline_review_mode: str = "manual"  # auto | manual（默认 manual：人工确认大纲）
-    outline_layers: Optional[dict] = None
-    presets: List[dict] = []
 
 
 class _ProjectPresets(BaseModel):
@@ -847,7 +640,7 @@ class _AssistantChat(BaseModel):
 def v2_list_projects():
     """新版项目列表（从 SQLite 读）。"""
     try:
-        data = list_projects_for_api()
+        data = list_all_projects()
         return {"projects": data}
     except Exception as e:
         return {"projects": [], "error": str(e)}
@@ -1046,10 +839,9 @@ def v2_confirm_outline(project_name: str):
     """人工审查大纲后，推进到写作阶段。"""
     try:
         db = ProjectDB(project_name)
-        info = db.to_dict()
+        db.update_project(current_stage="writing")
+        data = db.to_dict()
         db.close()
-        pe = ProjectExecutor(project_name, [])
-        data = pe.confirm_outline_and_continue()
         return {"success": True, "stage": "writing", "project": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1057,114 +849,39 @@ def v2_confirm_outline(project_name: str):
 
 @app.post("/api/v2/projects/{project_name}/reject-outline")
 def v2_reject_outline(project_name: str):
-    """审查不通过，停留在 outline 状态，让用户修改/重新生成。"""
+    """审查不通过，停留在 outline 状态。"""
     try:
-        pe = ProjectExecutor(project_name, [])
-        data = pe.reject_outline_and_restart()
+        db = ProjectDB(project_name)
+        db.update_project(current_stage="outline")
+        data = db.to_dict()
+        db.close()
         return {"success": True, "stage": "outline", "project": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v2/projects/run-stage")
-async def v2_run_stage(req: _ProjectRunStage):
-    """启动一个阶段的引擎（流式 SSE 返回）。"""
-    return EventSourceResponse(_v2_run_stage_stream(req))
-
-
-async def _v2_run_stage_stream(req: _ProjectRunStage):
-    """阶段执行的 SSE 流。每次产出事件包含：进度/产出/阶段完成/暂停。"""
+@app.post("/api/v2/projects/{project_name}/confirm-writing")
+def v2_confirm_writing(project_name: str):
+    """写作完成后，推进到审校阶段。"""
     try:
-        # 先把 outline_review_mode 写入项目元数据
-        if req.outline_review_mode and req.stage == "outline":
-            try:
-                db = ProjectDB(req.project_name)
-                db.update_project(outline_review_mode=req.outline_review_mode)
-                db.close()
-            except Exception:
-                pass
-
-        # 解析 presets：
-        # 优先用请求里的 presets；如果为空，尝试从项目数据库读取
-        presets = list(req.presets or [])
-        if not presets:
-            try:
-                db = ProjectDB(req.project_name)
-                project_presets = db.get_presets()
-                db.close()
-                # 把 DB 里存的是 {manager:{...} 形式，转换为 executor 需要的 list[dict]
-                preset_list = []
-                for role in ("manager", "worker", "reviewer"):
-                    p = project_presets.get(role) or {}
-                    if p and isinstance(p, dict) and p.get("api_key"):
-                        preset_list.append(p)
-                if preset_list:
-                    presets = preset_list
-            except Exception:
-                pass
-
-        executor = ProjectExecutor(req.project_name, presets)
-        q = asyncio.Queue()
-
-        def q_yield(msg):
-            try:
-                q.put_nowait(msg)
-            except Exception:
-                pass
-
-        exec_task = asyncio.create_task(
-            executor.run_stage(
-                stage=req.stage,
-                task=req.task,
-                outline_review_mode=req.outline_review_mode,
-                yield_func=q_yield,
-            )
-        )
-
-        # 发送初始消息
-        q_yield({
-            "status": "start",
-            "stage": req.stage,
-            "project_name": req.project_name,
-            "message": f"开始 {req.stage} 阶段",
-        })
-
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=0.5)
-                yield {"data": json.dumps(msg, ensure_ascii=False)}
-            except asyncio.TimeoutError:
-                if exec_task.done():
-                    # 清空队列里的剩余消息
-                    while not q.empty():
-                        try:
-                            msg = q.get_nowait()
-                            yield {"data": json.dumps(msg, ensure_ascii=False)}
-                        except asyncio.QueueEmpty:
-                            break
-                    break
-
-        try:
-            result = await exec_task
-            yield {"data": json.dumps({"status": "finished", "result": result, "stage": req.stage}, ensure_ascii=False)}
-        except Exception as e:
-            yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
-
+        db = ProjectDB(project_name)
+        db.update_project(current_stage="review")
+        data = db.to_dict()
+        db.close()
+        return {"success": True, "stage": "review", "project": data}
     except Exception as e:
-        yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v2/projects/{project_name}/stop")
-async def v2_stop_stage(project_name: str):
-    """停止当前项目的引擎执行。"""
+@app.post("/api/v2/projects/{project_name}/confirm-review")
+def v2_confirm_review(project_name: str):
+    """审校完成，标记项目为已完成。"""
     try:
-        # 粗暴做法：取消全局 executor
-        if GraphExecutor._current_executor:
-            try:
-                GraphExecutor._current_executor.cancelled = True
-            except Exception:
-                pass
-        return {"success": True, "project_name": project_name}
+        db = ProjectDB(project_name)
+        db.update_project(current_stage="done")
+        data = db.to_dict()
+        db.close()
+        return {"success": True, "stage": "done", "project": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

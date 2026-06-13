@@ -1,6 +1,47 @@
 import { useState, useCallback, useEffect, useRef } from "react"
 import { API_BASE } from "../constants"
 
+/** 将 SSE 事件转换为可读日志条目 */
+function formatSSEEvent(data) {
+  const ts = data.timestamp || Date.now()
+  const status = data.status || "info"
+  const role = data.role || ""
+
+  // 人类可读的 status 映射
+  const STATUS_MSG = {
+    mwr_round: `MWR 第 ${data.round}/${data.max_rounds || 5} 轮`,
+    manager_decided: `Manager 决策: ${data.action === "write" ? "撰写" : data.action === "polish" ? "润色" : data.action === "review" ? "审校" : data.action}`,
+    chapter_writing: `正在撰写第 ${data.chapter} 章`,
+    chapter_written: `第 ${data.chapter} 章撰写完成`,
+    chapter_polishing: `正在润色第 ${data.chapter} 章 (第 ${data.polish_round} 轮)`,
+    chapter_polished: `第 ${data.chapter} 章润色完成`,
+    writer_done: `Writer 完成第 ${data.round} 轮`,
+    reviewer_done: `Reviewer 评分: ${data.score}/10${data.issues?.length ? " — " + data.issues.slice(0, 3).join("; ") : ""}`,
+    cycle_completed: `MWR 循环通过 (评分 ${data.score})`,
+    cycle_stuck: `连续相同问题未解决，提前退出`,
+    cycle_ended: data.accepted ? "MWR 循环通过" : `MWR 循环结束: ${data.reason || "未通过"}`,
+    cycle_cancelled: "已取消",
+    outline_layer_done: `${data.layer} 大纲完成`,
+    outline_layer_start: `开始 ${data.layer} 大纲`,
+    outline_done: "大纲生成完成",
+    writing_done: "写作完成",
+    review_done: "审校完成",
+    done: "完成",
+    error: `错误: ${data.message || data.reason || "未知错误"}`,
+    info: data.message || "",
+  }
+
+  const message = STATUS_MSG[status] || data.message || data.reason || status
+  // 映射 status 到日志级别
+  let logStatus = "info"
+  if (["error", "cycle_cancelled"].includes(status)) logStatus = "error"
+  else if (["cycle_stuck", "cycle_ended"].includes(status) && !data.accepted) logStatus = "warning"
+  else if (["done", "cycle_completed", "cycle_ended", "outline_done", "writing_done", "review_done", "chapter_written", "chapter_polished", "outline_layer_done"].includes(status)) logStatus = "done"
+  else if (["chapter_writing", "chapter_polishing", "mwr_round"].includes(status)) logStatus = "start"
+
+  return { status: logStatus, role, message, timestamp: ts }
+}
+
 /**
  * v2 Project Hook — SQLite 驱动的项目中心。
  * 核心功能：
@@ -18,6 +59,8 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   const [loadingList, setLoadingList] = useState(false)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
+  const [runningStage, setRunningStage] = useState(null)  // "outline" | "writing" | "review"
+  const [kgRefreshKey, setKgRefreshKey] = useState(0)  // 递增触发 KG 刷新
 
   // ---------- 列表 ----------
   const fetchProjects = useCallback(async () => {
@@ -36,10 +79,22 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   }, [])
 
   // ---------- 详情 ----------
+  const syncChapters = useCallback(async (name) => {
+    if (!name) return
+    try {
+      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/sync-chapters`, { method: "POST" })
+    } catch (e) {
+      console.error("[v2] sync chapters failed:", e)
+    }
+  }, [])
+
   const loadProject = useCallback(async (name) => {
     if (!name) return
     setLoadingDetail(true)
     try {
+      // 先同步章节标题，确保数据库中的章节信息是最新的
+      await syncChapters(name)
+
       const [projResp, chaptersResp, memoryResp, chatResp] = await Promise.all([
         fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}`),
         fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/chapters`),
@@ -170,128 +225,57 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     }
   }, [showNotification, loadProject])
 
+  // ---------- 写作确认 ----------
+  const confirmWriting = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/confirm-writing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      await loadProject(name)
+      showNotification && showNotification("写作已确认，推进至审校阶段", "success")
+      return true
+    } catch (e) {
+      showNotification && showNotification("确认失败: " + e.message, "error")
+      return false
+    }
+  }, [showNotification, loadProject])
+
+  // ---------- 审校确认 ----------
+  const confirmReview = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/confirm-review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      await loadProject(name)
+      showNotification && showNotification("审校完成，项目已标记为完成", "success")
+      return true
+    } catch (e) {
+      showNotification && showNotification("确认失败: " + e.message, "error")
+      return false
+    }
+  }, [showNotification, loadProject])
+
   // ---------- 停止 ----------
-  const runStageAbortRef = useRef(null)  // 当前正在跑的请求，可被 stopTask 取消
+  const engineAbortRef = useRef(null)  // 当前正在跑的 SSE 请求，可被 stopTask 取消
 
   const stopTask = useCallback(async (name) => {
     try {
-      // 停止旧引擎
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/stop`, { method: "POST" }).catch(() => {})
       // 停止新引擎
       await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/stop`, { method: "POST" }).catch(() => {})
       // 中断前端 SSE 请求
-      if (runStageAbortRef.current) { try { runStageAbortRef.current.abort() } catch (e) {} }
+      if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
       setIsRunning(false)
+      setRunningStage(null)
       showNotification && showNotification(t?.("taskStopped") || "已停止", "info")
       await loadProject(name)
     } catch (e) {
       showNotification && showNotification("停止失败: " + e.message, "error")
     }
   }, [showNotification, loadProject, t])
-
-  // ---------- 启动阶段（流式 SSE） ----------
-
-  const runStage = useCallback(async ({
-    projectName, stage, task = "",
-    onLogEvent = null,
-  }) => {
-    if (!projectName) return
-
-    // 如果已有任务在跑：取消旧任务（避免 ERR_ABORTED 噪声 & 重复发请求）
-    if (runStageAbortRef.current) {
-      try { runStageAbortRef.current.abort() } catch (_) {}
-      runStageAbortRef.current = null
-    }
-
-    const abortCtrl = new AbortController()
-    runStageAbortRef.current = abortCtrl
-
-    setIsRunning(true)
-    const presetsPayload = (presets || []).map(p => ({
-      name: p.name || "", api_key: p.api_key || "",
-      base_url: p.base_url || "", model: p.model || "",
-      api_format: p.api_format || "openai",
-      chat_template_kwargs: p.chat_template_kwargs || null,
-    }))
-
-    // 阶段开始事件推给前端
-    if (onLogEvent) {
-      const stageLabels = { outline: "大纲", writing: "写作", polish: "润色", done: "完成" }
-      onLogEvent({
-        status: "start", role: "系统", stage,
-        message: `▶ 开始 ${stageLabels[stage] || stage} 阶段...`,
-        timestamp: Date.now(),
-      })
-    }
-
-    try {
-      const resp = await fetch(`${API_BASE}/v2/projects/run-stage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project_name: projectName, stage, task,
-          presets: presetsPayload,
-        }),
-        signal: abortCtrl.signal,
-      })
-
-      if (!resp.ok) {
-        const err = await resp.text()
-        throw new Error(`HTTP ${resp.status}: ${err}`)
-      }
-      const reader = resp.body?.getReader()
-      if (!reader) throw new Error("No stream reader")
-      const decoder = new TextDecoder()
-      const receivedEvents = []
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const chunk = decoder.decode(value)
-        for (const line of chunk.split("\n")) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              receivedEvents.push(data)
-              if (onLogEvent) {
-                onLogEvent({ ...data, timestamp: Date.now() })
-              }
-              if (data.status === "finished" || data.status === "done") {
-                showNotification && showNotification("阶段完成", "success")
-              }
-              if (data.status === "error") {
-                showNotification && showNotification(data.message || "出错", "error")
-              }
-            } catch (e) {
-              // 忽略格式错误的数据行
-            }
-          }
-        }
-      }
-
-      await loadProject(projectName)
-      return receivedEvents
-    } catch (e) {
-      // 用户主动 abort 不算错误
-      if (e?.name === "AbortError") {
-        if (onLogEvent) {
-          onLogEvent({ status: "info", role: "系统", message: "已停止当前阶段", timestamp: Date.now() })
-        }
-        return []
-      }
-      console.error("[v2] run stage failed:", e)
-      if (onLogEvent) {
-        onLogEvent({ status: "error", role: "系统", message: "执行失败: " + e.message, timestamp: Date.now() })
-      }
-      showNotification && showNotification("执行失败: " + e.message, "error")
-      return []
-    } finally {
-      if (runStageAbortRef.current === abortCtrl) {
-        runStageAbortRef.current = null
-      }
-      setIsRunning(false)
-    }
-  }, [showNotification, presets, loadProject])
 
   // ---------- AI 助理对话 ----------
   const assistantChat = useCallback(async (name, message) => {
@@ -316,60 +300,6 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       return ""
     }
   }, [showNotification, presets, loadProject])
-
-  // ---------- AI 添加人物 ----------
-  const aiAddCharacter = useCallback(async (name, description, presetName = "") => {
-    try {
-      const presetsPayload = (presets || []).map(p => ({
-        name: p.name || "", api_key: p.api_key || "",
-        base_url: p.base_url || "", model: p.model || "",
-        api_format: p.api_format || "openai",
-        chat_template_kwargs: p.chat_template_kwargs || null,
-      }))
-      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/ai-add-character`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          description,
-          presets: presetsPayload,
-          preset_name: presetName || "",
-        }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data = await resp.json()
-      if (data.success) {
-        await loadProject(name)
-        showNotification && showNotification("AI 已添加人物到 characters.md", "success")
-        return data
-      }
-      throw new Error(data.error || "AI 生成失败")
-    } catch (e) {
-      showNotification && showNotification("AI 添加人物失败: " + e.message, "error")
-      return { success: false, error: e.message }
-    }
-  }, [showNotification, presets, loadProject])
-
-  // ---------- 删除单个角色 ----------
-  const deleteCharacter = useCallback(async (name, charName) => {
-    try {
-      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/delete-character`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: charName }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data = await resp.json()
-      if (data.success) {
-        await loadProject(name)
-        showNotification && showNotification(`已删除角色「${charName}」`, "success")
-        return data
-      }
-      throw new Error(data.error || "删除失败")
-    } catch (e) {
-      showNotification && showNotification("删除角色失败: " + e.message, "error")
-      return { success: false, error: e.message }
-    }
-  }, [showNotification, loadProject])
 
   // ---------- 写入文件 ----------
   const putFile = useCallback(async (name, file, content) => {
@@ -412,11 +342,34 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     }
   }, [])
 
+  // ---------- 历史日志 ----------
+  const loadRunLogs = useCallback(async (name, limit = 500) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/logs?limit=${limit}`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json()
+      return (data.logs || []).map(evt => formatSSEEvent({ ...evt, timestamp: evt.timestamp || Date.now() }))
+    } catch (e) {
+      return []
+    }
+  }, [])
+
+  const clearRunLogs = useCallback(async (name) => {
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/logs`, { method: "DELETE" })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      return true
+    } catch (e) {
+      return false
+    }
+  }, [])
+
   // ---------- 引擎：启动大纲生成（SSE 流式） ----------
   const engineOutlineGenerate = useCallback(async (name, { layer = "", requirements = "", onLogEvent = null } = {}) => {
     setIsRunning(true)
+    setRunningStage("outline")
     const abortCtrl = new AbortController()
-    runStageAbortRef.current = abortCtrl
+    engineAbortRef.current = abortCtrl
     try {
       const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/outline/generate/stream`, {
         method: "POST",
@@ -436,9 +389,13 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
               if (data.status === "done") showNotification && showNotification("大纲生成完成", "success")
               if (data.status === "error") showNotification && showNotification(data.message || "大纲生成出错", "error")
+              // 大纲层完成时刷新项目数据
+              if (data.status === "outline_layer_done" || data.status === "done") loadProject(name)
+              // 大纲完成后也刷新 KG
+              if (data.status === "outline_layer_done" || data.status === "done") setKgRefreshKey(k => k + 1)
             } catch (e) {}
           }
         }
@@ -451,8 +408,9 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         showNotification && showNotification("大纲生成失败: " + e.message, "error")
       }
     } finally {
-      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
       setIsRunning(false)
+      setRunningStage(null)
     }
   }, [showNotification, loadProject])
 
@@ -476,8 +434,9 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   // ---------- 引擎：启动写作（SSE 流式） ----------
   const engineWritingStart = useCallback(async (name, { startChapter = 1, totalChapters = 0, onLogEvent = null } = {}) => {
     setIsRunning(true)
+    setRunningStage("writing")
     const abortCtrl = new AbortController()
-    runStageAbortRef.current = abortCtrl
+    engineAbortRef.current = abortCtrl
     try {
       const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/writing/start/stream`, {
         method: "POST",
@@ -497,9 +456,13 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
               if (data.status === "done") showNotification && showNotification("写作完成", "success")
               if (data.status === "error") showNotification && showNotification(data.message || "写作出错", "error")
+              // 章节写完时刷新项目数据（同步章节列表和进度）
+              if (data.status === "chapter_written" || data.status === "chapter_completed" || data.status === "done") loadProject(name)
+              // KG 摄取完成后触发图谱刷新
+              if (data.status === "chapter_completed" || data.status === "kg_ingested") setKgRefreshKey(k => k + 1)
             } catch (e) {}
           }
         }
@@ -512,8 +475,9 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         showNotification && showNotification("写作失败: " + e.message, "error")
       }
     } finally {
-      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
       setIsRunning(false)
+      setRunningStage(null)
     }
   }, [showNotification, loadProject])
 
@@ -537,8 +501,9 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   // ---------- 引擎：启动全局审校（SSE 流式） ----------
   const engineReviewStart = useCallback(async (name, { onLogEvent = null } = {}) => {
     setIsRunning(true)
+    setRunningStage("review")
     const abortCtrl = new AbortController()
-    runStageAbortRef.current = abortCtrl
+    engineAbortRef.current = abortCtrl
     try {
       const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/review/start/stream`, {
         method: "POST",
@@ -557,7 +522,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent({ ...data, timestamp: Date.now() })
+              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
               if (data.status === "done") showNotification && showNotification("全局审校完成", "success")
               if (data.status === "error") showNotification && showNotification(data.message || "审校出错", "error")
             } catch (e) {}
@@ -572,8 +537,9 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         showNotification && showNotification("审校失败: " + e.message, "error")
       }
     } finally {
-      if (runStageAbortRef.current === abortCtrl) runStageAbortRef.current = null
+      if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
       setIsRunning(false)
+      setRunningStage(null)
     }
   }, [showNotification, loadProject])
 
@@ -655,22 +621,22 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     projects, setProjects,
     activeProject, setActiveProject,
     loadingList, loadingDetail,
-    isRunning, setIsRunning,
+    isRunning, setIsRunning, runningStage, kgRefreshKey,
 
     // actions
     fetchProjects, loadProject,
     createProject, deleteProject,
     updateChapter, addMemory,
     confirmOutline, rejectOutline,
-    stopTask, runStage,
+    confirmWriting, confirmReview,
+    stopTask,
     assistantChat,
-    aiAddCharacter,
-    deleteCharacter,
     putFile, getFile,
     migrateOld,
     loadProjectPresets, saveProjectPresets,
     // 新引擎 API
     getEngineState,
+    loadRunLogs, clearRunLogs,
     engineOutlineGenerate, engineOutlineChat, getOutlineState,
     engineWritingStart, engineWritingChat, getWritingState,
     engineReviewStart, getReviewState,

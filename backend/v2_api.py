@@ -4,6 +4,7 @@ v2 API 模块：分层大纲 + 知识图谱的 API 端点
 """
 import os
 import json
+import time
 import asyncio
 from typing import List, Dict, Optional, Any
 
@@ -16,14 +17,42 @@ from project_db import (
     ProjectDB, get_project_dir, read_file_safe, write_file_safe, list_all_projects,
 )
 from outline_templates import parse_markdown_to_json, validate_template, LAYER_NAMES
-from outline_pipeline import OutlinePipeline
 from knowledge_graph import KnowledgeGraph, NODE_COLORS, LAYER_COLORS
 from memory_pipeline import IngestPipeline
+from engines.common.state import EngineState
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
 
 # 当前运行的引擎引用（用于 stop 端点取消）
 _running_engine = None
+
+
+# ============================================================
+# 日志持久化
+# ============================================================
+
+def _append_run_log(project_dir: str, event: dict):
+    """将一条 SSE 事件追加到项目的 run_log.jsonl。"""
+    log_path = os.path.join(project_dir, "run_log.jsonl")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _read_run_log(project_dir: str, limit: int = 500) -> List[dict]:
+    """读取项目的历史日志（最新的 limit 条）。"""
+    log_path = os.path.join(project_dir, "run_log.jsonl")
+    if not os.path.isfile(log_path):
+        return []
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        # 返回最新的 limit 条
+        return [json.loads(line) for line in lines[-limit:] if line.strip()]
+    except Exception:
+        return []
 
 
 # ============================================================
@@ -34,9 +63,11 @@ class ProjectCreateRequest(BaseModel):
     name: str
     title: str = ""
     genre: str = ""
-    total_chapters: int = 100
+    total_chapters: int = 0
     description: str = ""
-    outline_layers: Optional[Dict[str, bool]] = None  # {"L1": true, "L2": true, "L3": true}
+    outline_layers: Optional[Dict[str, bool]] = None  # {"L1": true, "L2": true}
+    extra_requirements: str = ""
+    role_presets: Optional[Dict[str, Dict]] = None  # {"manager": {...}, "worker": {...}, ...}
 
 
 class OutlineLayersRequest(BaseModel):
@@ -64,9 +95,132 @@ def get_project(name: str):
         db = ProjectDB(name)
         info = db.get_project()
         info["outline_layers"] = db.get_outline_layers()
+        # 合并进度数据，让前端能获取 chapters_done 和 total_words
+        progress = db.get_progress()
+        info["chapters_done"] = progress.get("done", 0)
+        info["total_words"] = progress.get("total_words", 0)
         return info
     except Exception as e:
         raise HTTPException(404, f"Project not found: {e}")
+
+
+@router.post("/projects/{name}/sync-chapters")
+def sync_chapters(name: str):
+    """手动触发：从已有章节文件中同步章节标题到数据库。
+    只同步已有实际内容的章节，不创建空章节条目。
+    """
+    import re as _re
+    project_dir = get_project_dir(name)
+    db = ProjectDB(name)
+    chapters_found = {}
+
+    # 1. 从已写好的章节文件中提取标题
+    chapters_dir = os.path.join(project_dir, "chapters")
+    if os.path.isdir(chapters_dir):
+        for fname in os.listdir(chapters_dir):
+            m = _re.match(r"第(\d+)章\.txt$", fname)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            fpath = os.path.join(chapters_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if not content.strip():
+                    continue  # 跳过空文件
+                # 优先从 chapter_titles.json 获取标题
+                title = None
+                titles_path = os.path.join(project_dir, "chapter_titles.json")
+                if os.path.isfile(titles_path):
+                    try:
+                        with open(titles_path, "r", encoding="utf-8") as tf:
+                            titles_map = json.load(tf)
+                        title = titles_map.get(str(idx))
+                    except Exception:
+                        pass
+                if not title:
+                    # 从章节内容中提取标题
+                    title = f"第{idx}章"
+                    for line in content.strip().split("\n"):
+                        line = line.strip()
+                        if not line or line.startswith("---PREV:") or line.startswith("---CAST:") or line.startswith("---THREAD:") or line.startswith("---STRAND:") or line == "---":
+                            continue
+                        tm = _re.match(r"^#+\s*第[一二三四五六七八九十百千\d]+章\s*(.*)", line)
+                        if tm and tm.group(1).strip():
+                            title = f"第{idx}章 " + tm.group(1).strip()
+                            break
+                        tm = _re.match(r"^#+\s*(.+)", line)
+                        if tm and tm.group(1).strip():
+                            t = _re.sub(r"^第[一二三四五六七八九十百千\d]+章\s*", "", tm.group(1).strip())
+                            if t:
+                                title = f"第{idx}章 " + t
+                            break
+                chapters_found[idx] = title
+            except Exception:
+                chapters_found[idx] = f"第{idx}章"
+
+    # 2. 写入数据库（只写入有内容的章节，补充 word_count 和 status）
+    for idx, title in chapters_found.items():
+        fpath = os.path.join(project_dir, "chapters", f"第{idx}章.txt")
+        content = read_file_safe(fpath, "")
+        word_count = len(content.replace(" ", "").replace("\n", "")) if content else 0
+        status = "drafted" if content.strip() else "not_started"
+        db.upsert_chapter(idx, title=title, word_count=word_count, status=status)
+
+    # 3. 更新 total_chapters（优先从 L1 JSON，其次从 chapter_titles.json，最后数 L2 章节）
+    total = 0
+    # 3a. 优先从 L1 JSON 的 basic.总章节数 提取（支持范围格式如"120-150"取最大值）
+    try:
+        l1_json_path = os.path.join(project_dir, "outline_L1.json")
+        if os.path.isfile(l1_json_path):
+            with open(l1_json_path, "r", encoding="utf-8") as f:
+                l1_json = json.load(f)
+            tc = l1_json.get("basic", {}).get("总章节数", "")
+            if tc:
+                tc_str = str(tc).strip()
+                range_m = _re.match(r"(\d+)\s*[-–—]\s*(\d+)", tc_str)
+                if range_m:
+                    total = int(range_m.group(2))
+                elif tc_str.isdigit():
+                    total = int(tc_str)
+    except Exception:
+        pass
+    # 3b. 从 chapter_titles.json 获取
+    if total == 0:
+        titles_path = os.path.join(project_dir, "chapter_titles.json")
+        if os.path.isfile(titles_path):
+            try:
+                with open(titles_path, "r", encoding="utf-8") as f:
+                    titles_map = json.load(f)
+                total = len(titles_map)
+            except Exception:
+                pass
+    # 3c. 数 L2 中的章节标题
+    if total == 0:
+        l2_path = os.path.join(project_dir, "outline_L2.md")
+        if os.path.isfile(l2_path):
+            with open(l2_path, "r", encoding="utf-8") as f:
+                l2_md = f.read()
+            for m in _re.finditer(r"###\s*第\s*(\d+)\s*章", l2_md):
+                total += 1
+    # 3d. 从 L2 阶段范围推断
+    if total == 0:
+        l2_path = os.path.join(project_dir, "outline_L2.md")
+        if os.path.isfile(l2_path):
+            with open(l2_path, "r", encoding="utf-8") as f:
+                l2_md = f.read()
+            max_ch = 0
+            for m in _re.finditer(r"第\s*(\d+)\s*[-–—]\s*(\d+)\s*章", l2_md):
+                end_ch = int(m.group(2))
+                if end_ch > max_ch:
+                    max_ch = end_ch
+            if max_ch > 0:
+                total = max_ch
+    if total > 0:
+        db.update_project(total_chapters=total)
+
+    db.close()
+    return {"synced": len(chapters_found), "total_chapters": total}
 
 
 @router.post("/projects")
@@ -78,7 +232,6 @@ def create_project(req: ProjectCreateRequest):
             title=req.title or req.name,
             genre=req.genre,
             total_chapters=req.total_chapters,
-            execution_mode="lite",
             outline_review_mode="auto",
             outline_layers=req.outline_layers,
         )
@@ -87,6 +240,20 @@ def create_project(req: ProjectCreateRequest):
     db = ProjectDB(req.name)
     if req.outline_layers:
         db.set_outline_layers(req.outline_layers)
+    # 保存角色预设
+    if req.role_presets:
+        db.set_presets(
+            manager=req.role_presets.get("manager"),
+            worker=req.role_presets.get("worker"),
+            reviewer=req.role_presets.get("reviewer"),
+            chat=req.role_presets.get("chat"),
+        )
+    # 保存附加要求到文件
+    if req.extra_requirements:
+        project_dir = get_project_dir(req.name)
+        req_path = os.path.join(project_dir, "extra_requirements.txt")
+        with open(req_path, "w", encoding="utf-8") as f:
+            f.write(req.extra_requirements)
     # bootstrap knowledge graph
     project_dir = get_project_dir(req.name)
     kg = KnowledgeGraph(project_dir)
@@ -98,18 +265,22 @@ def create_project(req: ProjectCreateRequest):
 def update_outline_layers(name: str, req: OutlineLayersRequest):
     db = ProjectDB(name)
     layers = req.layers
-    # 校验：L1 关则 L2/L3 不能开
+    # 校验：L1 关则 L2 不能开
     if not layers.get("L1", True):
         layers["L2"] = False
-        layers["L3"] = False
-    elif not layers.get("L2", True):
-        # L2 关不影响 L1/L3
-        pass
     db.set_outline_layers(layers)
-    # 同步到 outline_pipeline 状态
+    # 同步到 EngineState（统一状态源）
     project_dir = get_project_dir(name)
-    op = OutlinePipeline(project_dir, name)
-    op.set_layers_enabled(layers)
+    state = EngineState(project_dir)
+    if not layers.get("L1", True):
+        # L1 关闭时清除 L1 完成标记
+        completed = state.data.get("outline", {}).get("completed_layers", [])
+        state.data.setdefault("outline", {})["completed_layers"] = [l for l in completed if l != "L1"]
+        state.save()
+    if not layers.get("L2", True):
+        completed = state.data.get("outline", {}).get("completed_layers", [])
+        state.data.setdefault("outline", {})["completed_layers"] = [l for l in completed if l != "L2"]
+        state.save()
     return {"success": True, "outline_layers": db.get_outline_layers()}
 
 
@@ -120,60 +291,84 @@ def update_outline_layers(name: str, req: OutlineLayersRequest):
 @router.get("/projects/{name}/outlines")
 def list_outlines(name: str):
     project_dir = get_project_dir(name)
-    op = OutlinePipeline(project_dir, name)
-    op.kg.load()
-    return op.get_status()
+    # 使用 EngineState 统一状态源，不再依赖 OutlinePipeline 的 outline_state.json
+    state = EngineState(project_dir)
+    outline_state = state.data.get("outline", {})
+    completed_layers = outline_state.get("completed_layers", [])
+    result = {}
+    for layer in ("L1", "L2"):
+        md_path = os.path.join(project_dir, f"outline_{layer}.md")
+        json_path = os.path.join(project_dir, f"outline_{layer}.json")
+        exists = os.path.isfile(md_path) and os.path.isfile(json_path)
+        result[layer] = {
+            "enabled": True,
+            "exists": exists,
+            "md_path": md_path,
+            "json_path": json_path,
+            "generated_at": None,
+            "name": LAYER_NAMES[layer],
+            "completed": layer in completed_layers,
+        }
+    result["state"] = outline_state.get("status", "pending")
+    return result
 
 
 @router.get("/projects/{name}/outlines/{layer}")
-def get_outline(name: str, layer: str, chapter: Optional[int] = None):
-    if layer not in ("L1", "L2", "L3"):
+def get_outline(name: str, layer: str):
+    if layer not in ("L1", "L2"):
         raise HTTPException(400, f"Unknown layer: {layer}")
     project_dir = get_project_dir(name)
-    if layer in ("L1", "L2"):
-        md_path = os.path.join(project_dir, f"outline_{layer}.md")
-        json_path = os.path.join(project_dir, f"outline_{layer}.json")
-        return {
-            "layer": layer,
-            "name": LAYER_NAMES[layer],
-            "md": read_file_safe(md_path, ""),
-            "json_data": json.loads(read_file_safe(json_path, "{}")) if os.path.isfile(json_path) else {},
-        }
-    # L3
-    if chapter is None:
-        raise HTTPException(400, "L3 需要指定 ?chapter=N")
-    md_path = os.path.join(project_dir, "outline_L3", f"chapter_{chapter}.md")
-    json_path = os.path.join(project_dir, "outline_L3", f"chapter_{chapter}.json")
-    if not os.path.isfile(md_path):
-        raise HTTPException(404, f"第 {chapter} 章细纲不存在")
+    md_path = os.path.join(project_dir, f"outline_{layer}.md")
+    json_path = os.path.join(project_dir, f"outline_{layer}.json")
     return {
-        "layer": "L3",
-        "chapter": chapter,
-        "name": f"L3 第{chapter}章细纲",
+        "layer": layer,
+        "name": LAYER_NAMES[layer],
         "md": read_file_safe(md_path, ""),
         "json_data": json.loads(read_file_safe(json_path, "{}")) if os.path.isfile(json_path) else {},
     }
 
 
 @router.post("/projects/{name}/outlines/{layer}/regenerate")
-async def regenerate_outline(name: str, layer: str, chapter: Optional[int] = None):
+async def regenerate_outline(name: str, layer: str):
+    if layer not in ("L1", "L2"):
+        raise HTTPException(400, f"Unknown layer: {layer}")
     project_dir = get_project_dir(name)
-    db = ProjectDB(name)
-    presets_list = list(db.get_presets().values())
-    op = OutlinePipeline(project_dir, name, presets=presets_list)
-    if layer == "L3" and chapter is not None:
-        return await op.regenerate("L3", chapter=chapter)
-    return await op.regenerate(layer)
+    project_presets = _get_project_presets(name)
+    global_presets = _get_global_presets()
+    kg = KnowledgeGraph(project_dir)
+    kg.load()
+    engine = OutlineEngine(
+        project_dir, name,
+        project_presets=project_presets,
+        global_presets=global_presets,
+        kg=kg,
+        genre=_get_project_genre(name),
+    )
+    # 重置该层完成状态，允许重新生成
+    completed = engine.state.data.get("outline", {}).get("completed_layers", [])
+    if layer in completed:
+        completed.remove(layer)
+        engine.state.data.setdefault("outline", {})["completed_layers"] = completed
+        engine.state.save()
+    return await engine.generate_layer(layer)
 
 
 @router.post("/projects/{name}/outlines/bootstrap")
 async def bootstrap_outlines(name: str, requirements: str = ""):
     """一键生成 L1→L2。"""
     project_dir = get_project_dir(name)
-    db = ProjectDB(name)
-    presets_list = list(db.get_presets().values())
-    op = OutlinePipeline(project_dir, name, presets=presets_list)
-    return await op.bootstrap_l1_l2(requirements=requirements)
+    project_presets = _get_project_presets(name)
+    global_presets = _get_global_presets()
+    kg = KnowledgeGraph(project_dir)
+    kg.load()
+    engine = OutlineEngine(
+        project_dir, name,
+        project_presets=project_presets,
+        global_presets=global_presets,
+        kg=kg,
+        genre=_get_project_genre(name),
+    )
+    return await engine.generate_all(requirements=requirements)
 
 
 # ============================================================
@@ -218,12 +413,24 @@ async def manual_ingest(name: str, chapter: int):
         raise HTTPException(404, f"章节文件不存在：{chapter_path}")
     text = read_file_safe(chapter_path, "")
     characters_md = read_file_safe(os.path.join(project_dir, "characters.md"), "")
-    l3_path = os.path.join(project_dir, "outline_L3", f"chapter_{chapter}.json")
-    l3 = json.loads(read_file_safe(l3_path, "{}")) if os.path.isfile(l3_path) else {}
+    # 从 L2 章节细纲中提取该章信息
+    l2_json_path = os.path.join(project_dir, "outline_L2.json")
+    chapter_outline = {}
+    if os.path.isfile(l2_json_path):
+        try:
+            with open(l2_json_path, "r", encoding="utf-8") as f:
+                l2_data = json.load(f)
+            chapters = l2_data.get("chapters", [])
+            for ch in chapters:
+                if ch.get("chapter_num") == chapter:
+                    chapter_outline = ch
+                    break
+        except Exception:
+            pass
     kg = KnowledgeGraph(project_dir)
     kg.load()
     ip = IngestPipeline(kg, project_dir)
-    return await ip.ingest_chapter(chapter, text, l3=l3, characters_md=characters_md)
+    return await ip.ingest_chapter(chapter, text, l3=chapter_outline, characters_md=characters_md)
 
 
 @router.put("/projects/{name}/graph/node/{node_id}")
@@ -302,17 +509,17 @@ def _get_project_genre(name: str) -> str:
 
 
 def _get_global_presets() -> List[Dict]:
-    """获取全局预设列表。"""
+    """获取全局预设列表（从 config.json 读取，与 main.py /api/presets 一致）。"""
     try:
-        state_path = os.path.join(os.path.dirname(__file__), "state.json")
-        if os.path.isfile(state_path):
-            with open(state_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            presets = state.get("presets", {})
-            if isinstance(presets, dict):
-                return list(presets.values())
-            elif isinstance(presets, list):
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            presets = data.get("presets", [])
+            if isinstance(presets, list):
                 return presets
+            elif isinstance(presets, dict):
+                return list(presets.values())
     except Exception:
         pass
     return []
@@ -340,9 +547,26 @@ class WritingStartRequest(BaseModel):
 def get_engine_state(name: str):
     """获取引擎全局状态（当前阶段、进度）。"""
     project_dir = get_project_dir(name)
-    from engines.common.state import EngineState
     state = EngineState(project_dir)
     return state.data
+
+
+@router.get("/projects/{name}/logs")
+def get_project_logs(name: str, limit: int = 500):
+    """获取项目历史运行日志。"""
+    project_dir = get_project_dir(name)
+    logs = _read_run_log(project_dir, limit=limit)
+    return {"logs": logs}
+
+
+@router.delete("/projects/{name}/logs")
+def clear_project_logs(name: str):
+    """清除项目历史运行日志。"""
+    project_dir = get_project_dir(name)
+    log_path = os.path.join(project_dir, "run_log.jsonl")
+    if os.path.isfile(log_path):
+        os.remove(log_path)
+    return {"success": True}
 
 
 # ---- 大纲引擎 ----
@@ -413,7 +637,7 @@ async def writing_start(name: str, req: WritingStartRequest):
     kg = KnowledgeGraph(project_dir)
     kg.load()
 
-    total = req.total_chapters or db.get_project().get("total_chapters", 100)
+    total = req.total_chapters or db.get_project().get("total_chapters", 0)
 
     engine = WritingEngine(
         project_dir, name,
@@ -438,7 +662,7 @@ def writing_state(name: str):
     project_presets = db.get_presets()
     global_presets = _get_global_presets()
 
-    total = db.get_project().get("total_chapters", 100)
+    total = db.get_project().get("total_chapters", 0)
     engine = WritingEngine(project_dir, name, project_presets=project_presets,
                            global_presets=global_presets, total_chapters=total,
                            genre=_get_project_genre(name))
@@ -535,7 +759,15 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
     global _running_engine
     _running_engine = engine
 
-    q_emit({"status": "start", "stage": "outline", "message": "🚀 开始大纲生成"})
+    # 从 engine_state.json 恢复大纲进度：跳过已完成的层
+    resume_info = ""
+    if not req.layer:
+        engine_state = EngineState(project_dir)
+        completed = engine_state.data.get("outline", {}).get("completed_layers", [])
+        if completed:
+            resume_info = f"（已完成: {', '.join(completed)}，从下一层继续）"
+
+    q_emit({"status": "start", "stage": "outline", "message": f"🚀 开始大纲生成{resume_info}"})
 
     exec_task = asyncio.create_task(
         engine.generate_all(requirements=req.requirements) if not req.layer
@@ -546,12 +778,14 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=0.5)
+                _append_run_log(project_dir, msg)
                 yield {"data": json.dumps(msg, ensure_ascii=False)}
             except asyncio.TimeoutError:
                 if exec_task.done():
                     while not q.empty():
                         try:
                             msg = q.get_nowait()
+                            _append_run_log(project_dir, msg)
                             yield {"data": json.dumps(msg, ensure_ascii=False)}
                         except asyncio.QueueEmpty:
                             break
@@ -566,9 +800,13 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
             db.close()
         except Exception:
             pass
-        yield {"data": json.dumps({"status": "done", "stage": "outline", "result": str(result)[:500]}, ensure_ascii=False)}
+        done_event = {"status": "done", "stage": "outline", "result": str(result)[:500]}
+        _append_run_log(project_dir, done_event)
+        yield {"data": json.dumps(done_event, ensure_ascii=False)}
     except Exception as e:
-        yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+        err_event = {"status": "error", "message": str(e)}
+        _append_run_log(project_dir, err_event)
+        yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
         if _running_engine is engine:
             _running_engine = None
@@ -589,7 +827,7 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
     kg = KnowledgeGraph(project_dir)
     kg.load()
 
-    total = req.total_chapters or db.get_project().get("total_chapters", 100)
+    total = req.total_chapters or db.get_project().get("total_chapters", 0)
 
     q = asyncio.Queue()
 
@@ -612,23 +850,33 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
     global _running_engine
     _running_engine = engine
 
+    # 从 engine_state.json 恢复进度：如果已有完成章节，从下一章继续
+    start_chapter = req.start_chapter
+    if start_chapter <= 1:
+        engine_state = EngineState(project_dir)
+        completed = engine_state.data.get("writing", {}).get("completed_chapters", [])
+        if completed:
+            start_chapter = max(completed) + 1
+            q_emit({"status": "info", "stage": "writing", "message": f"📋 从第 {start_chapter} 章继续（已完成 {len(completed)} 章）"})
+
     q_emit({"status": "start", "stage": "writing", "message": "🚀 开始写作"})
 
     exec_task = asyncio.create_task(
-        engine.write_chapter(req.start_chapter) if req.start_chapter > 1
-        else engine.write_all(start_chapter=req.start_chapter)
+        engine.write_all(start_chapter=start_chapter)
     )
 
     try:
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=0.5)
+                _append_run_log(project_dir, msg)
                 yield {"data": json.dumps(msg, ensure_ascii=False)}
             except asyncio.TimeoutError:
                 if exec_task.done():
                     while not q.empty():
                         try:
                             msg = q.get_nowait()
+                            _append_run_log(project_dir, msg)
                             yield {"data": json.dumps(msg, ensure_ascii=False)}
                         except asyncio.QueueEmpty:
                             break
@@ -643,9 +891,13 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
             db.close()
         except Exception:
             pass
-        yield {"data": json.dumps({"status": "done", "stage": "writing", "result": str(result)[:500]}, ensure_ascii=False)}
+        done_event = {"status": "done", "stage": "writing", "result": str(result)[:500]}
+        _append_run_log(project_dir, done_event)
+        yield {"data": json.dumps(done_event, ensure_ascii=False)}
     except Exception as e:
-        yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+        err_event = {"status": "error", "message": str(e)}
+        _append_run_log(project_dir, err_event)
+        yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
         if _running_engine is engine:
             _running_engine = None
@@ -692,12 +944,14 @@ async def _review_start_stream(name: str):
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=0.5)
+                _append_run_log(project_dir, msg)
                 yield {"data": json.dumps(msg, ensure_ascii=False)}
             except asyncio.TimeoutError:
                 if exec_task.done():
                     while not q.empty():
                         try:
                             msg = q.get_nowait()
+                            _append_run_log(project_dir, msg)
                             yield {"data": json.dumps(msg, ensure_ascii=False)}
                         except asyncio.QueueEmpty:
                             break
@@ -712,9 +966,13 @@ async def _review_start_stream(name: str):
             db.close()
         except Exception:
             pass
-        yield {"data": json.dumps({"status": "done", "stage": "review", "result": str(result)[:500]}, ensure_ascii=False)}
+        done_event = {"status": "done", "stage": "review", "result": str(result)[:500]}
+        _append_run_log(project_dir, done_event)
+        yield {"data": json.dumps(done_event, ensure_ascii=False)}
     except Exception as e:
-        yield {"data": json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)}
+        err_event = {"status": "error", "message": str(e)}
+        _append_run_log(project_dir, err_event)
+        yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
         if _running_engine is engine:
             _running_engine = None

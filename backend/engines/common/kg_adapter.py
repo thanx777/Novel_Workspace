@@ -20,8 +20,9 @@ class KGAdapter:
         if self._kg is None:
             try:
                 from knowledge_graph import KnowledgeGraph
-                kg_path = os.path.join(self.project_dir, "knowledge_graph.json")
-                self._kg = KnowledgeGraph(kg_path)
+                # KnowledgeGraph.__init__ 期望 project_dir，内部会自行拼接
+                # memory/knowledge_graph.json，不应传入完整文件路径
+                self._kg = KnowledgeGraph(self.project_dir)
             except Exception:
                 self._kg = None
         return self._kg
@@ -556,24 +557,58 @@ class KGAdapter:
         """解析 AI 摄取响应，提取 JSON。"""
         # 尝试直接解析
         try:
-            return json.loads(response)
+            data = json.loads(response)
+            return self._normalize_ingest_data(data)
         except json.JSONDecodeError:
             pass
-        # 尝试提取 ```json ... ``` 块
-        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+        # 尝试提取 ```json ... ``` 块（贪婪匹配，支持嵌套JSON）
+        m = re.search(r"```(?:json)?\s*(\{.+\})\s*```", response, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(1))
+                data = json.loads(m.group(1))
+                return self._normalize_ingest_data(data)
             except json.JSONDecodeError:
                 pass
-        # 尝试找到第一个 { ... } 块
-        m = re.search(r"\{[\s\S]*\}", response)
+        # 尝试找到第一个 { ... } 块（贪婪匹配）
+        m = re.search(r"\{[\s\S]+\}", response)
         if m:
             try:
-                return json.loads(m.group())
+                data = json.loads(m.group())
+                return self._normalize_ingest_data(data)
             except json.JSONDecodeError:
                 pass
         return {}
+
+    def _normalize_ingest_data(self, data: Dict) -> Dict:
+        """规范化 LLM 返回的摄取数据，兼容不同的 key 命名。
+
+        LLM 可能返回：
+        - {"characters": [...], "foreshadowings": [...]}  （期望格式）
+        - {"entities": {"character": [...], "foreshadowing": [...]}}  （嵌套格式）
+        """
+        if not isinstance(data, dict):
+            return data
+        # 如果顶层有 entities 键，提取其内容
+        if "entities" in data and isinstance(data["entities"], dict):
+            entities = data["entities"]
+            # 映射单数 key 到复数 key
+            key_map = {
+                "character": "characters",
+                "foreshadowing": "foreshadowings",
+                "scene": "scenes",
+                "world_fact": "world_facts",
+                "plot_thread": "plot_threads",
+                "relationship": "relationships",
+                "strand": "strand_tags",
+                "coolpoint": "coolpoints",
+                "hook": "hooks",
+            }
+            result = {}
+            for k, v in entities.items():
+                mapped_key = key_map.get(k, k)
+                result[mapped_key] = v
+            return result
+        return data
 
     def _write_entities_to_kg(self, entities: Dict, chapter_num: int = 0) -> Dict:
         """将解析出的实体写入知识图谱。"""

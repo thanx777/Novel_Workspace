@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { API_BASE } from '../constants'
 
 export default function useNovelReader(folder) {
@@ -76,7 +76,7 @@ export default function useNovelReader(folder) {
       console.error('Failed to load files:', e)
     }
     setLoading(false)
-  }, [folder, activeFile])
+  }, [folder])
 
   const saveFile = useCallback(async (fileName, content) => {
     try {

@@ -12,6 +12,7 @@ INKOS_GENRES = {
         "chapterTypes": ["战斗章", "布局章", "过渡章", "回收章"],
         "fatigueWords": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩", "不可置信", "轰然炸裂",
                          "满场死寂", "难以置信", "仿佛", "不禁", "宛如", "竟然"],
+        "settingTerms": ["天道", "大道", "因果", "气运", "天命", "造化"],
         "numericalSystem": True,
         "powerScaling": True,
         "pacingRule": "三章内必有明确反馈：打脸、收益兑现、信息反转、地位变化",
@@ -38,8 +39,9 @@ INKOS_GENRES = {
         "id": "xianxia",
         "name": "仙侠",
         "chapterTypes": ["战斗章", "悟道章", "布局章", "过渡章", "回收章"],
-        "fatigueWords": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩", "天道", "大道", "因果", "气运",
+        "fatigueWords": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩",
                          "仿佛", "不禁", "宛如", "竟然"],
+        "settingTerms": ["天道", "大道", "因果", "气运", "天命", "造化", "天劫", "道心"],
         "numericalSystem": True,
         "powerScaling": True,
         "pacingRule": "修炼/悟道与战斗交替，每3-5章一次小突破或关键收获",
@@ -170,7 +172,7 @@ INKOS_FATIGUE_WORDS = {
     "zh": {
         "通用": INKOS_GENRES["通用"]["fatigueWords"],
         "玄幻": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩", "不可置信", "轰然炸裂", "满场死寂"],
-        "仙侠": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩", "天道", "大道", "因果", "气运"],
+        "仙侠": ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩"],
         "都市": ["冷笑", "不可思议", "震惊", "难以置信", "深吸一口气", "眼中闪过一丝"],
         "恐怖": ["毛骨悚然", "不寒而栗", "浑身发冷", "头皮发麻", "鸡皮疙瘩", "心跳加速"],
     },
@@ -199,6 +201,12 @@ def get_fatigue_words(genre_name: str = "通用", lang: str = "zh") -> list:
         if w not in words:
             words.append(w)
     return words
+
+
+def get_setting_terms(genre_name: str = "通用") -> list:
+    """获取体裁特定的核心设定词（世界观关键词，不按疲劳词扣分）"""
+    info = get_inkos_genre(genre_name)
+    return list(info.get("settingTerms", []))
 
 
 def get_chapter_types(genre_name: str) -> list:

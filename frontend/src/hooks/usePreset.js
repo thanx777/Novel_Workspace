@@ -10,13 +10,37 @@ export default function usePreset({ language, showNotification, setNodes }) {
   const [editPresetConfig, setEditPresetConfig] = useState({ api_key: '', base_url: '', model: '', api_format: 'openai', name: '', thinking_mode: 'disabled' })
   const [testConnState, setTestConnState] = useState(null)
   const [testConnResult, setTestConnResult] = useState(null)
+  const [defaultPreset, setDefaultPreset] = useState(null)
 
   const fetchPresets = useCallback(() => {
     fetch(`${API_BASE}/presets`)
       .then(r => r.json())
-      .then(d => setPresets(d.presets || []))
+      .then(d => {
+        setPresets(d.presets || [])
+        setDefaultPreset(d.default_preset || null)
+      })
       .catch(err => { console.error('fetchPresets error:', err) })
   }, [])
+
+  const handleSetDefaultPreset = useCallback((name) => {
+    fetch(`${API_BASE}/presets/default?name=${encodeURIComponent(name)}`, { method: 'PUT' })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(data => {
+        setDefaultPreset(data.default_preset || name)
+        showNotification(language === 'zh' ? `已将「${name}」设为默认预设` : `Set "${name}" as default preset`, 'success')
+      })
+      .catch(err => { showNotification(language === 'zh' ? '设置默认失败: ' : 'Set default failed: ' + err.message, 'error') })
+  }, [language, showNotification])
+
+  const handleClearDefaultPreset = useCallback(() => {
+    fetch(`${API_BASE}/presets/default`, { method: 'DELETE' })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
+      .then(() => {
+        setDefaultPreset(null)
+        showNotification(language === 'zh' ? '已清除默认预设' : 'Default preset cleared', 'success')
+      })
+      .catch(err => { showNotification(language === 'zh' ? '清除默认失败: ' : 'Clear default failed: ' + err.message, 'error') })
+  }, [language, showNotification])
 
   const handleAddPreset = useCallback(() => {
     if (!newPresetName.trim()) return
@@ -168,6 +192,7 @@ export default function usePreset({ language, showNotification, setNodes }) {
 
   return {
     presets, setPresets, fetchPresets,
+    defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset,
     showAddPreset, setShowAddPreset,
     newPresetName, setNewPresetName,
     newPresetConfig, setNewPresetConfig,

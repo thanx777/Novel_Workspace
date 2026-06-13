@@ -10,6 +10,7 @@ from .kg_adapter import KGAdapter
 from .state import EngineState
 from .genre_adapter import GenreAdapter
 from .hallucination_guard import HallucinationGuardAdapter
+from .prompts import get_formatted_prompts, ENGINE_CONFIG
 
 
 @dataclass
@@ -78,6 +79,10 @@ class BaseEngine(ABC):
         self.yield_func = yield_func or (lambda x: None)
         self.cancelled = False  # 外部可设置，用于中断 MWR 循环
 
+        # 引擎配置与提示词
+        self.mode_config = ENGINE_CONFIG
+        self.prompts = get_formatted_prompts()
+
     def _emit(self, data: Dict):
         """发送状态更新。"""
         if self.yield_func:
@@ -91,23 +96,34 @@ class BaseEngine(ABC):
         2. Writer 执行
         3. Reviewer 评审
         4. 如果 score >= threshold 且硬性校验全过 → 停止
-        5. 否则 Manager 把 Reviewer 反馈传给 Writer 重做
+        5. 否则 Manager 把 Reviewer 反馈传给 Writer 修改
+        6. 连续 N 轮评分无提升 → 卡住，停止
         """
         last_result = None
-        consecutive_same_failures = 0
-        prev_issues_key = None
+        self._issue_consecutive_counts = {}
+        best_score = 0.0
+        recent_scores = []  # 滑动窗口：记录未超过best_score的轮次
+        NO_IMPROVE_WINDOW = 3  # 最近3轮无提升则认为卡住
 
-        for round_num in range(1, max_rounds + 1):
+        round_num = 0
+        while True:
+            round_num += 1
+
             # 检查是否已被用户取消
             if self.cancelled:
                 self._emit({"status": "cycle_cancelled", "round": round_num, "reason": "用户取消"})
                 return last_result or ReviewResult(score=0.0, issues=["用户取消"])
 
-            self._emit({"status": "mwr_round", "round": round_num, "max_rounds": max_rounds})
+            self._emit({"status": "mwr_round", "round": round_num})
 
             # 1. Manager 决定任务
             task = self.manager_decide(round_num, last_result)
             self._emit({"status": "manager_decided", "round": round_num, "action": task.action})
+
+            # accept_current：润色用尽，直接结束循环
+            if task.action == "accept_current":
+                self._emit({"status": "cycle_ended", "accepted": True, "reason": "润色次数用尽，接受当前内容"})
+                return last_result or ReviewResult(score=0.0, issues=["润色用尽"])
 
             # 2. Writer 执行
             draft = await self.writer_execute(task)
@@ -128,30 +144,47 @@ class BaseEngine(ABC):
                 self._emit({"status": "cycle_completed", "round": round_num, "score": result.score})
                 return result
 
-            # 5. 连续相同问题检测：如果连续 3 轮评分低于阈值且问题相同，提前退出
-            if result.score < score_threshold:
-                issues_key = tuple(sorted(result.issues))
-                if issues_key == prev_issues_key:
-                    consecutive_same_failures += 1
-                else:
-                    consecutive_same_failures = 1
-                    prev_issues_key = issues_key
-                if consecutive_same_failures >= 3:
-                    self._emit({"status": "cycle_stuck", "round": round_num,
-                                "reason": f"连续{consecutive_same_failures}轮相同问题未解决，提前退出"})
-                    self._emit({"status": "cycle_ended", "accepted": False,
-                                "reason": f"连续{consecutive_same_failures}轮相同问题未解决"})
-                    return result
+            # 5. 卡住检测（滑动窗口）：最近N轮评分均未超过best_score则停止
+            if result.score > best_score:
+                best_score = result.score
+                recent_scores = []  # 有提升，重置窗口
             else:
-                consecutive_same_failures = 0
-                prev_issues_key = None
+                recent_scores.append(result.score)
 
-        # 6. 达到上限，Manager 做最终决策
+            if len(recent_scores) >= NO_IMPROVE_WINDOW:
+                self._emit({"status": "cycle_stuck", "round": round_num,
+                            "reason": f"连续{NO_IMPROVE_WINDOW}轮评分无提升（最高{best_score:.1f}），停止循环"})
+                break
+
+            # 6. 收益递减检测：评分接近阈值且连续2轮变化<0.3，提前退出
+            if len(recent_scores) >= 2 and best_score >= (score_threshold - 0.5):
+                last_two = recent_scores[-2:]
+                if abs(last_two[0] - last_two[1]) < 0.3:
+                    self._emit({"status": "cycle_diminishing", "round": round_num,
+                                "reason": f"评分接近阈值({best_score:.1f})且收益递减，提前结束"})
+                    break
+
+            # 6. 连续相同问题检测：发出警告但继续
+            if result.score < score_threshold or not result.all_required_passed:
+                current_issues_set = set(result.issues)
+                new_issue_counts = {}
+                for issue in current_issues_set:
+                    new_issue_counts[issue] = self._issue_consecutive_counts.get(issue, 0) + 1
+                self._issue_consecutive_counts = new_issue_counts
+                stuck_issues = [iss for iss, cnt in self._issue_consecutive_counts.items() if cnt >= 5]
+                if stuck_issues:
+                    self._emit({"status": "cycle_stuck", "round": round_num,
+                                "reason": f"连续5轮未解决问题: {stuck_issues[:3]}，继续尝试"})
+                    self._issue_consecutive_counts = {}
+            else:
+                self._issue_consecutive_counts = {}
+
+        # 循环结束
         final = self.manager_final_decision()
         if final.accepted:
-            self._on_cycle_completed(max_rounds, last_result)
+            self._on_cycle_completed(round_num, last_result)
         self._emit({"status": "cycle_ended", "accepted": final.accepted, "reason": final.reason})
-        return last_result or ReviewResult(score=0.0, issues=["达到最大轮数且无评审结果"])
+        return last_result or ReviewResult(score=0.0, issues=["循环结束且无评审结果"])
 
     @abstractmethod
     def manager_decide(self, round_num: int, last_result: Optional[ReviewResult] = None) -> MWRTask:

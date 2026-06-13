@@ -9,16 +9,21 @@ from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, Final
 from ..common.llm_client import LLMClient
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
-from ..common.prompts import REVIEWER_SYSTEM_REVIEW
+from ..common.prompts import REVIEWER_SYSTEM_REVIEW  # 保留导入以向后兼容
 
 
-# 审校维度
-REVIEW_DIMENSIONS = [
+# 全部审校维度（pro 模式使用完整列表）
+_ALL_REVIEW_DIMENSIONS = [
     ("character_arc", "人物弧光", "检查主角/配角从第1章到最后一章的性格变化是否合理"),
     ("foreshadowing", "伏笔回收", "检查所有伏笔是否都有回收章节"),
     ("consistency", "跨章一致性", "检查时间线、角色状态、场景描述是否前后矛盾"),
     ("style", "风格统一", "检查文笔风格、叙事视角是否一致"),
+    ("coolpoint_hook", "爽点与钩子", "检查爽点密度和章末钩子是否到位"),
+    ("ai_trace", "AI痕迹", "检测重复句式、万能形容词、说道滥用"),
 ]
+
+# 向后兼容：默认 standard 模式的维度
+REVIEW_DIMENSIONS = _ALL_REVIEW_DIMENSIONS[:4]
 
 
 class ReviewEngine(BaseEngine):
@@ -28,13 +33,25 @@ class ReviewEngine(BaseEngine):
                  project_presets: Optional[Dict[str, Dict]] = None,
                  global_presets: Optional[List[Dict]] = None,
                  kg=None, yield_func=None,
-                 max_rounds_per_dimension: int = 3,
-                 score_threshold: float = 7.0,
+                 max_rounds_per_dimension: Optional[int] = None,
+                 score_threshold: Optional[float] = None,
                  genre: str = ""):
         super().__init__(project_dir, project_name, project_presets,
                          global_presets, kg, yield_func, genre=genre)
-        self.max_rounds_per_dimension = max_rounds_per_dimension
-        self.score_threshold = score_threshold
+
+        # 根据 mode_config 设置默认值
+        self.max_rounds_per_dimension = (
+            max_rounds_per_dimension if max_rounds_per_dimension is not None
+            else self.mode_config["max_rounds_review"]
+        )
+        self.score_threshold = (
+            score_threshold if score_threshold is not None
+            else self.mode_config["score_threshold"]
+        )
+
+        # 审校维度（全部启用）
+        self._dimensions = list(_ALL_REVIEW_DIMENSIONS)
+
         self._current_dimension = 0
         self._dimensions_done: List[str] = []
 
@@ -67,7 +84,7 @@ class ReviewEngine(BaseEngine):
         """Manager 决定审校哪个维度。"""
         if last_result and not last_result.all_required_passed:
             # 当前维度还有问题，继续
-            dim_key, dim_name, dim_desc = REVIEW_DIMENSIONS[self._current_dimension]
+            dim_key, dim_name, dim_desc = self._dimensions[self._current_dimension]
             return MWRTask(
                 action="review",
                 dimension=dim_key,
@@ -76,10 +93,10 @@ class ReviewEngine(BaseEngine):
 
         # 下一个维度
         self._current_dimension += 1
-        if self._current_dimension > len(REVIEW_DIMENSIONS):
+        if self._current_dimension > len(self._dimensions):
             return MWRTask(action="review", dimension="all")
 
-        dim_key, dim_name, dim_desc = REVIEW_DIMENSIONS[self._current_dimension - 1]
+        dim_key, dim_name, dim_desc = self._dimensions[self._current_dimension - 1]
         return MWRTask(action="review", dimension=dim_key)
 
     async def writer_execute(self, task: MWRTask) -> Draft:
@@ -105,13 +122,13 @@ class ReviewEngine(BaseEngine):
 
         dim_name = dim_key
         dim_desc = ""
-        for dk, dn, dd in REVIEW_DIMENSIONS:
+        for dk, dn, dd in self._dimensions:
             if dk == dim_key:
                 dim_name = dn
                 dim_desc = dd
                 break
 
-        system_prompt = REVIEWER_SYSTEM_REVIEW + f"\n\n当前审校维度：{dim_desc}" + "\n\n".join(context_parts)
+        system_prompt = self.prompts["reviewer_review"] + f"\n\n当前审校维度：{dim_desc}" + "\n\n".join(context_parts)
 
         # 注入体裁审查维度（InkOS 33维 + Hard Invariants + 疲劳词）
         genre_reviewer = self.genre_adapter.get_reviewer_injection(stage="review")
@@ -145,9 +162,8 @@ class ReviewEngine(BaseEngine):
         score = 5.0
 
         try:
-            json_match = re.search(r'\{[^{}]*"score"[^{}]*\}', draft.content, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
+            data = self._extract_json_from_response(draft.content)
+            if data:
                 score = float(data.get("score", 5.0))
                 issues = data.get("issues", [])
                 suggestions = data.get("suggestions", [])
@@ -192,13 +208,46 @@ class ReviewEngine(BaseEngine):
                 return FinalDecision(accepted=True, reason="全局审校评分尚可")
         return FinalDecision(accepted=False, reason="全局审校未通过，需人工审核")
 
+    @staticmethod
+    def _extract_json_from_response(text: str):
+        """从 LLM 响应中提取 JSON，支持嵌套大括号和 markdown 代码块。"""
+        import json
+        code_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if code_block:
+            try:
+                return json.loads(code_block.group(1))
+            except Exception:
+                pass
+        start = text.find('{')
+        while start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:i + 1]
+                        try:
+                            data = json.loads(candidate)
+                            if isinstance(data, dict) and "score" in data:
+                                return data
+                        except Exception:
+                            pass
+                        break
+            start = text.find('{', start + 1)
+        try:
+            return json.loads(text.strip())
+        except Exception:
+            return None
+
     # ---- 公开 API ----
 
     async def run_review(self) -> Dict:
         """运行全局审校。"""
         self._current_dimension = 0
         results = {}
-        for dim_key, dim_name, dim_desc in REVIEW_DIMENSIONS:
+        for dim_key, dim_name, dim_desc in self._dimensions:
             result = await self.run_mwr_cycle(
                 max_rounds=self.max_rounds_per_dimension,
                 score_threshold=self.score_threshold,
