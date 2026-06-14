@@ -251,12 +251,15 @@ export default function KnowledgeGraphView({ API_BASE, projectName, language = "
 }
 
 // ============================================================
-// 关系网视图（力导向图 + 平移/缩放/拖动）
+// 关系网视图（分层聚合 + 力导向图 + 平移/缩放/拖动）
 // ============================================================
 function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, neighbors }) {
   const svgRef = useRef(null)
   const [dims, setDims] = useState({ w: 800, h: 600 })
   const [positions, setPositions] = useState({})
+
+  // ★ 分层聚合状态：expandedTypes 记录已展开的类型
+  const [expandedTypes, setExpandedTypes] = useState(new Set())
 
   // 视口（平移 + 缩放）
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 })
@@ -266,6 +269,76 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
   // 拖动状态
   const [isPanning, setIsPanning] = useState(false)
   const panStart = useRef({ x: 0, y: 0, vx: 0, vy: 0 })
+
+  // ★ 计算聚合后的节点和边
+  const { displayNodes, displayEdges, aggregateNodes } = useMemo(() => {
+    // 按类型分组
+    const byType = {}
+    for (const n of nodes) {
+      if (!byType[n.type]) byType[n.type] = []
+      byType[n.type].push(n)
+    }
+
+    // 聚合节点：未展开的类型显示为大泡泡
+    const aggNodes = []
+    const detailNodes = []
+    for (const [type, group] of Object.entries(byType)) {
+      if (expandedTypes.has(type)) {
+        detailNodes.push(...group)
+      } else {
+        const m = NODE_META[type] || { icon: "•", color: "#888", label: type }
+        aggNodes.push({
+          id: `__agg_${type}`,
+          type,
+          label: `${m.label} ×${group.length}`,
+          summary: group.map(n => n.label).join("、"),
+          isAggregate: true,
+          count: group.length,
+          memberIds: group.map(n => n.id),
+          _meta: m,
+        })
+      }
+    }
+
+    const allDisplay = [...aggNodes, ...detailNodes]
+    const displayIds = new Set(allDisplay.map(n => n.id))
+
+    // 聚合边：如果 source/target 都是展开的节点，保留原边；否则聚合为类型间边
+    const aggEdgeMap = {}
+    const detailEdges = []
+    for (const e of edges) {
+      const srcExpanded = displayIds.has(e.source)
+      const tgtExpanded = displayIds.has(e.target)
+
+      if (srcExpanded && tgtExpanded) {
+        // 两端都可见，保留原边
+        detailEdges.push(e)
+      } else {
+        // 至少一端是聚合泡泡，创建聚合边
+        const srcId = displayIds.has(e.source) ? e.source : `__agg_${nodes.find(n => n.id === e.source)?.type || "unknown"}`
+        const tgtId = displayIds.has(e.target) ? e.target : `__agg_${nodes.find(n => n.id === e.target)?.type || "unknown"}`
+        if (srcId === tgtId) continue  // 同类型内部边，跳过
+        const key = [srcId, tgtId].sort().join("→")
+        if (!aggEdgeMap[key]) {
+          aggEdgeMap[key] = { source: srcId, target: tgtId, count: 0 }
+        }
+        aggEdgeMap[key].count++
+      }
+    }
+
+    const aggEdges = Object.values(aggEdgeMap).map(ae => ({
+      source: ae.source,
+      target: ae.target,
+      type: "aggregate",
+      label: ae.count > 1 ? `${ae.count}` : "",
+    }))
+
+    return {
+      displayNodes: allDisplay,
+      displayEdges: [...detailEdges, ...aggEdges],
+      aggregateNodes: aggNodes,
+    }
+  }, [nodes, edges, expandedTypes])
 
   // 监听容器尺寸变化
   useEffect(() => {
@@ -283,14 +356,14 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
 
   // 简易力导向布局
   useEffect(() => {
-    if (nodes.length === 0) {
+    if (displayNodes.length === 0) {
       setPositions({})
       return
     }
-    // 初始化位置（圆形 + 一些随机扰动以避免重叠）
+    // 初始化位置
     const pos = {}
-    nodes.forEach((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2
+    displayNodes.forEach((n, i) => {
+      const angle = (i / displayNodes.length) * Math.PI * 2
       const radius = Math.min(dims.w, dims.h) * 0.32
       pos[n.id] = {
         x: dims.w / 2 + Math.cos(angle) * radius + (Math.random() - 0.5) * 30,
@@ -299,25 +372,28 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
     })
     setPositions(pos)
 
-    // 简单模拟：节点间斥力 + 向中心引力
+    // 简单模拟
     let iter = 0
     const interval = setInterval(() => {
       iter++
       setPositions(prev => {
         const next = { ...prev }
-        for (let i = 0; i < nodes.length; i++) {
-          for (let j = i + 1; j < nodes.length; j++) {
-            const a = next[nodes[i].id], b = next[nodes[j].id]
+        for (let i = 0; i < displayNodes.length; i++) {
+          for (let j = i + 1; j < displayNodes.length; j++) {
+            const a = next[displayNodes[i].id], b = next[displayNodes[j].id]
             if (!a || !b) continue
             const dx = b.x - a.x, dy = b.y - a.y
             const dist = Math.max(20, Math.sqrt(dx*dx + dy*dy))
-            const force = (dist - 120) * 0.005
-            next[nodes[i].id] = { ...a, x: a.x + dx/dist*force, y: a.y + dy/dist*force }
-            next[nodes[j].id] = { ...b, x: b.x - dx/dist*force, y: b.y - dy/dist*force }
+            // 聚合泡泡斥力更大
+            const isAgg = displayNodes[i].isAggregate || displayNodes[j].isAggregate
+            const idealDist = isAgg ? 180 : 120
+            const force = (dist - idealDist) * 0.005
+            next[displayNodes[i].id] = { ...a, x: a.x + dx/dist*force, y: a.y + dy/dist*force }
+            next[displayNodes[j].id] = { ...b, x: b.x - dx/dist*force, y: b.y - dy/dist*force }
           }
         }
         // 向中心
-        for (const n of nodes) {
+        for (const n of displayNodes) {
           const p = next[n.id]
           if (!p) continue
           next[n.id] = { x: p.x + (dims.w/2 - p.x) * 0.008, y: p.y + (dims.h/2 - p.y) * 0.008 }
@@ -327,17 +403,39 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
       if (iter > 40) clearInterval(interval)
     }, 30)
     return () => clearInterval(interval)
-  }, [nodes, dims])
+  }, [displayNodes, dims])
 
-  // 度数（节点大小用）
+  // 度数
   const degree = useMemo(() => {
     const m = {}
-    for (const e of edges) {
+    for (const e of displayEdges) {
       m[e.source] = (m[e.source] || 0) + 1
       m[e.target] = (m[e.target] || 0) + 1
     }
     return m
-  }, [edges])
+  }, [displayEdges])
+
+  // ★ 点击聚合泡泡：展开该类型
+  const onNodeClick = useCallback((n) => {
+    if (n.isAggregate) {
+      setExpandedTypes(prev => {
+        const next = new Set(prev)
+        next.add(n.type)
+        return next
+      })
+    } else {
+      onSelect(n)
+    }
+  }, [onSelect])
+
+  // ★ 收起已展开的类型
+  const collapseType = useCallback((type) => {
+    setExpandedTypes(prev => {
+      const next = new Set(prev)
+      next.delete(type)
+      return next
+    })
+  }, [])
 
   // 鼠标滚轮缩放
   const onWheel = (e) => {
@@ -347,20 +445,16 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
     const my = e.clientY - rect.top
     const delta = -e.deltaY * 0.0015
     const newScale = Math.max(0.2, Math.min(4, viewportRef.current.scale * (1 + delta)))
-    // 以鼠标位置为缩放中心
     const scaleRatio = newScale / viewportRef.current.scale
     const newX = mx - (mx - viewportRef.current.x) * scaleRatio
     const newY = my - (my - viewportRef.current.y) * scaleRatio
     setViewport({ x: newX, y: newY, scale: newScale })
   }
 
-  // 背景拖动（按下并移动）
+  // 背景拖动
   const onMouseDown = (e) => {
     if (e.button !== 0) return
-    // 仅在点击空白处时开始拖动（不是节点）
-    if (e.target !== svgRef.current && e.target.tagName !== "rect" && e.target.tagName !== "svg") {
-      return
-    }
+    if (e.target !== svgRef.current && e.target.tagName !== "rect" && e.target.tagName !== "svg") return
     setIsPanning(true)
     panStart.current = { x: e.clientX, y: e.clientY, vx: viewport.x, vy: viewport.y }
   }
@@ -372,7 +466,6 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
   }
   const onMouseUp = () => setIsPanning(false)
 
-  // 滚轮/拖动事件挂在 window（防止拖动时离开 svg）
   useEffect(() => {
     if (!isPanning) return
     const onMove = (e) => onMouseMove(e)
@@ -388,38 +481,24 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
   // 缩放控制
   const zoomBy = (factor) => {
     const newScale = Math.max(0.2, Math.min(4, viewport.scale * factor))
-    // 以中心为缩放锚点
-    const cx = dims.w / 2
-    const cy = dims.h / 2
+    const cx = dims.w / 2, cy = dims.h / 2
     const scaleRatio = newScale / viewport.scale
-    const newX = cx - (cx - viewport.x) * scaleRatio
-    const newY = cy - (cy - viewport.y) * scaleRatio
-    setViewport({ x: newX, y: newY, scale: newScale })
+    setViewport({ x: cx - (cx - viewport.x) * scaleRatio, y: cy - (cy - viewport.y) * scaleRatio, scale: newScale })
   }
   const resetView = () => setViewport({ x: 0, y: 0, scale: 1 })
   const fitView = () => {
-    // 找到所有节点的 bbox
     const xs = Object.values(positions).map(p => p.x)
     const ys = Object.values(positions).map(p => p.y)
     if (xs.length === 0) return resetView()
     const minX = Math.min(...xs), maxX = Math.max(...xs)
     const minY = Math.min(...ys), maxY = Math.max(...ys)
-    const w = maxX - minX || 1
-    const h = maxY - minY || 1
+    const w = maxX - minX || 1, h = maxY - minY || 1
     const padding = 60
-    const scaleX = (dims.w - padding * 2) / w
-    const scaleY = (dims.h - padding * 2) / h
-    const scale = Math.max(0.3, Math.min(2, Math.min(scaleX, scaleY)))
-    const cx = (minX + maxX) / 2
-    const cy = (minY + maxY) / 2
-    setViewport({
-      x: dims.w / 2 - cx * scale,
-      y: dims.h / 2 - cy * scale,
-      scale,
-    })
+    const scale = Math.max(0.3, Math.min(2, Math.min((dims.w - padding*2) / w, (dims.h - padding*2) / h)))
+    setViewport({ x: dims.w/2 - (minX+maxX)/2*scale, y: dims.h/2 - (minY+maxY)/2*scale, scale })
   }
 
-  if (nodes.length === 0) return <div className="kg-empty-small">没有匹配的节点</div>
+  if (displayNodes.length === 0) return <div className="kg-empty-small">没有匹配的节点</div>
 
   return (
     <>
@@ -429,23 +508,60 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
         onMouseDown={onMouseDown}
         style={{ cursor: isPanning ? "grabbing" : "grab" }}
       >
-        {/* 透明背景用于接收拖动事件 */}
         <rect width={dims.w} height={dims.h} fill="transparent" />
         <g transform={`translate(${viewport.x}, ${viewport.y}) scale(${viewport.scale})`}>
           {/* 边 */}
-          {edges.map((e, i) => {
+          {displayEdges.map((e, i) => {
             const a = positions[e.source], b = positions[e.target]
             if (!a || !b) return null
             const isHighlighted = (selected && (e.source === selected.id || e.target === selected.id)) ||
                                   (hovered && (e.source === hovered.id || e.target === hovered.id))
-            const color = isHighlighted ? "#c2410c" : "rgba(120,113,108,0.4)"
-            return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              stroke={color} strokeWidth={(isHighlighted ? 2 : 1) / viewport.scale} />
+            const isAggEdge = e.type === "aggregate"
+            const color = isHighlighted ? "#c2410c" : isAggEdge ? "rgba(120,113,108,0.25)" : "rgba(120,113,108,0.4)"
+            return (
+              <g key={i}>
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  stroke={color} strokeWidth={(isHighlighted ? 2 : 1) / viewport.scale} />
+                {isAggEdge && e.label && (
+                  <text x={(a.x+b.x)/2} y={(a.y+b.y)/2} textAnchor="middle" dy="-4"
+                    fontSize={10} fill="#78716c">{e.label}</text>
+                )}
+              </g>
+            )
           })}
           {/* 节点 */}
-          {nodes.map(n => {
+          {displayNodes.map(n => {
             const p = positions[n.id]
             if (!p) return null
+
+            if (n.isAggregate) {
+              // ★ 聚合泡泡：大圆 + 图标 + 数量
+              const m = n._meta
+              const r = (20 + Math.min(n.count * 2, 30)) / Math.max(viewport.scale, 0.5)
+              return (
+                <g key={n.id}
+                  transform={`translate(${p.x}, ${p.y})`}
+                  onClick={(e) => { e.stopPropagation(); onNodeClick(n) }}
+                  onMouseEnter={() => setHovered(n)}
+                  onMouseLeave={() => setHovered(null)}
+                  style={{ cursor: "pointer" }}>
+                  <circle r={r} fill={m.color} opacity={0.15} />
+                  <circle r={r * 0.75} fill={m.color} opacity={0.6} />
+                  <text textAnchor="middle" dy="-2" fontSize={r * 0.7} fill="white" fontWeight="bold">
+                    {m.icon}
+                  </text>
+                  <text textAnchor="middle" y={r * 0.35} fontSize={r * 0.45} fill="white" fontWeight="600">
+                    {n.count}
+                  </text>
+                  <text textAnchor="middle" y={r + 16} fontSize={12} fill="#1c1917"
+                    stroke="white" strokeWidth="3" paintOrder="stroke" fontWeight="500">
+                    {m.label}
+                  </text>
+                </g>
+              )
+            }
+
+            // 普通节点
             const m = NODE_META[n.type] || { icon: "•", color: "#888" }
             const d = degree[n.id] || 0
             const r = (8 + Math.min(d * 1.5, 12)) / Math.max(viewport.scale, 0.5)
@@ -456,7 +572,7 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
             return (
               <g key={n.id}
                 transform={`translate(${p.x}, ${p.y})`}
-                onClick={(e) => { e.stopPropagation(); onSelect(n) }}
+                onClick={(e) => { e.stopPropagation(); onNodeClick(n) }}
                 onMouseEnter={() => setHovered(n)}
                 onMouseLeave={() => setHovered(null)}
                 style={{ cursor: "pointer", opacity: dimmed ? 0.25 : 1 }}>
@@ -477,7 +593,7 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
         </g>
       </svg>
 
-      {/* 缩放控制按钮（右上角） */}
+      {/* 缩放控制按钮 */}
       <div className="kg-zoom-controls">
         <button className="kg-zoom-btn" onClick={() => zoomBy(1.25)} title="放大">＋</button>
         <div className="kg-zoom-level">{Math.round(viewport.scale * 100)}%</div>
@@ -486,9 +602,27 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
         <button className="kg-zoom-btn" onClick={resetView} title="重置">⌂</button>
       </div>
 
-      {/* 操作提示（左下角） */}
+      {/* ★ 已展开的类型标签（可收起） */}
+      {expandedTypes.size > 0 && (
+        <div className="kg-expanded-tags">
+          {[...expandedTypes].map(type => {
+            const m = NODE_META[type] || { icon: "•", label: type }
+            return (
+              <span key={type} className="kg-expanded-tag" style={{ borderColor: m.color || "#888" }}
+                onClick={() => collapseType(type)}>
+                {m.icon} {m.label} ✕
+              </span>
+            )
+          })}
+          <button className="kg-collapse-all" onClick={() => setExpandedTypes(new Set())}>
+            全部收起
+          </button>
+        </div>
+      )}
+
+      {/* 操作提示 */}
       <div className="kg-hint">
-        滚轮缩放 · 拖动背景平移 · 点击节点查看详情
+        点击类型泡泡展开 · 点击节点查看详情 · 滚轮缩放 · 拖动平移
       </div>
     </>
   )

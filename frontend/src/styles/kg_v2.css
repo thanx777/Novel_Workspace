@@ -278,6 +278,37 @@
   pointer-events: none;
 }
 
+/* 已展开的类型标签 */
+.kg-expanded-tags {
+  position: absolute; top: 10px; left: 50%;
+  transform: translateX(-50%);
+  display: flex; gap: 6px; align-items: center;
+  background: rgba(255,255,255,0.92);
+  padding: 6px 10px; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  z-index: 10;
+}
+.kg-expanded-tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 500;
+  border: 1.5px solid; cursor: pointer;
+  background: rgba(255,255,255,0.6);
+  transition: background 0.15s;
+}
+.kg-expanded-tag:hover {
+  background: rgba(0,0,0,0.05);
+}
+.kg-collapse-all {
+  padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; border: 1px solid #d6d3d1;
+  background: white; cursor: pointer;
+  color: var(--text-2, #78716c);
+}
+.kg-collapse-all:hover {
+  background: #f5f5f4;
+}
+
 /* 右侧详情面板（可关闭） */
 .kg-detail {
   width: 280px; border-left: 1px solid var(--border, #e7e5e4);

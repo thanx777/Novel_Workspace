@@ -715,18 +715,24 @@ class WritingEngine(BaseEngine):
 
         # AI 驱动的 KG 摄取（替代旧的简单 add_chapter_node）
         content = self._read_chapter(chapter_num)
-        if content:
-            await self.kg_adapter.ai_ingest_chapter(
-                chapter_num, content,
-                llm_client=self.llm,
-                emit=self._emit,
-            )
-            # 更新反幻觉追踪器的记忆
-            self.hallucination_guard.update_memory(content, chapter_num)
+        try:
+            if content:
+                await self.kg_adapter.ai_ingest_chapter(
+                    chapter_num, content,
+                    llm_client=self.llm,
+                    emit=self._emit,
+                )
+                # 更新反幻觉追踪器的记忆
+                self.hallucination_guard.update_memory(content, chapter_num)
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"第{chapter_num}章KG摄取失败: {e}"})
 
-        # 最终同步章节到数据库（确保 status 和 score 正确）
-        self._upsert_chapter_to_db(chapter_num, content or "",
-                                    status="completed", score=result.score)
+        # 最终同步章节到数据库（确保 status 和 score 正确，必须执行）
+        try:
+            self._upsert_chapter_to_db(chapter_num, content or "",
+                                        status="completed", score=result.score)
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"第{chapter_num}章同步completed状态失败: {e}"})
 
         return {"chapter": chapter_num, "score": result.score, "issues": result.issues}
 

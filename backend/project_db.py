@@ -428,7 +428,7 @@ class ProjectDB:
     def get_chapter_count(self) -> int:
         """已完成章节数"""
         cur = self.conn.execute(
-            "SELECT COUNT(*) FROM chapters WHERE project_id=(SELECT id FROM projects WHERE name=?) AND status IN ('drafted','reviewed','final','revised')",
+            "SELECT COUNT(*) FROM chapters WHERE project_id=(SELECT id FROM projects WHERE name=?) AND status IN ('drafted','polished','completed','reviewed','final','revised')",
             (self.project_name,)
         )
         row = cur.fetchone()
@@ -439,7 +439,7 @@ class ProjectDB:
         project = self.get_project()
         chapters = self.list_chapters()
         total = project.get("total_chapters", 0) or 0
-        done = len([c for c in chapters if c.get("status") in ("drafted", "reviewed", "final", "revised")])
+        done = len([c for c in chapters if c.get("status") in ("drafted", "polished", "completed", "reviewed", "final", "revised")])
         total_words = sum(c.get("word_count", 0) for c in chapters)
         return {
             "total": total,
