@@ -771,13 +771,18 @@ def v2_list_chapters(project_name: str):
 
 @app.get("/api/v2/projects/{project_name}/chapters/{chapter_index}")
 def v2_get_chapter(project_name: str, chapter_index: int):
-    """读取单章正文。"""
+    """读取单章正文。前端展示时清洗元数据标记，源文件保留。"""
     try:
         db = ProjectDB(project_name)
         chapter = db.get_chapter(chapter_index)
         db.close()
         if chapter is None:
             raise HTTPException(status_code=404, detail="Chapter not found")
+        # 清洗元数据标记（---PREV/CAST/THREAD/STRAND---），源文件保留供写作引擎使用
+        if chapter.get("content"):
+            import re as _re
+            chapter["content"] = _re.sub(r"^---(?:PREV|CAST|THREAD|STRAND)---\n?", "", chapter["content"], flags=_re.MULTILINE)
+            chapter["content"] = _re.sub(r"\n{3,}", "\n\n", chapter["content"])
         return chapter
     except HTTPException:
         raise
@@ -1145,7 +1150,9 @@ def v2_list_chat_history(project_name: str):
 
 @app.get("/api/v2/projects/{project_name}/file/{file_path:path}")
 def v2_get_project_file(project_name: str, file_path: str):
-    """读取项目内任意文件（outline.md, characters.md 等）。"""
+    """读取项目内任意文件（outline.md, characters.md 等）。
+    章节文件（chapters/*.txt）返回时清洗元数据标记，源文件保留。
+    """
     try:
         if ".." in file_path:
             raise HTTPException(status_code=400, detail="Invalid path")
@@ -1154,6 +1161,12 @@ def v2_get_project_file(project_name: str, file_path: str):
             raise HTTPException(status_code=404, detail="File not found")
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
+        # 章节文件：清洗元数据标记（---PREV/CAST/THREAD/STRAND---），
+        # 源文件保留这些标记供写作引擎使用，前端展示时隐藏
+        if file_path.startswith("chapters/") and file_path.endswith(".txt"):
+            import re as _re
+            content = _re.sub(r"^---(?:PREV|CAST|THREAD|STRAND)---\n?", "", content, flags=_re.MULTILINE)
+            content = _re.sub(r"\n{3,}", "\n\n", content)
         return {"path": file_path, "content": content}
     except HTTPException:
         raise

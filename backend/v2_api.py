@@ -1061,12 +1061,6 @@ async def _review_start_stream(name: str):
     global _running_engine
     _running_engine = engine
 
-    # 设置引擎状态为 running
-    state = EngineState(project_dir)
-    state.current_stage = "review"
-    state.review_set_status("running")
-    state.save()
-
     q_emit({"status": "start", "stage": "review", "message": "🚀 开始全局审校"})
 
     exec_task = asyncio.create_task(engine.run_review())
@@ -1117,9 +1111,13 @@ async def _review_start_stream(name: str):
 
 @router.post("/projects/{name}/engine/stop")
 async def engine_stop(name: str):
-    """停止当前运行的引擎。只设置取消标志，不立即清除引用。"""
+    """停止当前运行的引擎。设置取消标志并立即保存 paused 状态。"""
     global _running_engine
     if _running_engine is not None:
         _running_engine.cancelled = True
+        # 立即保存 paused 状态，确保断点续校能正确恢复
+        # （run_review 可能还在 LLM 调用中，来不及保存 paused）
+        if hasattr(_running_engine, 'state') and hasattr(_running_engine.state, 'review_set_status'):
+            _running_engine.state.review_set_status("paused")
         return {"success": True, "message": "引擎停止信号已发送"}
     return {"success": True, "message": "没有正在运行的引擎"}

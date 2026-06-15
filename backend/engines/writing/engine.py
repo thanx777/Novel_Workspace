@@ -107,14 +107,22 @@ class WritingEngine(BaseEngine):
                 return f.read()
         return ""
 
+    def _clean_fs_ids(self, content: str) -> str:
+        """清洗LLM输出中的FS编号（如FS-001、FS-002-Variant等）。"""
+        import re as _re
+        content = _re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", content)
+        content = _re.sub(r"[（(]\s*[）)]", "", content)
+        return content
+
     def _read_recent_chapters(self, n: int = 3) -> str:
-        """读取最近 n 章的结尾。"""
+        """读取最近 n 章的全文，清洗FS编号以防误导LLM。"""
         parts = []
         start = max(1, self._current_chapter - n)
         for ch in range(start, self._current_chapter):
             content = self._read_chapter(ch)
             if content:
-                parts.append(f"【第{ch}章 结尾】...{content[-500:]}")
+                content = self._clean_fs_ids(content)
+                parts.append(f"【第{ch}章】\n{content}")
         return "\n\n".join(parts)
 
     def _read_global_memory(self) -> str:
@@ -294,7 +302,7 @@ class WritingEngine(BaseEngine):
         # 前文
         recent = self._read_recent_chapters(3)
         if recent:
-            context_parts.append(f"【最近章节结尾 — 必须自然衔接】\n{recent}")
+            context_parts.append(f"【最近章节全文 — 必须自然衔接】\n{recent}")
 
         # 体裁注入：InkOS 规范 + Anti-AI 规范 + 爽点结构 + Strand 节奏
         genre_injection = self.genre_adapter.get_writer_injection(stage="writing")
@@ -304,12 +312,15 @@ class WritingEngine(BaseEngine):
         system_prompt = self.prompts["writer_writing"] + "\n\n" + "\n\n".join(context_parts)
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
-        user_prompt = f"请写第{ch}章。严格按照细纲和大纲写作，不要偏离主线。\n\n【字数硬性要求】正文必须达到 {word_min}-{word_max} 字，不足 {word_min} 字视为不合格。请充分展开场景描写、对话、心理活动和动作细节，确保篇幅达标。"
+        user_prompt = f"请写第{ch}章。严格按照细纲和大纲写作，不要偏离主线。\n\n【字数硬性要求】正文必须达到 {word_min}-{word_max} 字，不足 {word_min} 字视为不合格。请充分展开场景描写、对话、心理活动和动作细节，确保篇幅达标。\n\n【写作规范】\n1. 避免与前文重复的描写模式（如反复用"指节泛白"、"嘴角扯出弧度"、"旧伤作痛"等），每章的描写方式应各不相同\n2. 章节开头必须与前一章结尾自然衔接，不要每章都用天气/场景描写开头——延续前文场景时直接接续叙事，切换场景时才用场景描写开头\n3. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理，小说正文不得引用"
 
         if not self.llm.has_valid_config("writer"):
             content = f"# 第{ch}章\n\n（未配置 LLM，占位内容）"
         else:
             content = await self.llm.call("writer", system_prompt, user_prompt)
+
+        # 清洗LLM输出中的FS编号（防止LLM忽略禁止指令）
+        content = self._clean_fs_ids(content)
 
         # 落盘
         self._write_atomic(self._chapter_path(ch), content)
@@ -369,6 +380,9 @@ class WritingEngine(BaseEngine):
             content = original
         else:
             content = await self.llm.call("writer", system_prompt, user_prompt)
+
+        # 清洗LLM输出中的FS编号
+        content = self._clean_fs_ids(content)
 
         # 内容变空/大幅缩水检测和回退
         if not content or not content.strip():

@@ -782,7 +782,7 @@ export default function Workbench({
                                 const _s = activeProject.current_stage || engineState?.current_stage || "outline"
                                 if (_s === "outline") return <div>{language === "zh" ? "大纲" : "Outline"}：{engineState.outline?.status || "pending"} · {language === "zh" ? "已完成层" : "Layers done"}：{(engineState.outline?.completed_layers || []).join(", ") || "—"}</div>
                                 if (_s === "writing") return <div>{language === "zh" ? "写作进度" : "Writing progress"}：{engineState.writing?.progress || "0/0"}</div>
-                                if (_s === "review" || _s === "polish") return <div>{language === "zh" ? "审校" : "Review"}：{engineState.review?.status || "pending"} · {language === "zh" ? "已完成维度" : "Dims done"}：{(engineState.review?.dimensions_done || []).join(", ") || "—"}</div>
+                                if (_s === "review" || _s === "polish") return <div>{language === "zh" ? "审校" : "Review"}：{engineState.review?.status || "pending"}</div>
                                 return null
                               })()}
                             </div>

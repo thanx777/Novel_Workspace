@@ -103,6 +103,23 @@ class ReviewEngine(BaseEngine):
                 return f.read()
         return ""
 
+    def _read_recent_chapters(self, n: int = 3) -> str:
+        """读取最近 n 章的全文，清洗FS编号以防误导LLM。"""
+        parts = []
+        start = max(1, self._current_chapter - n)
+        for ch in range(start, self._current_chapter):
+            content = self._read_chapter(ch)
+            if content:
+                content = self._clean_fs_ids(content)
+                parts.append(f"【第{ch}章】\n{content}")
+        return "\n\n".join(parts)
+
+    def _clean_fs_ids(self, content: str) -> str:
+        """清洗FS编号（如FS-001、FS-002-Variant等）。"""
+        content = re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", content)
+        content = re.sub(r"[（(]\s*[）)]", "", content)
+        return content
+
     def _chapter_path(self, ch_num: int) -> str:
         """获取章节文件路径。"""
         return os.path.join(self.project_dir, "chapters", f"第{ch_num}章.txt")
@@ -136,6 +153,30 @@ class ReviewEngine(BaseEngine):
             continue
         return "第N章"
 
+    def _clean_chapter_content(self, content: str) -> str:
+        """清洗章节内容：移除FS编号、统一标题格式。
+        注意：保留 ---PREV/CAST/THREAD/STRAND--- 等元数据标记，
+        因为写作引擎读取章节文件时依赖这些标记生成下一章。
+        """
+        lines = content.split("\n")
+        cleaned = []
+        for line in lines:
+            # 清除行内的FS编号（FS-XXX、FS-XXX-Variant、FS-XXX-XX）
+            line = re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", line)
+            # 清除残留的空括号（如"（FS-003）"删除后变成"（）"）
+            line = re.sub(r"[（(]\s*[）)]", "", line)
+            cleaned.append(line)
+
+        result = "\n".join(cleaned)
+
+        # 统一章节标题格式：第X章：→ 第X章
+        result = re.sub(r"^(#+\s*第\d+章)[：:]\s*", r"\1 ", result, flags=re.MULTILINE)
+
+        # 清除连续空行（超过2个空行压缩为1个）
+        result = re.sub(r"\n{3,}", "\n\n", result)
+
+        return result.strip() + "\n"
+
     # ---- 公开 API ----
 
     async def run_review(self) -> Dict:
@@ -153,6 +194,10 @@ class ReviewEngine(BaseEngine):
             dimensions_done = set()
             self.state.data.setdefault("review", {})["dimensions_done"] = []
             self.state.save()
+
+        # 设置状态为 running（在判断断点续校之后）
+        self.state.review_set_status("running")
+        self.state.current_stage = "review"
 
         was_cancelled = False
 
@@ -229,9 +274,56 @@ class ReviewEngine(BaseEngine):
                     f"3. 保留章节标题（第X章 ...）\n"
                     f"4. 直接输出修改后的完整章节全文，用中文撰写，不要输出JSON、分析报告或英文内容\n"
                     f"5. 如果当前维度没有问题，原样输出章节内容\n"
-                    f"6. 你的输出将直接替换原章节文件，因此必须是一篇完整的中文小说章节\n\n"
-                    + "\n\n".join(context_parts)
+                    f"6. 你的输出将直接替换原章节文件，因此必须是一篇完整的中文小说章节\n"
+                    f"7. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理\n\n"
                 )
+
+                # AI痕迹维度：注入前3章全文用于对比重复描写
+                if dim_key == "ai_trace":
+                    prev_chapters = self._read_recent_chapters(3)
+                    if prev_chapters:
+                        system_prompt += (
+                            f"【重复描写检测规则】\n"
+                            f"请对比以下前文，检测当前章节中与前文重复的描写模式，包括：\n"
+                            f"- 重复的动作描写（如反复攥拳、指节泛白、死死盯着）\n"
+                            f"- 重复的神态描写（如反复冷笑、嘴角扯出弧度）\n"
+                            f"- 重复的身体状态描写（如反复旧伤作痛、低血糖眩晕）\n"
+                            f"- 重复的比喻（如反复用"像刀"、"像冰"形容眼神）\n"
+                            f"为重复描写提供多样化的替代表达，使每章的描写方式各不相同。\n\n"
+                            f"【前文参考（用于对比重复）】\n{prev_chapters}\n\n"
+                        )
+                    system_prompt += (
+                        f"【章节衔接规则】\n"
+                        f"章节开头必须与前一章结尾自然衔接。不要每章都用固定模式（如天气/场景描写）开头：\n"
+                        f"- 如果是延续前文场景，直接接续叙事\n"
+                        f"- 如果是切换场景，可以用场景描写开头\n"
+                        f"- 避免每章都以"雨"或天气描写开头\n\n"
+                    )
+
+                # 跨章一致性维度：注入角色设定和前一章全文
+                if dim_key == "consistency":
+                    # 注入角色身份设定
+                    character_ctx = self.kg_adapter.format_character_context()
+                    if character_ctx:
+                        system_prompt += (
+                            f"【角色身份设定 — 必须严格遵守，不得矛盾】\n"
+                            f"{character_ctx}\n\n"
+                        )
+                    # 注入前一章全文作为参考（清洗FS编号）
+                    prev_content = self._read_chapter(ch_num - 1) if ch_num > 1 else None
+                    if prev_content:
+                        prev_content = self._clean_fs_ids(prev_content)
+                        system_prompt += (
+                            f"【前一章全文 — 当前章节必须与前文一致】\n"
+                            f"{prev_content}\n\n"
+                            f"请对照前一章检查：\n"
+                            f"- 角色身份是否矛盾（如前文说某人是分析师，本章不能说他是记者）\n"
+                            f"- 时间线是否矛盾（如前文某角色被囚禁，本章不能突然自由活动）\n"
+                            f"- 角色状态是否矛盾（如前文某角色受伤，本章不能突然痊愈）\n"
+                            f"- 关键事实是否矛盾（如伤疤来源、人物关系等）\n\n"
+                        )
+
+                system_prompt += "\n\n".join(context_parts)
                 user_prompt = f"【第{ch_num}章原文】\n{content}\n\n请基于「{dim_name}」维度审校并修改上述章节。{dim_desc}。注意：必须输出完整的中文小说章节全文，不要输出分析报告。"
 
                 # 调用LLM
@@ -284,6 +376,9 @@ class ReviewEngine(BaseEngine):
                     self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": True, "message": "，".join(report_parts)})
                 else:
                     self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": False, "message": f"第{ch_num}章{dim_name}审校完成，无需修改"})
+
+                # 写回章节文件前，清洗元数据标记和FS编号
+                new_content = self._clean_chapter_content(new_content)
 
                 # 写回章节文件
                 self._write_atomic(self._chapter_path(ch_num), new_content)
