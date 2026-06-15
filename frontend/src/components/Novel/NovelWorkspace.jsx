@@ -279,6 +279,7 @@ export default function NovelWorkspace({
             fileName={activeFile} fileContent={fileContent}
             setFileContent={setFileContent}
             onSave={saveFile} showNotification={showNotification}
+            projectName={activeTaskFolder}
           />
         </div>
 

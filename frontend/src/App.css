@@ -4290,6 +4290,72 @@
   color: var(--text);
 }
 
+.ce-btn-ai {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  padding: 6px 16px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ce-btn-ai:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 2px 8px var(--accent-dim);
+}
+.ce-btn-ai:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.ce-ai-input-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.ce-ai-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  outline: none;
+  background: var(--bg-base);
+  color: var(--text);
+}
+.ce-ai-input:focus { border-color: var(--accent); }
+.ce-btn-ai-submit {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  font-family: var(--font-body);
+}
+.ce-btn-ai-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.ce-btn-ai-cancel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
 /* ===== Chapter Editor Content ===== */
 .chapter-editor-content {
   flex: 1;

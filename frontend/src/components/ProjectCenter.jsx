@@ -79,9 +79,13 @@ export default function ProjectCenter({
   const startedAtRef = useRef(null)
 
   const appendRunLog = (event) => {
+    if (event?.type === "replace") {
+      setRunLogs(event.logs || [])
+      return
+    }
     setRunLogs(prev => {
       const next = [...prev, { ...event, timestamp: event.timestamp || Date.now() }]
-      return next.length > 500 ? next.slice(-500) : next
+      return next.length > 100 ? next.slice(-100) : next
     })
   }
   const clearRunLogs = () => setRunLogs([])

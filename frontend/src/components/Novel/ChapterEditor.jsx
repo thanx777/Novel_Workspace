@@ -1,13 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from "react"
+import { API_BASE } from "../../constants"
 
 export default function ChapterEditor({
   t, language,
   fileName, fileContent, setFileContent,
-  onSave, showNotification
+  onSave, showNotification, projectName
 }) {
   const [mode, setMode] = useState("read")
   const [editContent, setEditContent] = useState(fileContent)
   const textareaRef = useRef(null)
+  const [aiMode, setAiMode] = useState(false)
+  const [aiInstruction, setAiInstruction] = useState("")
+  const [aiLoading, setAiLoading] = useState(false)
 
   useEffect(() => {
     setEditContent(fileContent)
@@ -32,6 +36,46 @@ export default function ChapterEditor({
   const handleCancel = () => {
     setEditContent(fileContent)
     setMode("read")
+  }
+
+  const handleAiEdit = async () => {
+    if (!fileName || !aiInstruction.trim()) return
+    setAiLoading(true)
+    try {
+      const chapterNum = parseInt(fileName.replace(/[^0-9]/g, ""))
+      if (!chapterNum) { showNotification(language === "zh" ? "无法识别章节号" : "Cannot identify chapter number", "error"); return }
+
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/chapters/${chapterNum}/ai-edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: aiInstruction.trim() })
+      })
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail || err.error || `HTTP ${resp.status}`)
+      }
+
+      const data = await resp.json()
+
+      if (data.error) {
+        showNotification(data.error, "error")
+        return
+      }
+
+      if (data.content) {
+        setEditContent(data.content)
+        setFileContent(data.content)
+        setMode("edit")
+        setAiMode(false)
+        setAiInstruction("")
+        showNotification(language === "zh" ? "AI修改完成，请确认后保存" : "AI edit done, please confirm and save", "success")
+      }
+    } catch (e) {
+      showNotification((language === "zh" ? "AI修改失败: " : "AI edit failed: ") + e.message, "error")
+    } finally {
+      setAiLoading(false)
+    }
   }
 
   // Keyboard shortcuts
@@ -87,9 +131,14 @@ export default function ChapterEditor({
         </div>
         <div className="chapter-editor-actions">
           {mode === "read" ? (
-            <button className="ce-btn ce-btn-edit" onClick={() => setMode("edit")}>
-               {language === "zh" ? "编辑" : "Edit"}
-            </button>
+            <>
+              <button className="ce-btn ce-btn-edit" onClick={() => setMode("edit")}>
+                 {language === "zh" ? "编辑" : "Edit"}
+              </button>
+              <button className="ce-btn ce-btn-ai" onClick={() => setAiMode(true)}>
+                AI {language === "zh" ? "修改" : "Edit"}
+              </button>
+            </>
           ) : (
             <>
               <button className="ce-btn ce-btn-cancel" onClick={handleCancel}>
@@ -102,6 +151,27 @@ export default function ChapterEditor({
           )}
         </div>
       </div>
+
+      {/* AI Edit Input Bar */}
+      {aiMode && (
+        <div className="ce-ai-input-bar">
+          <input
+            type="text"
+            className="ce-ai-input"
+            value={aiInstruction}
+            onChange={e => setAiInstruction(e.target.value)}
+            placeholder={language === "zh" ? "输入修改要求，如：把第三段的对话改得更紧张..." : "Enter edit instruction..."}
+            onKeyDown={e => { if (e.key === "Enter" && aiInstruction.trim()) handleAiEdit() }}
+            disabled={aiLoading}
+          />
+          <button className="ce-btn ce-btn-ai-submit" onClick={handleAiEdit} disabled={aiLoading || !aiInstruction.trim()}>
+            {aiLoading ? (language === "zh" ? "处理中..." : "Processing...") : (language === "zh" ? "提交" : "Submit")}
+          </button>
+          <button className="ce-btn ce-btn-ai-cancel" onClick={() => { setAiMode(false); setAiInstruction("") }} disabled={aiLoading}>
+            {language === "zh" ? "取消" : "Cancel"}
+          </button>
+        </div>
+      )}
 
       {/* Content */}
       <div className="chapter-editor-content">

@@ -657,24 +657,25 @@ class WritingEngine(BaseEngine):
         try:
             db = ProjectDB(self.project_name)
             title = self._extract_chapter_title(content)
-            # 如果标题为空或回退到"第N章"，使用正确的章节号
-            if not title.strip() or title.strip() == "第N章":
+            # 如果从内容提取到有效标题，直接使用（内容是最新的）
+            if title.strip() and title.strip() != "第N章":
+                title = f"第{chapter_num}章 {title}"
+            else:
+                # 兜底：从大纲生成的标题映射中获取标题
                 title = f"第{chapter_num}章"
+                titles_path = os.path.join(self.project_dir, "chapter_titles.json")
+                if os.path.isfile(titles_path):
+                    try:
+                        import json as _json
+                        with open(titles_path, "r", encoding="utf-8") as f:
+                            titles_map = _json.load(f)
+                        mapped_title = titles_map.get(str(chapter_num))
+                        if mapped_title:
+                            title = f"第{chapter_num}章 {mapped_title}"
+                    except Exception:
+                        pass
             summary = content[:100].replace("\n", " ").strip()
-            # 统一使用中文字数计算（与 FormatValidator 一致）
             word_count = len(re.findall(r'[\u4e00-\u9fff]', content))
-            # 优先从大纲生成的标题映射中获取标题
-            titles_path = os.path.join(self.project_dir, "chapter_titles.json")
-            if os.path.isfile(titles_path):
-                try:
-                    import json as _json
-                    with open(titles_path, "r", encoding="utf-8") as f:
-                        titles_map = _json.load(f)
-                    mapped_title = titles_map.get(str(chapter_num))
-                    if mapped_title:
-                        title = f"第{chapter_num}章 {mapped_title}"
-                except Exception:
-                    pass
             db.upsert_chapter(chapter_num, title=title, summary=summary, status=status, word_count=word_count)
             db.close()
         except Exception as e:

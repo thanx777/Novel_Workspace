@@ -25,7 +25,10 @@ function formatSSEEvent(data) {
     outline_layer_start: `开始 ${data.layer} 大纲`,
     outline_done: "大纲生成完成",
     writing_done: "写作完成",
+    reviewing: `正在审校第 ${data.chapter} 章 - ${data.dimension_name || data.dimension}`,
+    review_dim_done: data.message || `第 ${data.chapter} 章 ${data.dimension_name || data.dimension} 审校完成`,
     review_done: "审校完成",
+    review_cancelled: `审校已暂停: 第 ${data.chapter || ""}章`,
     done: "完成",
     error: `错误: ${data.message || data.reason || "未知错误"}`,
     info: data.message || "",
@@ -36,10 +39,60 @@ function formatSSEEvent(data) {
   let logStatus = "info"
   if (["error", "cycle_cancelled"].includes(status)) logStatus = "error"
   else if (["cycle_stuck", "cycle_ended"].includes(status) && !data.accepted) logStatus = "warning"
-  else if (["done", "cycle_completed", "cycle_ended", "outline_done", "writing_done", "review_done", "chapter_written", "chapter_polished", "outline_layer_done"].includes(status)) logStatus = "done"
-  else if (["chapter_writing", "chapter_polishing", "mwr_round"].includes(status)) logStatus = "start"
+  else if (["done", "cycle_completed", "cycle_ended", "outline_done", "writing_done", "review_done", "review_dim_done", "chapter_written", "chapter_polished", "outline_layer_done"].includes(status)) logStatus = "done"
+  else if (["chapter_writing", "chapter_polishing", "mwr_round", "reviewing"].includes(status)) logStatus = "start"
 
   return { status: logStatus, role, message, timestamp: ts }
+}
+
+/**
+ * 带心跳检测的 SSE 流读取。
+ * 浏览器节流后台标签页时 reader.read() 会挂起，此函数通过检测
+ * 长时间无事件来识别连接断开，而非静默丢失后续事件。
+ *
+ * @param {ReadableStreamDefaultReader} reader
+ * @param {Object} opts
+ * @param {Function} opts.onData       - 收到 data: 行时的回调 (parsed JSON)
+ * @param {Function} opts.onTimeout    - 心跳超时回调（30秒无任何数据）
+ * @param {number}   opts.timeoutMs    - 超时阈值，默认 30000
+ */
+async function readSSEStream(reader, { onData, onTimeout, timeoutMs = 30000 }) {
+  const decoder = new TextDecoder()
+  let lastEventTime = Date.now()
+  let timer = null
+  let stopped = false
+
+  const checkHeartbeat = () => {
+    if (stopped) return
+    if (Date.now() - lastEventTime > timeoutMs) {
+      stopped = true
+      clearInterval(timer)
+      try { reader.cancel() } catch {}
+      onTimeout()
+    }
+  }
+
+  timer = setInterval(checkHeartbeat, 5000)
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      lastEventTime = Date.now()
+      const chunk = decoder.decode(value)
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6))
+            onData(data)
+          } catch {}
+        }
+      }
+    }
+  } finally {
+    stopped = true
+    clearInterval(timer)
+  }
 }
 
 /**
@@ -261,6 +314,49 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
 
   // ---------- 停止 ----------
   const engineAbortRef = useRef(null)  // 当前正在跑的 SSE 请求，可被 stopTask 取消
+  const logPollTimerRef = useRef(null)  // 超时后轮询日志的定时器
+
+  // 停止日志轮询
+  const stopLogPolling = useCallback(() => {
+    if (logPollTimerRef.current) {
+      clearInterval(logPollTimerRef.current)
+      logPollTimerRef.current = null
+    }
+  }, [])
+
+  // 切换项目时停止日志轮询
+  useEffect(() => {
+    stopLogPolling()
+  }, [activeProject?.name, stopLogPolling])
+
+  // SSE 超时后自动拉取最新日志并持续轮询
+  const startLogPolling = useCallback((name, onLogEvent) => {
+    stopLogPolling()
+    const fetchLatest = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/logs?limit=100`)
+        if (!resp.ok) return
+        const data = await resp.json()
+        const logs = (data.logs || []).map(evt => formatSSEEvent({ ...evt, timestamp: evt.timestamp || Date.now() }))
+        if (logs.length > 0 && onLogEvent) {
+          // 用最新日志替换（由调用方决定如何处理）
+          onLogEvent({ type: "replace", logs })
+        }
+        // 检查引擎是否还在跑
+        const stateResp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/state`)
+        if (stateResp.ok) {
+          const state = await stateResp.json()
+          const writing = state?.writing || {}
+          if (writing.status === "completed" || writing.status === "failed" || writing.status === "cancelled") {
+            stopLogPolling()
+            return
+          }
+        }
+      } catch {}
+    }
+    fetchLatest()
+    logPollTimerRef.current = setInterval(fetchLatest, 5000)
+  }, [stopLogPolling])
 
   const stopTask = useCallback(async (name) => {
     try {
@@ -268,6 +364,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/stop`, { method: "POST" }).catch(() => {})
       // 中断前端 SSE 请求
       if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
+      stopLogPolling()
       setIsRunning(false)
       setRunningStage(null)
       showNotification && showNotification(t?.("taskStopped") || "已停止", "info")
@@ -275,7 +372,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
     } catch (e) {
       showNotification && showNotification("停止失败: " + e.message, "error")
     }
-  }, [showNotification, loadProject, t])
+  }, [showNotification, loadProject, t, stopLogPolling])
 
   // ---------- AI 助理对话 ----------
   const assistantChat = useCallback(async (name, message) => {
@@ -343,7 +440,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
   }, [])
 
   // ---------- 历史日志 ----------
-  const loadRunLogs = useCallback(async (name, limit = 500) => {
+  const loadRunLogs = useCallback(async (name, limit = 100) => {
     try {
       const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/logs?limit=${limit}`)
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -380,25 +477,20 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
       const reader = resp.body?.getReader()
       if (!reader) throw new Error("No stream reader")
-      const decoder = new TextDecoder()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const chunk = decoder.decode(value)
-        for (const line of chunk.split("\n")) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
-              if (data.status === "done") showNotification && showNotification("大纲生成完成", "success")
-              if (data.status === "error") showNotification && showNotification(data.message || "大纲生成出错", "error")
-              // 大纲层完成时刷新项目数据
-              if (data.status === "outline_layer_done" || data.status === "done") loadProject(name)
-              // 大纲完成后也刷新 KG
-              if (data.status === "outline_layer_done" || data.status === "done") setKgRefreshKey(k => k + 1)
-            } catch (e) {}
-          }
-        }
+      let timedOut = false
+      await readSSEStream(reader, {
+        onData(data) {
+          if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
+          if (data.status === "done") showNotification && showNotification("大纲生成完成", "success")
+          if (data.status === "error") showNotification && showNotification(data.message || "大纲生成出错", "error")
+          if (data.status === "outline_layer_done" || data.status === "done") loadProject(name)
+          if (data.status === "outline_layer_done" || data.status === "done") setKgRefreshKey(k => k + 1)
+        },
+        onTimeout() { timedOut = true },
+      })
+      if (timedOut) {
+        showNotification && showNotification("SSE 连接超时，正在自动拉取最新日志", "info")
+        startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
     } catch (e) {
@@ -409,10 +501,11 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       }
     } finally {
       if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
+      stopLogPolling()
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject])
+  }, [showNotification, loadProject, stopLogPolling])
 
   // ---------- 引擎：大纲 AI 对话 ----------
   const engineOutlineChat = useCallback(async (name, message, layer = "") => {
@@ -447,25 +540,20 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
       const reader = resp.body?.getReader()
       if (!reader) throw new Error("No stream reader")
-      const decoder = new TextDecoder()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const chunk = decoder.decode(value)
-        for (const line of chunk.split("\n")) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
-              if (data.status === "done") showNotification && showNotification("写作完成", "success")
-              if (data.status === "error") showNotification && showNotification(data.message || "写作出错", "error")
-              // 章节写完时刷新项目数据（同步章节列表和进度）
-              if (data.status === "chapter_written" || data.status === "chapter_completed" || data.status === "done") loadProject(name)
-              // KG 摄取完成后触发图谱刷新
-              if (data.status === "chapter_completed" || data.status === "kg_ingested") setKgRefreshKey(k => k + 1)
-            } catch (e) {}
-          }
-        }
+      let timedOut = false
+      await readSSEStream(reader, {
+        onData(data) {
+          if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
+          if (data.status === "done") showNotification && showNotification("写作完成", "success")
+          if (data.status === "error") showNotification && showNotification(data.message || "写作出错", "error")
+          if (data.status === "chapter_written" || data.status === "chapter_completed" || data.status === "done") loadProject(name)
+          if (data.status === "chapter_completed" || data.status === "kg_ingested") setKgRefreshKey(k => k + 1)
+        },
+        onTimeout() { timedOut = true },
+      })
+      if (timedOut) {
+        showNotification && showNotification("SSE 连接超时，正在自动拉取最新日志", "info")
+        startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
     } catch (e) {
@@ -476,10 +564,11 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       }
     } finally {
       if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
+      stopLogPolling()
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject])
+  }, [showNotification, loadProject, stopLogPolling])
 
   // ---------- 引擎：写作 AI 对话 ----------
   const engineWritingChat = useCallback(async (name, message, chapter = 0) => {
@@ -513,21 +602,22 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
       const reader = resp.body?.getReader()
       if (!reader) throw new Error("No stream reader")
-      const decoder = new TextDecoder()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const chunk = decoder.decode(value)
-        for (const line of chunk.split("\n")) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
-              if (data.status === "done") showNotification && showNotification("全局审校完成", "success")
-              if (data.status === "error") showNotification && showNotification(data.message || "审校出错", "error")
-            } catch (e) {}
+      let timedOut = false
+      await readSSEStream(reader, {
+        onData(data) {
+          if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
+          if (data.status === "reviewing") {
+            setRunningStage(`review:${data.dimension}`)
           }
-        }
+          if (data.status === "done") showNotification && showNotification("全局审校完成", "success")
+          if (data.status === "review_cancelled") showNotification && showNotification("审校已暂停，可继续", "info")
+          if (data.status === "error") showNotification && showNotification(data.message || "审校出错", "error")
+        },
+        onTimeout() { timedOut = true },
+      })
+      if (timedOut) {
+        showNotification && showNotification("SSE 连接超时，正在自动拉取最新日志", "info")
+        startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
     } catch (e) {
@@ -538,10 +628,11 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       }
     } finally {
       if (engineAbortRef.current === abortCtrl) engineAbortRef.current = null
+      stopLogPolling()
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject])
+  }, [showNotification, loadProject, stopLogPolling])
 
   // ---------- 引擎：获取各阶段状态 ----------
   const getOutlineState = useCallback(async (name) => {

@@ -5,6 +5,27 @@ import KnowledgeGraphView from "./KnowledgeGraphView"
 import { API_BASE } from "../constants"
 import useProjectV2 from "../hooks/useProjectV2"
 
+/** 从章节内容中提取标题（与后端 _extract_chapter_title 逻辑一致） */
+function extractTitleFromContent(content) {
+  if (!content) return ""
+  for (const raw of content.trim().split("\n")) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith("---PREV:") || line.startsWith("---CAST:") || line.startsWith("---")) continue
+    let m = line.match(/^#+\s*第[一二三四五六七八九十百千\d]+章\s*(.*)/)
+    if (m && m[1].trim()) return m[1].trim()
+    m = line.match(/^第[一二三四五六七八九十百千\d]+章\s+(.*)/)
+    if (m && m[1].trim()) return m[1].trim()
+    m = line.match(/^#+\s*(.+)/)
+    if (m && m[1].trim()) {
+      let title = m[1].trim().replace(/^第[一二三四五六七八九十百千\d]+章\s*/, "")
+      return title.trim() || ""
+    }
+    continue
+  }
+  return ""
+}
+
 export default function Workbench({
   t, language,
   isDark, setIsDark, setLanguage, setShowWorkspaceSettings, setShowPresetSidebar, showPresetSidebar,
@@ -43,10 +64,14 @@ export default function Workbench({
   // ---- Run Logs (for the log panel) ----
   const [runLogs, setRunLogs] = useState([])
   const appendRunLog = useCallback((event) => {
+    if (event?.type === "replace") {
+      setRunLogs(event.logs || [])
+      return
+    }
     setRunLogs(prev => {
       const next = [...prev, event]
-      // 限制最多保留 500 条
-      return next.length > 500 ? next.slice(-500) : next
+      // 限制最多保留 100 条
+      return next.length > 100 ? next.slice(-100) : next
     })
   }, [])
   const clearRunLogsLocal = useCallback(() => {
@@ -69,6 +94,9 @@ export default function Workbench({
   const [chapterMode, setChapterMode] = useState("read") // "read" or "edit"
   const [editDraft, setEditDraft] = useState("") // editable copy
   const [selectedChapterIndex, setSelectedChapterIndex] = useState(null)
+  const [aiMode, setAiMode] = useState(false)
+  const [aiInstruction, setAiInstruction] = useState("")
+  const [aiLoading, setAiLoading] = useState(false)
 
   // Sync editDraft when chapterDraft changes
   useEffect(() => { setEditDraft(chapterDraft) }, [chapterDraft])
@@ -190,15 +218,75 @@ export default function Workbench({
   const handleSaveChapter = useCallback(async () => {
     if (!activeProject) return
     const contentToSave = chapterMode === "edit" ? editDraft : chapterDraft
+    // 从内容提取标题
+    const newTitle = extractTitleFromContent(contentToSave)
+    const finalTitle = newTitle || chapterTitle
     await updateChapter(activeProject.name, selectedChapterIndex, {
-      title: chapterTitle,
+      title: finalTitle,
       summary: chapterSummary,
       content: contentToSave,
       status: "draft",
     })
     setChapterDraft(contentToSave)
     setChapterMode("read")
+    // 更新侧边栏标题
+    if (newTitle && activeProject.chapters) {
+      setActiveProject(prev => ({
+        ...prev,
+        chapters: prev.chapters.map(c =>
+          c.chapter_index === selectedChapterIndex
+            ? { ...c, title: newTitle }
+            : c
+        )
+      }))
+    }
   }, [activeProject, chapterMode, editDraft, chapterTitle, chapterSummary, chapterDraft, selectedChapterIndex, updateChapter])
+
+  // ---- AI Edit chapter ----
+  const handleAiEdit = useCallback(async () => {
+    if (!activeProject?.name || !selectedChapterIndex || !aiInstruction.trim()) return
+    setAiLoading(true)
+    try {
+      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(activeProject.name)}/chapters/${selectedChapterIndex}/ai-edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: aiInstruction.trim() })
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail || err.error || `HTTP ${resp.status}`)
+      }
+      const data = await resp.json()
+      if (data.error) {
+        showNotification && showNotification(data.error, "error")
+        return
+      }
+      if (data.content) {
+        setEditDraft(data.content)
+        setChapterDraft(data.content)
+        setChapterMode("edit")
+        setAiMode(false)
+        setAiInstruction("")
+        // 更新侧边栏标题
+        const newTitle = extractTitleFromContent(data.content)
+        if (newTitle && activeProject.chapters) {
+          setActiveProject(prev => ({
+            ...prev,
+            chapters: prev.chapters.map(c =>
+              c.chapter_index === selectedChapterIndex
+                ? { ...c, title: newTitle }
+                : c
+            )
+          }))
+        }
+        showNotification && showNotification(language === "zh" ? "AI修改完成，请确认后保存" : "AI edit done, please confirm and save", "success")
+      }
+    } catch (e) {
+      showNotification && showNotification((language === "zh" ? "AI修改失败: " : "AI edit failed: ") + e.message, "error")
+    } finally {
+      setAiLoading(false)
+    }
+  }, [activeProject, selectedChapterIndex, aiInstruction, showNotification, language])
 
   // ---- Save outline ----
   const handleSaveOutline = useCallback(async () => {
@@ -715,7 +803,7 @@ export default function Workbench({
                             const isCurrent = curStage === stage.key || (curStage === "polish" && stage.key === "review")
                             const isCompleted = stageIdx < curIdx
                             const isDone = curStage === "done" || curStage === "completed"
-                            const isRunningThisStage = isRunning && runningStage === stage.key
+                            const isRunningThisStage = isRunning && (runningStage === stage.key || runningStage?.startsWith(stage.key + ":"))
                             // 是否可以操作此阶段（当前阶段或已完成阶段可重新运行）
                             const canOperate = isCurrent || isCompleted
 
@@ -912,9 +1000,14 @@ export default function Workbench({
                 </div>
                 <div className="chapter-editor-actions">
                   {chapterMode === "read" ? (
-                    <button className="ce-btn ce-btn-edit" onClick={() => setChapterMode("edit")} disabled={!chapterDraft}>
-                      {language === "zh" ? "编辑" : "Edit"}
-                    </button>
+                    <>
+                      <button className="ce-btn ce-btn-edit" onClick={() => setChapterMode("edit")} disabled={!chapterDraft}>
+                        {language === "zh" ? "编辑" : "Edit"}
+                      </button>
+                      <button className="ce-btn ce-btn-ai" onClick={() => setAiMode(true)} disabled={!chapterDraft}>
+                        AI {language === "zh" ? "修改" : "Edit"}
+                      </button>
+                    </>
                   ) : (
                     <>
                       <button className="ce-btn ce-btn-cancel" onClick={() => { setEditDraft(chapterDraft); setChapterMode("read") }}>
@@ -927,6 +1020,28 @@ export default function Workbench({
                   )}
                 </div>
               </div>
+
+              {/* AI Edit Input Bar */}
+              {aiMode && (
+                <div className="ce-ai-input-bar">
+                  <input
+                    type="text"
+                    className="ce-ai-input"
+                    value={aiInstruction}
+                    onChange={e => setAiInstruction(e.target.value)}
+                    placeholder={language === "zh" ? "输入修改要求，如：把第三段的对话改得更紧张..." : "Enter edit instruction..."}
+                    onKeyDown={e => { if (e.key === "Enter" && aiInstruction.trim()) handleAiEdit() }}
+                    disabled={aiLoading}
+                    autoFocus
+                  />
+                  <button className="ce-btn ce-btn-ai-submit" onClick={handleAiEdit} disabled={aiLoading || !aiInstruction.trim()}>
+                    {aiLoading ? (language === "zh" ? "处理中..." : "Processing...") : (language === "zh" ? "提交" : "Submit")}
+                  </button>
+                  <button className="ce-btn ce-btn-ai-cancel" onClick={() => { setAiMode(false); setAiInstruction("") }} disabled={aiLoading}>
+                    {language === "zh" ? "取消" : "Cancel"}
+                  </button>
+                </div>
+              )}
 
               {/* Content */}
               <div className="chapter-editor-content">
