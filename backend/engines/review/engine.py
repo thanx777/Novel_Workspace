@@ -9,6 +9,7 @@ from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, Final
 from ..common.llm_client import LLMClient
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
+from ..common.utils import extract_chapter_title
 
 
 # 全部审校维度（pro 模式使用完整列表）
@@ -130,28 +131,6 @@ class ReviewEngine(BaseEngine):
         if not content:
             return ""
         return content[:300]
-
-    def _extract_chapter_title(self, content: str) -> str:
-        """从内容中提取章节标题，如 '# 第一章 灵根觉醒' → '灵根觉醒'。"""
-        for line in content.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("---PREV:") or line.startswith("---CAST:") or line.startswith("---"):
-                continue
-            m = re.match(r"^#+\s*第[一二三四五六七八九十百千\d]+章\s*(.*)", line)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
-            m = re.match(r"^第[一二三四五六七八九十百千\d]+章\s+(.*)", line)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
-            m = re.match(r"^#+\s*(.+)", line)
-            if m and m.group(1).strip():
-                title = m.group(1).strip()
-                title = re.sub(r"^第[一二三四五六七八九十百千\d]+章\s*", "", title)
-                return title.strip() or "第N章"
-            continue
-        return "第N章"
 
     def _clean_chapter_content(self, content: str) -> str:
         """清洗章节内容：移除FS编号、统一标题格式。
@@ -288,7 +267,7 @@ class ReviewEngine(BaseEngine):
                             f"- 重复的动作描写（如反复攥拳、指节泛白、死死盯着）\n"
                             f"- 重复的神态描写（如反复冷笑、嘴角扯出弧度）\n"
                             f"- 重复的身体状态描写（如反复旧伤作痛、低血糖眩晕）\n"
-                            f"- 重复的比喻（如反复用"像刀"、"像冰"形容眼神）\n"
+                            f"- 重复的比喻（如反复用'像刀'、'像冰'形容眼神）\n"
                             f"为重复描写提供多样化的替代表达，使每章的描写方式各不相同。\n\n"
                             f"【前文参考（用于对比重复）】\n{prev_chapters}\n\n"
                         )
@@ -297,7 +276,7 @@ class ReviewEngine(BaseEngine):
                         f"章节开头必须与前一章结尾自然衔接。不要每章都用固定模式（如天气/场景描写）开头：\n"
                         f"- 如果是延续前文场景，直接接续叙事\n"
                         f"- 如果是切换场景，可以用场景描写开头\n"
-                        f"- 避免每章都以"雨"或天气描写开头\n\n"
+                        f"- 避免每章都以'雨'或天气描写开头\n\n"
                     )
 
                 # 跨章一致性维度：注入角色设定和前一章全文
@@ -341,18 +320,12 @@ class ReviewEngine(BaseEngine):
                 # 内容变空/缩水检测
                 if not new_content or not new_content.strip():
                     self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后内容为空，跳过"})
-                    dimensions_done.add(done_key)
-                    self.state.data.setdefault("review", {}).setdefault("dimensions_done", []).append(done_key)
-                    self.state.save()
                     continue
 
                 original_cn = len(re.findall(r'[\u4e00-\u9fff]', content))
                 new_cn = len(re.findall(r'[\u4e00-\u9fff]', new_content))
                 if new_cn < original_cn * 0.5 and original_cn > 500:
                     self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后字数大幅缩水({new_cn}←{original_cn})，跳过"})
-                    dimensions_done.add(done_key)
-                    self.state.data.setdefault("review", {}).setdefault("dimensions_done", []).append(done_key)
-                    self.state.save()
                     continue
 
                 # 判断是否有实质修改并生成报告
@@ -387,7 +360,7 @@ class ReviewEngine(BaseEngine):
                 try:
                     from project_db import ProjectDB
                     db = ProjectDB(self.project_name)
-                    title = self._extract_chapter_title(new_content)
+                    title = extract_chapter_title(new_content)
                     db.upsert_chapter(chapter_index=ch_num, title=title, status="reviewed")
                     db.close()
                 except Exception as e:
@@ -406,7 +379,8 @@ class ReviewEngine(BaseEngine):
                 }
 
                 dimensions_done.add(done_key)
-                self.state.data.setdefault("review", {}).setdefault("dimensions_done", []).append(done_key)
+                review_data = self.state.data.setdefault("review", {})
+                review_data["dimensions_done"] = list(dimensions_done)
                 self.state.save()
 
             if was_cancelled:

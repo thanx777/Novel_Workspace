@@ -1,0 +1,14 @@
+{
+  "presets": [
+    {
+      "name": "Example-Preset",
+      "base_url": "https://api.example.com/v1",
+      "model": "model-name",
+      "api_key": "your-api-key-here",
+      "api_format": "openai"
+    }
+  ],
+  "workspace_dir": "",
+  "projects_dir": "",
+  "default_preset": "Example-Preset"
+}

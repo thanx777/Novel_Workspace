@@ -10,7 +10,7 @@
 
 ENGINE_CONFIG = {
     "max_rounds_outline": 8,
-    "max_rounds_writing": 50,
+    "max_rounds_writing": 10,
     "max_rounds_review": 5,
     "max_polish_rounds": 8,
     "score_threshold": 7.0,

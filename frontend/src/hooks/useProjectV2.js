@@ -75,17 +75,26 @@ async function readSSEStream(reader, { onData, onTimeout, timeoutMs = 30000 }) {
   timer = setInterval(checkHeartbeat, 5000)
 
   try {
+    let buffer = ''
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
       lastEventTime = Date.now()
-      const chunk = decoder.decode(value)
-      for (const line of chunk.split("\n")) {
-        if (line.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            onData(data)
-          } catch {}
+      buffer += decoder.decode(value, { stream: true })
+      // 按双换行分割 SSE 事件（兼容 \r\n 和 \n）
+      const parts = buffer.split(/\r?\n\r?\n/)
+      // 最后一段可能不完整，保留在 buffer
+      buffer = parts.pop() || ''
+      for (const part of parts) {
+        for (const line of part.split(/\r?\n/)) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              onData(data)
+            } catch (e) {
+              console.warn('[SSE] JSON parse error:', e)
+            }
+          }
         }
       }
     }
@@ -463,6 +472,8 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
 
   // ---------- 引擎：启动大纲生成（SSE 流式） ----------
   const engineOutlineGenerate = useCallback(async (name, { layer = "", requirements = "", onLogEvent = null } = {}) => {
+    // 先 abort 残留的旧请求
+    if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
     setIsRunning(true)
     setRunningStage("outline")
     const abortCtrl = new AbortController()
@@ -483,7 +494,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
           if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
           if (data.status === "done") showNotification && showNotification("大纲生成完成", "success")
           if (data.status === "error") showNotification && showNotification(data.message || "大纲生成出错", "error")
-          if (data.status === "outline_layer_done" || data.status === "done") loadProject(name)
+          if (data.status === "outline_layer_done" || data.status === "done") { loadProject(name); fetchProjects() }
           if (data.status === "outline_layer_done" || data.status === "done") setKgRefreshKey(k => k + 1)
         },
         onTimeout() { timedOut = true },
@@ -493,6 +504,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
+      await fetchProjects()
     } catch (e) {
       if (e?.name === "AbortError") {
         if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止大纲生成", timestamp: Date.now() })
@@ -505,7 +517,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject, stopLogPolling])
+  }, [showNotification, loadProject, fetchProjects, stopLogPolling])
 
   // ---------- 引擎：大纲 AI 对话 ----------
   const engineOutlineChat = useCallback(async (name, message, layer = "") => {
@@ -526,6 +538,8 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
 
   // ---------- 引擎：启动写作（SSE 流式） ----------
   const engineWritingStart = useCallback(async (name, { startChapter = 1, totalChapters = 0, onLogEvent = null } = {}) => {
+    // 先 abort 残留的旧请求
+    if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
     setIsRunning(true)
     setRunningStage("writing")
     const abortCtrl = new AbortController()
@@ -546,7 +560,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
           if (onLogEvent) onLogEvent(formatSSEEvent({ ...data, timestamp: Date.now() }))
           if (data.status === "done") showNotification && showNotification("写作完成", "success")
           if (data.status === "error") showNotification && showNotification(data.message || "写作出错", "error")
-          if (data.status === "chapter_written" || data.status === "chapter_completed" || data.status === "done") loadProject(name)
+          if (data.status === "chapter_written" || data.status === "chapter_completed" || data.status === "done") { loadProject(name); fetchProjects() }
           if (data.status === "chapter_completed" || data.status === "kg_ingested") setKgRefreshKey(k => k + 1)
         },
         onTimeout() { timedOut = true },
@@ -556,6 +570,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
+      await fetchProjects()
     } catch (e) {
       if (e?.name === "AbortError") {
         if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止写作", timestamp: Date.now() })
@@ -568,7 +583,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject, stopLogPolling])
+  }, [showNotification, loadProject, fetchProjects, stopLogPolling])
 
   // ---------- 引擎：写作 AI 对话 ----------
   const engineWritingChat = useCallback(async (name, message, chapter = 0) => {
@@ -589,6 +604,8 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
 
   // ---------- 引擎：启动全局审校（SSE 流式） ----------
   const engineReviewStart = useCallback(async (name, { onLogEvent = null } = {}) => {
+    // 先 abort 残留的旧请求
+    if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
     setIsRunning(true)
     setRunningStage("review")
     const abortCtrl = new AbortController()
@@ -620,6 +637,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
         startLogPolling(name, onLogEvent)
       }
       await loadProject(name)
+      await fetchProjects()
     } catch (e) {
       if (e?.name === "AbortError") {
         if (onLogEvent) onLogEvent({ status: "info", role: "系统", message: "已停止审校", timestamp: Date.now() })
@@ -632,7 +650,7 @@ export default function useProjectV2({ showNotification, presets = [], t }) {
       setIsRunning(false)
       setRunningStage(null)
     }
-  }, [showNotification, loadProject, stopLogPolling])
+  }, [showNotification, loadProject, fetchProjects, stopLogPolling])
 
   // ---------- 引擎：获取各阶段状态 ----------
   const getOutlineState = useCallback(async (name) => {

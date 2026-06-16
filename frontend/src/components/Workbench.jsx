@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import LogPanel from "./LogPanel"
 import OutlinePanel from "./OutlinePanel"
 import KnowledgeGraphView from "./KnowledgeGraphView"
@@ -97,6 +97,7 @@ export default function Workbench({
   const [aiMode, setAiMode] = useState(false)
   const [aiInstruction, setAiInstruction] = useState("")
   const [aiLoading, setAiLoading] = useState(false)
+  const engineActionLock = useRef(false)  // 防止 handleEngineAction 重入
 
   // Sync editDraft when chapterDraft changes
   useEffect(() => { setEditDraft(chapterDraft) }, [chapterDraft])
@@ -106,6 +107,10 @@ export default function Workbench({
   const [newName, setNewName] = useState("")
   const [newGenre, setNewGenre] = useState("")
   const [newExtraReqs, setNewExtraReqs] = useState("")
+  const [newWordCountMin, setNewWordCountMin] = useState(3000)
+  const [newWordCountMax, setNewWordCountMax] = useState(5000)
+  const [newMaxRoundsWriting, setNewMaxRoundsWriting] = useState(10)
+  const [newMaxRoundsOutline, setNewMaxRoundsOutline] = useState(8)
   const [newManagerIdx, setNewManagerIdx] = useState(-1)
   const [newWorkerIdx, setNewWorkerIdx] = useState(-1)
   const [newReviewerIdx, setNewReviewerIdx] = useState(-1)
@@ -159,6 +164,10 @@ export default function Workbench({
   const [editProjectName, setEditProjectName] = useState("")
   const [editProjectTitle, setEditProjectTitle] = useState("")
   const [editProjectGenre, setEditProjectGenre] = useState("")
+  const [editWordCountMin, setEditWordCountMin] = useState(3000)
+  const [editWordCountMax, setEditWordCountMax] = useState(5000)
+  const [editMaxRoundsWriting, setEditMaxRoundsWriting] = useState(10)
+  const [editMaxRoundsOutline, setEditMaxRoundsOutline] = useState(8)
   const [editTotalChapters, setEditTotalChapters] = useState(20)
   const [editExtraReqs, setEditExtraReqs] = useState("")
 
@@ -339,6 +348,10 @@ export default function Workbench({
     setEditProjectTitle(activeProject.title || "")
     setEditProjectGenre(activeProject.genre || "")
     setEditTotalChapters(activeProject.total_chapters || 0)
+    setEditWordCountMin(activeProject.word_count_min || 3000)
+    setEditWordCountMax(activeProject.word_count_max || 5000)
+    setEditMaxRoundsWriting(activeProject.max_rounds_writing || 10)
+    setEditMaxRoundsOutline(activeProject.max_rounds_outline || 8)
     // 加载附加要求
     getFile(activeProject.name, "extra_requirements.txt").then(content => {
       setEditExtraReqs(content || "")
@@ -357,6 +370,10 @@ export default function Workbench({
           title: editProjectTitle,
           genre: editProjectGenre,
           total_chapters: Number(editTotalChapters) || 0,
+          word_count_min: Number(editWordCountMin) || 3000,
+          word_count_max: Number(editWordCountMax) || 5000,
+          max_rounds_writing: Number(editMaxRoundsWriting) || 10,
+          max_rounds_outline: Number(editMaxRoundsOutline) || 8,
         }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -369,7 +386,7 @@ export default function Workbench({
     } catch (e) {
       showNotification && showNotification("保存失败: " + e.message, "error")
     }
-  }, [activeProject, editProjectTitle, editProjectGenre, editTotalChapters, editExtraReqs, loadProject, showNotification, putFile])
+  }, [activeProject, editProjectTitle, editProjectGenre, editTotalChapters, editExtraReqs, editWordCountMin, editWordCountMax, editMaxRoundsWriting, editMaxRoundsOutline, loadProject, showNotification, putFile])
 
   // ---- Create project ----
   const handleCreateProject = useCallback(async () => {
@@ -401,11 +418,17 @@ export default function Workbench({
       outline_layers: { L1: true, L2: true },
       extra_requirements: newExtraReqs.trim(),
       role_presets: rolePresets,
+      word_count_min: Number(newWordCountMin) || 3000,
+      word_count_max: Number(newWordCountMax) || 5000,
+      max_rounds_writing: Number(newMaxRoundsWriting) || 10,
+      max_rounds_outline: Number(newMaxRoundsOutline) || 8,
     })
     if (result) {
       setNewName("")
       setNewGenre("")
       setNewExtraReqs("")
+      setNewWordCountMin(3000)
+      setNewWordCountMax(5000)
       setNewManagerIdx(-1); setNewWorkerIdx(-1); setNewReviewerIdx(-1)
       setNewChatPreset("")
       setShowModelConfig(false)
@@ -810,30 +833,36 @@ export default function Workbench({
                             const handleEngineAction = async () => {
                               if (!activeProject) return
                               if (isRunningThisStage) {
-                                // 正在运行 → 停止
-                                await stopTask(activeProject.name)
+                                // 正在运行 → 停止（不受 lock 限制，因为启动的 await 期间需要能停止）
+                                try { await stopTask(activeProject.name) } catch {}
                                 return
                               }
-                              // 清空日志并切换到日志面板
-                              clearRunLogsLocal()
-                              appendRunLog({
-                                status: "info", role: "系统",
-                                message: `▶ 准备启动 ${stage.label} 阶段...`,
-                                timestamp: Date.now(),
-                              })
-                              setActiveRightPanel("logs")
-                              if (stage.key === "outline" && engineOutlineGenerate) {
-                                // 读取项目要求传给大纲生成
-                                const reqs = await getFile(activeProject.name, "extra_requirements.txt")
-                                await engineOutlineGenerate(activeProject.name, { requirements: reqs || "", onLogEvent: appendRunLog })
-                              } else if (stage.key === "writing" && engineWritingStart) {
-                                await engineWritingStart(activeProject.name, {
-                                  startChapter: 1,
-                                  totalChapters: activeProject.total_chapters || 0,
-                                  onLogEvent: appendRunLog,
+                              if (engineActionLock.current) return  // 防止重入（仅限启动）
+                              engineActionLock.current = true
+                              try {
+                                // 清空日志并切换到日志面板
+                                clearRunLogsLocal()
+                                appendRunLog({
+                                  status: "info", role: "系统",
+                                  message: `▶ 准备启动 ${stage.label} 阶段...`,
+                                  timestamp: Date.now(),
                                 })
-                              } else if (stage.key === "review" && engineReviewStart) {
-                                await engineReviewStart(activeProject.name, { onLogEvent: appendRunLog })
+                                setActiveRightPanel("logs")
+                                if (stage.key === "outline" && engineOutlineGenerate) {
+                                  // 读取项目要求传给大纲生成
+                                  const reqs = await getFile(activeProject.name, "extra_requirements.txt")
+                                  await engineOutlineGenerate(activeProject.name, { requirements: reqs || "", onLogEvent: appendRunLog })
+                                } else if (stage.key === "writing" && engineWritingStart) {
+                                  await engineWritingStart(activeProject.name, {
+                                    startChapter: 1,
+                                    totalChapters: activeProject.total_chapters || 0,
+                                    onLogEvent: appendRunLog,
+                                  })
+                                } else if (stage.key === "review" && engineReviewStart) {
+                                  await engineReviewStart(activeProject.name, { onLogEvent: appendRunLog })
+                                }
+                              } finally {
+                                engineActionLock.current = false
                               }
                             }
 
@@ -1211,6 +1240,28 @@ export default function Workbench({
                     <label>{language === "zh" ? "预计章节数" : "Estimated Chapters"}</label>
                     <input type="number" value={editTotalChapters} onChange={(e) => setEditTotalChapters(e.target.value)} min={1} max={999} />
                   </div>
+                  <div className="editor-field">
+                    <label>{language === "zh" ? "每章字数范围" : "Words per Chapter"}</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input type="number" value={editWordCountMin} onChange={(e) => setEditWordCountMin(Number(e.target.value))}
+                        min={500} max={10000} step={500} style={{ width: 100 }} />
+                      <span>~</span>
+                      <input type="number" value={editWordCountMax} onChange={(e) => setEditWordCountMax(Number(e.target.value))}
+                        min={1000} max={15000} step={500} style={{ width: 100 }} />
+                      <span style={{ fontSize: 12, opacity: 0.6 }}>{language === "zh" ? "字" : "words"}</span>
+                    </div>
+                  </div>
+                  <div className="editor-field">
+                    <label>{language === "zh" ? "MWR 最大轮次" : "MWR Max Rounds"}</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, opacity: 0.7 }}>{language === "zh" ? "写作" : "Writing"}</span>
+                      <input type="number" value={editMaxRoundsWriting} onChange={(e) => setEditMaxRoundsWriting(Number(e.target.value))}
+                        min={3} max={50} step={1} style={{ width: 70 }} />
+                      <span style={{ fontSize: 12, opacity: 0.7 }}>{language === "zh" ? "大纲" : "Outline"}</span>
+                      <input type="number" value={editMaxRoundsOutline} onChange={(e) => setEditMaxRoundsOutline(Number(e.target.value))}
+                        min={3} max={30} step={1} style={{ width: 70 }} />
+                    </div>
+                  </div>
 
                   {/* 附加要求 */}
                   <div className="editor-field">
@@ -1246,52 +1297,34 @@ export default function Workbench({
                 {["manager", "worker", "reviewer"].map((role) => {
                   const roleLabels = { manager: "🧠 Manager", worker: "✍️ Writer", reviewer: "🔍 Reviewer" }
                   const p = projectPresets[role] || {}
-                  const setField = (key, value) => setProjectPresets(prev => ({
-                    ...prev, [role]: { ...(prev[role] || {}), [key]: value }
-                  }))
+                  const currentPresetName = p.name || ""
+                  const handlePresetSelect = (presetName) => {
+                    if (!presetName) {
+                      setProjectPresets(prev => ({ ...prev, [role]: {} }))
+                    } else {
+                      const selected = (presets || []).find(ps => ps.name === presetName)
+                      if (selected) {
+                        setProjectPresets(prev => ({
+                          ...prev,
+                          [role]: { name: selected.name, api_key: selected.api_key, base_url: selected.base_url, model: selected.model, api_format: selected.api_format || "openai" }
+                        }))
+                      }
+                    }
+                  }
                   return (
-                    <div key={role} className="mc-card" style={{ marginBottom: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 6 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 8 }}>{roleLabels[role]}</div>
-                      <div className="editor-field">
-                        <label>{language === "zh" ? "预设名称" : "Preset Name"}</label>
-                        <input value={p.name || ""} onChange={(e) => setField("name", e.target.value)}
-                          placeholder="e.g. my-gpt" />
-                      </div>
-                      <div className="editor-field">
-                        <label>Base URL</label>
-                        <input value={p.base_url || ""} onChange={(e) => setField("base_url", e.target.value)}
-                          placeholder="https://api.example.com/v1" />
-                      </div>
-                      <div className="editor-field">
-                        <label>API Key</label>
-                        <input value={p.api_key || ""} onChange={(e) => setField("api_key", e.target.value)}
-                          placeholder="sk-..." type="password" />
-                      </div>
-                      <div className="editor-field">
-                        <label>Model</label>
-                        <input value={p.model || ""} onChange={(e) => setField("model", e.target.value)}
-                          placeholder="gpt-4o-mini / claude-3-5-sonnet" />
-                      </div>
-                      <div className="editor-field">
-                        <label>API Format</label>
-                        <select value={p.api_format || "openai"} onChange={(e) => setField("api_format", e.target.value)} className="wb-select" style={{ width: "100%" }}>
-                          <option value="openai">OpenAI</option>
-                          <option value="anthropic">Anthropic</option>
-                          <option value="ollama">Ollama</option>
-                        </select>
-                      </div>
-                      <div className="mc-quick-row">
-                        {language === "zh" ? "快速填入：" : "Quick fill:"}
-                        {presets?.slice(0, 3).map((ps, i) => (
-                          <button key={i} className="pc-btn tiny" style={{ marginLeft: 4 }}
-                            onClick={() => setProjectPresets(prev => ({
-                              ...prev,
-                              [role]: { name: ps.name, api_key: ps.api_key, base_url: ps.base_url, model: ps.model, api_format: ps.api_format || "openai" }
-                            }))}>
-                            {ps.name}
-                          </button>
+                    <div key={role} style={{ marginBottom: 12, padding: 10, border: "1px solid var(--border)", borderRadius: 6 }}>
+                      <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 12 }}>{roleLabels[role]}</div>
+                      <select className="wb-select" value={currentPresetName} onChange={(e) => handlePresetSelect(e.target.value)} style={{ width: "100%", fontSize: 12 }}>
+                        <option value="">{language === "zh" ? "— 不指定，使用第一个可用 —" : "— Default (first available) —"}</option>
+                        {presets?.map((ps, i) => (
+                          <option key={i} value={ps.name}>{ps.name} ({ps.model})</option>
                         ))}
-                      </div>
+                      </select>
+                      {currentPresetName && (
+                        <div style={{ fontSize: 10, opacity: 0.6, marginTop: 4 }}>
+                          {p.base_url} · {p.model}
+                        </div>
+                      )}
                     </div>
                   )
                 })}
@@ -1335,6 +1368,38 @@ export default function Workbench({
                 </select>
                 <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
                   {language === "zh" ? "选择题材后，AI 会注入对应的体裁写作指南和审校维度" : "Genre selection injects tailored writing guides and review dimensions"}
+                </div>
+              </div>
+
+              {/* 章节字数配置 */}
+              <div className="editor-field">
+                <label>{language === "zh" ? "每章字数范围" : "Words per Chapter"}</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="number" value={newWordCountMin} onChange={(e) => setNewWordCountMin(Number(e.target.value))}
+                    min={500} max={10000} step={500} style={{ width: 100 }} />
+                  <span>~</span>
+                  <input type="number" value={newWordCountMax} onChange={(e) => setNewWordCountMax(Number(e.target.value))}
+                    min={1000} max={15000} step={500} style={{ width: 100 }} />
+                  <span style={{ fontSize: 12, opacity: 0.6 }}>{language === "zh" ? "字" : "words"}</span>
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  {language === "zh" ? "AI 写作时每章的目标字数范围，默认 3000~5000 字" : "Target word count range per chapter, default 3000~5000"}
+                </div>
+              </div>
+
+              {/* MWR 最大轮次配置 */}
+              <div className="editor-field">
+                <label>{language === "zh" ? "MWR 最大轮次" : "MWR Max Rounds"}</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, opacity: 0.7 }}>{language === "zh" ? "写作" : "Writing"}</span>
+                  <input type="number" value={newMaxRoundsWriting} onChange={(e) => setNewMaxRoundsWriting(Number(e.target.value))}
+                    min={3} max={50} step={1} style={{ width: 70 }} />
+                  <span style={{ fontSize: 12, opacity: 0.7 }}>{language === "zh" ? "大纲" : "Outline"}</span>
+                  <input type="number" value={newMaxRoundsOutline} onChange={(e) => setNewMaxRoundsOutline(Number(e.target.value))}
+                    min={3} max={30} step={1} style={{ width: 70 }} />
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  {language === "zh" ? "MWR 循环的最大润色轮次，超出后强制停止（默认：写作10，大纲8）" : "Max polish rounds in MWR cycle before forced stop (default: Writing 10, Outline 8)"}
                 </div>
               </div>
 

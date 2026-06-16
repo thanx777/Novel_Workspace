@@ -8,6 +8,7 @@ from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, Final
 from ..common.llm_client import LLMClient
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
+from ..common.utils import extract_json_from_response
 from ..common.prompts import (
     MANAGER_SYSTEM, WRITER_SYSTEM_OUTLINE, REVIEWER_SYSTEM_OUTLINE,
     CHAT_SYSTEM, HALLUCINATION_CHECK_PROMPT, OUTPUT_FORMAT_CONSTRAINT,
@@ -315,7 +316,7 @@ class OutlineEngine(BaseEngine):
             resp = await self.llm.call("reviewer", system_prompt, user_prompt)
             # 解析 JSON
             import json
-            data = self._extract_json_from_response(resp)
+            data = extract_json_from_response(resp)
             if data:
                 score = float(data.get("score", 5.0))
                 issues = data.get("issues", [])

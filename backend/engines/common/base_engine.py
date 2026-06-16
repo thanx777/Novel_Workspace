@@ -75,13 +75,31 @@ class BaseEngine(ABC):
         self.kg_adapter = KGAdapter(kg=kg, project_dir=project_dir)
         self.state = EngineState(project_dir)
         self.genre_adapter = GenreAdapter(genre_name=genre)
-        self.hallucination_guard = HallucinationGuardAdapter()
         self.yield_func = yield_func or (lambda x: None)
         self.cancelled = False  # 外部可设置，用于中断 MWR 循环
 
         # 引擎配置与提示词
         self.mode_config = ENGINE_CONFIG
         self.prompts = get_formatted_prompts()
+
+        # 从项目DB读取项目级字数配置，覆盖全局默认值
+        try:
+            from project_db import ProjectDB
+            db = ProjectDB(project_name)
+            proj = db.get_project()
+            if proj:
+                for key in ("word_count_min", "word_count_max", "max_rounds_writing", "max_rounds_outline"):
+                    val = proj.get(key)
+                    if val is not None:
+                        self.mode_config[key] = int(val)
+        except Exception:
+            pass  # DB不可用时使用全局默认值
+
+        # 使用项目级字数配置创建 HallucinationGuardAdapter（实例级，不污染类属性）
+        self.hallucination_guard = HallucinationGuardAdapter(
+            word_count_min=self.mode_config["word_count_min"],
+            word_count_max=self.mode_config["word_count_max"],
+        )
 
     def _emit(self, data: Dict):
         """发送状态更新。"""
@@ -104,17 +122,23 @@ class BaseEngine(ABC):
         best_score = 0.0
         recent_scores = []  # 滑动窗口：记录未超过best_score的轮次
         NO_IMPROVE_WINDOW = 3  # 最近3轮无提升则认为卡住
+        consecutive_llm_errors = 0  # 连续LLM错误计数
 
         round_num = 0
         while True:
             round_num += 1
+
+            # 润色轮次硬上限（使用传入的 max_rounds 参数）
+            if round_num > max_rounds:
+                self._emit({"status": "cycle_max_rounds", "round": round_num, "reason": f"达到润色轮次上限({max_rounds})"})
+                break
 
             # 检查是否已被用户取消
             if self.cancelled:
                 self._emit({"status": "cycle_cancelled", "round": round_num, "reason": "用户取消"})
                 return last_result or ReviewResult(score=0.0, issues=["用户取消"])
 
-            self._emit({"status": "mwr_round", "round": round_num})
+            self._emit({"status": "mwr_round", "round": round_num, "max_rounds": max_rounds})
 
             # 1. Manager 决定任务
             task = self.manager_decide(round_num, last_result)
@@ -137,6 +161,16 @@ class BaseEngine(ABC):
                 "score": result.score, "issues": result.issues,
                 "all_required_passed": result.all_required_passed,
             })
+
+            # 3.5 连续LLM错误检测：连续3轮score=0且all_required_passed=false，停止循环
+            if result.score == 0.0 and not result.all_required_passed:
+                consecutive_llm_errors += 1
+                if consecutive_llm_errors >= 3:
+                    self._emit({"status": "cycle_stuck", "round": round_num,
+                                "reason": f"连续{consecutive_llm_errors}轮LLM错误/空内容，停止循环"})
+                    break
+            else:
+                consecutive_llm_errors = 0
 
             # 4. 判断是否通过
             if result.score >= score_threshold and result.all_required_passed:

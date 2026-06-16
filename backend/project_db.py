@@ -106,6 +106,10 @@ class ProjectDB:
         reviewer_preset TEXT DEFAULT '',
         chat_preset TEXT DEFAULT '',
         description TEXT DEFAULT '',
+        word_count_min INTEGER DEFAULT 3000,
+        word_count_max INTEGER DEFAULT 5000,
+        max_rounds_writing INTEGER DEFAULT 10,
+        max_rounds_outline INTEGER DEFAULT 8,
         created_at TEXT DEFAULT '',
         updated_at TEXT DEFAULT ''
     );
@@ -190,6 +194,14 @@ class ProjectDB:
                 self.conn.execute("ALTER TABLE projects ADD COLUMN outline_mode TEXT DEFAULT ''")
             if "outline_layers" not in cols:
                 self.conn.execute("ALTER TABLE projects ADD COLUMN outline_layers TEXT DEFAULT ''")
+            if "word_count_min" not in cols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN word_count_min INTEGER DEFAULT 3000")
+            if "word_count_max" not in cols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN word_count_max INTEGER DEFAULT 5000")
+            if "max_rounds_writing" not in cols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN max_rounds_writing INTEGER DEFAULT 10")
+            if "max_rounds_outline" not in cols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
             self.conn.commit()
         except Exception:
             pass

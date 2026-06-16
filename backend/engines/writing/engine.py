@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
 from ..common.llm_client import LLMClient
 from ..common.kg_adapter import KGAdapter
+from ..common.utils import extract_json_from_response, extract_chapter_title
 from ..common.state import EngineState
 from ..common.prompts import (
     MANAGER_SYSTEM, WRITER_SYSTEM_WRITING, WRITER_SYSTEM_POLISH,
@@ -241,7 +242,8 @@ class WritingEngine(BaseEngine):
                 context=self._format_feedback_context(last_result),
             )
 
-        return MWRTask(action="write", chapter_num=self._current_chapter)
+        # 润色用尽或分数不够且无法继续提升，接受当前版本
+        return MWRTask(action="accept_current", chapter_num=self._current_chapter)
 
     async def writer_execute(self, task: MWRTask) -> Draft:
         """Writer：写一章或润色一章。"""
@@ -312,12 +314,28 @@ class WritingEngine(BaseEngine):
         system_prompt = self.prompts["writer_writing"] + "\n\n" + "\n\n".join(context_parts)
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
-        user_prompt = f"请写第{ch}章。严格按照细纲和大纲写作，不要偏离主线。\n\n【字数硬性要求】正文必须达到 {word_min}-{word_max} 字，不足 {word_min} 字视为不合格。请充分展开场景描写、对话、心理活动和动作细节，确保篇幅达标。\n\n【写作规范】\n1. 避免与前文重复的描写模式（如反复用"指节泛白"、"嘴角扯出弧度"、"旧伤作痛"等），每章的描写方式应各不相同\n2. 章节开头必须与前一章结尾自然衔接，不要每章都用天气/场景描写开头——延续前文场景时直接接续叙事，切换场景时才用场景描写开头\n3. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理，小说正文不得引用"
+        user_prompt = (
+            f"请写第{ch}章。严格按照细纲和大纲写作，不要偏离主线。\n\n"
+            f"【字数硬性要求】正文必须达到 {word_min}-{word_max} 字，不足 {word_min} 字视为不合格。"
+            f"请充分展开场景描写、对话、心理活动和动作细节，确保篇幅达标。\n\n"
+            f"【写作规范】\n"
+            f"1. 避免与前文重复的描写模式（如反复用'指节泛白'、'嘴角扯出弧度'、'旧伤作痛'等），每章的描写方式应各不相同\n"
+            f"2. 章节开头必须与前一章结尾自然衔接，不要每章都用天气/场景描写开头——延续前文场景时直接接续叙事，切换场景时才用场景描写开头\n"
+            f"3. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理，小说正文不得引用"
+        )
 
         if not self.llm.has_valid_config("writer"):
             content = f"# 第{ch}章\n\n（未配置 LLM，占位内容）"
         else:
             content = await self.llm.call("writer", system_prompt, user_prompt)
+
+        # 检查 LLM 返回是否为空或错误（包括非标准错误如 "Connection error."）
+        from ..common.llm_client import is_llm_error
+        cn_count = len(re.findall(r'[\u4e00-\u9fff]', content)) if content else 0
+        if not content or not content.strip() or is_llm_error(content) or cn_count < 50:
+            error_msg = content[:200] if content else "空响应"
+            self._emit({"status": "warning", "message": f"第{ch}章写作失败（可能LLM连接异常）: {error_msg}"})
+            return Draft(content="", chapter_num=ch, metadata={"action": "write", "llm_error": True})
 
         # 清洗LLM输出中的FS编号（防止LLM忽略禁止指令）
         content = self._clean_fs_ids(content)
@@ -381,6 +399,12 @@ class WritingEngine(BaseEngine):
         else:
             content = await self.llm.call("writer", system_prompt, user_prompt)
 
+        # 检查 LLM 返回是否为错误（空内容在后面统一处理）
+        from ..common.llm_client import is_llm_error
+        if is_llm_error(content):
+            self._emit({"status": "warning", "message": f"第{ch}章润色失败: {content[:200]}"})
+            content = original  # 回退到原文
+
         # 清洗LLM输出中的FS编号
         content = self._clean_fs_ids(content)
 
@@ -417,6 +441,18 @@ class WritingEngine(BaseEngine):
         """
         ch = draft.chapter_num
         content = draft.content
+
+        # 空内容/LLM错误/极低中文：直接返回低分，强制 all_required_passed=false
+        cn_count = len(re.findall(r'[\u4e00-\u9fff]', content)) if content else 0
+        from ..common.llm_client import is_llm_error
+        if not content or not content.strip() or is_llm_error(content) or cn_count < 50:
+            error_msg = content[:200] if content else "空响应"
+            return ReviewResult(
+                score=0.0,
+                issues=[f"章节内容无效（{cn_count}字）或LLM错误: {error_msg}"],
+                all_required_passed=False,
+                hallucination_warnings=[],
+            )
 
         issues = []
         hallucination_warnings = []
@@ -463,15 +499,21 @@ class WritingEngine(BaseEngine):
         # === AI 层 ===
         score = 0.0
         suggestions = []
+        ai_suggestions = []
         if self.llm.has_valid_config("reviewer"):
-            score, ai_issues, ai_suggestions = await self._ai_review(ch, content)
-            # 解析失败时复用上次有效评分，避免评分突降导致无效润色
-            if "AI 评审解析失败" in ai_issues and self._last_valid_ai_score is not None:
-                score = self._last_valid_ai_score
-                ai_issues = [f"AI评审解析失败，复用上次评分{score}"]
-            elif "AI 评审解析失败" not in ai_issues:
-                self._last_valid_ai_score = score
-            issues.extend(ai_issues)
+            # 内容过少时跳过AI评审，直接给0分，避免浪费token和复用历史高分
+            if word_count < 100:
+                score = 0.0
+                issues.append(f"内容过少({word_count}字)，跳过AI评审")
+            else:
+                score, ai_issues, ai_suggestions = await self._ai_review(ch, content)
+                # 解析失败时复用上次有效评分，避免评分突降导致无效润色
+                if "AI 评审解析失败" in ai_issues and self._last_valid_ai_score is not None:
+                    score = self._last_valid_ai_score
+                    ai_issues = [f"AI评审解析失败，复用上次评分{score}"]
+                elif "AI 评审解析失败" not in ai_issues:
+                    self._last_valid_ai_score = score
+                issues.extend(ai_issues)
             suggestions.extend(ai_suggestions)
         else:
             score = 6.0 if len(hallucination_warnings) == 0 else 3.0
@@ -541,7 +583,7 @@ class WritingEngine(BaseEngine):
 
         try:
             resp = await self.llm.call("reviewer", system_prompt, user_prompt)
-            data = self._extract_json_from_response(resp)
+            data = extract_json_from_response(resp)
             if data:
                 return float(data.get("score", 5.0)), data.get("issues", []), data.get("suggestions", [])
         except Exception:
@@ -558,42 +600,6 @@ class WritingEngine(BaseEngine):
         return FinalDecision(accepted=False, reason="章节质量不达标，需人工审核")
 
     # ---- 辅助 ----
-
-    @staticmethod
-    def _extract_json_from_response(text: str):
-        """从 LLM 响应中提取 JSON，支持嵌套大括号和 markdown 代码块。"""
-        import json
-        # 1. 尝试从 ```json ... ``` 代码块中提取（贪婪匹配，支持嵌套JSON）
-        code_block = re.search(r'```(?:json)?\s*(\{.+\})\s*```', text, re.DOTALL)
-        if code_block:
-            try:
-                return json.loads(code_block.group(1))
-            except Exception:
-                pass
-        # 2. 查找包含 "score" 的最外层 JSON 对象（支持嵌套）
-        start = text.find('{')
-        while start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == '{':
-                    depth += 1
-                elif text[i] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[start:i + 1]
-                        try:
-                            data = json.loads(candidate)
-                            if isinstance(data, dict) and "score" in data:
-                                return data
-                        except Exception:
-                            pass
-                        break
-            start = text.find('{', start + 1)
-        # 3. 直接尝试解析整个响应
-        try:
-            return json.loads(text.strip())
-        except Exception:
-            return None
 
     def _next_unwritten_chapter(self) -> int:
         """找到下一个未写的章节。"""
@@ -631,35 +637,6 @@ class WritingEngine(BaseEngine):
         "他低", "他轻", "她虚", "有人",
     })
 
-    def _extract_chapter_title(self, content: str) -> str:
-        """从内容中提取章节标题，如 '# 第一章 灵根觉醒' → '灵根觉醒'。
-        跳过 ---PREV: / ---CAST: 等上下文标记行，找到第一个真正的标题行。"""
-        for line in content.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # 跳过上下文标记行
-            if line.startswith("---PREV:") or line.startswith("---CAST:") or line.startswith("---"):
-                continue
-            # 匹配 markdown 标题 + "第N章" 格式
-            m = re.match(r"^#+\s*第[一二三四五六七八九十百千\d]+章\s*(.*)", line)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
-            # 匹配纯 "第N章 标题" 格式
-            m = re.match(r"^第[一二三四五六七八九十百千\d]+章\s+(.*)", line)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
-            # 匹配 markdown 标题（无"第N章"前缀）
-            m = re.match(r"^#+\s*(.+)", line)
-            if m and m.group(1).strip():
-                title = m.group(1).strip()
-                # 去掉"第N章"前缀
-                title = re.sub(r"^第[一二三四五六七八九十百千\d]+章\s*", "", title)
-                return title.strip() or f"第N章"
-            # 非标题行，跳过
-            continue
-        return f"第N章"
-
     def _upsert_chapter_to_db(self, chapter_num: int, content: str, status: str = "drafted", score: float = 0.0):
         """将章节信息写入 SQLite 数据库（唯一入口）。
 
@@ -670,7 +647,7 @@ class WritingEngine(BaseEngine):
         """
         try:
             db = ProjectDB(self.project_name)
-            title = self._extract_chapter_title(content)
+            title = extract_chapter_title(content)
             # 如果从内容提取到有效标题，直接使用（内容是最新的）
             if title.strip() and title.strip() != "第N章":
                 title = f"第{chapter_num}章 {title}"

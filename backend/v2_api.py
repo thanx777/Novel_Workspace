@@ -27,8 +27,8 @@ from engines.common.state import EngineState
 
 router = APIRouter(prefix="/api/v2", tags=["v2"])
 
-# 当前运行的引擎引用（用于 stop 端点取消）
-_running_engine = None
+# 当前运行的引擎引用（用于 stop 端点取消），按项目名索引
+_running_engines: Dict[str, object] = {}
 
 
 # ============================================================
@@ -72,6 +72,10 @@ class ProjectCreateRequest(BaseModel):
     outline_layers: Optional[Dict[str, bool]] = None  # {"L1": true, "L2": true}
     extra_requirements: str = ""
     role_presets: Optional[Dict[str, Dict]] = None  # {"manager": {...}, "worker": {...}, ...}
+    word_count_min: int = 3000
+    word_count_max: int = 5000
+    max_rounds_writing: int = 10
+    max_rounds_outline: int = 8
 
 
 class OutlineLayersRequest(BaseModel):
@@ -88,28 +92,7 @@ class AiEditRequest(BaseModel):
     instruction: str
 
 
-def _extract_chapter_title(content: str) -> str:
-    """从章节内容中提取标题。"""
-    import re as _re
-    for line in content.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("---PREV:") or line.startswith("---CAST:") or line.startswith("---"):
-            continue
-        m = _re.match(r"^#+\s*第[一二三四五六七八九十百千\d]+章\s*(.*)", line)
-        if m and m.group(1).strip():
-            return m.group(1).strip()
-        m = _re.match(r"^第[一二三四五六七八九十百千\d]+章\s+(.*)", line)
-        if m and m.group(1).strip():
-            return m.group(1).strip()
-        m = _re.match(r"^#+\s*(.+)", line)
-        if m and m.group(1).strip():
-            title = m.group(1).strip()
-            title = _re.sub(r"^第[一二三四五六七八九十百千\d]+章\s*", "", title)
-            return title.strip() or "第N章"
-        continue
-    return "第N章"
+from engines.common.utils import extract_chapter_title
 
 
 # ============================================================
@@ -161,7 +144,7 @@ def sync_chapters(name: str):
                 if not content.strip():
                     continue  # 跳过空文件
                 # 优先从章节内容中提取标题（内容是最新的）
-                title = _extract_chapter_title(content)
+                title = extract_chapter_title(content)
                 if not title or title == "第N章":
                     # 兜底：从 chapter_titles.json 获取标题
                     titles_path = os.path.join(project_dir, "chapter_titles.json")
@@ -337,7 +320,7 @@ async def ai_edit_chapter(name: str, chapter_num: int, req: AiEditRequest):
 
     # m. 同步更新数据库标题
     try:
-        title = _extract_chapter_title(result)
+        title = extract_chapter_title(result)
         db = ProjectDB(name)
         db.upsert_chapter(chapter_index=chapter_num, title=title, status="draft")
         db.close()
@@ -365,6 +348,9 @@ def create_project(req: ProjectCreateRequest):
     db = ProjectDB(req.name)
     if req.outline_layers:
         db.set_outline_layers(req.outline_layers)
+    # 保存章节字数配置
+    db.update_project(word_count_min=req.word_count_min, word_count_max=req.word_count_max,
+                       max_rounds_writing=req.max_rounds_writing, max_rounds_outline=req.max_rounds_outline)
     # 保存角色预设
     if req.role_presets:
         db.set_presets(
@@ -857,7 +843,13 @@ async def outline_generate_stream(name: str, req: OutlineGenerateRequest):
 
 
 async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
-    global _running_engine
+    # 并发保护：如果已有引擎在运行，先停止
+    existing = _running_engines.get(name)
+    if existing is not None:
+        existing.cancelled = True
+        _running_engines.pop(name, None)
+        await asyncio.sleep(0.3)
+
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)
     global_presets = _get_global_presets()
@@ -881,8 +873,7 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         yield_func=q_emit,
     )
 
-    global _running_engine
-    _running_engine = engine
+    _running_engines[name] = engine
 
     # 从 engine_state.json 恢复大纲进度：跳过已完成的层
     resume_info = ""
@@ -933,8 +924,10 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         _append_run_log(project_dir, err_event)
         yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
-        if _running_engine is engine:
-            _running_engine = None
+        _running_engines.pop(name, None)
+        if not exec_task.done():
+            engine.cancelled = True
+            exec_task.cancel()
 
 
 @router.post("/projects/{name}/writing/start/stream")
@@ -944,7 +937,13 @@ async def writing_start_stream(name: str, req: WritingStartRequest):
 
 
 async def _writing_start_stream(name: str, req: WritingStartRequest):
-    global _running_engine
+    # 并发保护：如果已有引擎在运行，先停止
+    existing = _running_engines.get(name)
+    if existing is not None:
+        existing.cancelled = True
+        _running_engines.pop(name, None)
+        await asyncio.sleep(0.3)  # 等待旧引擎退出
+
     project_dir = get_project_dir(name)
     db = ProjectDB(name)
     project_presets = db.get_presets()
@@ -972,8 +971,7 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
         yield_func=q_emit,
     )
 
-    global _running_engine
-    _running_engine = engine
+    _running_engines[name] = engine
 
     # 从 engine_state.json 恢复进度：如果已有完成章节，从下一章继续
     start_chapter = req.start_chapter
@@ -1024,8 +1022,10 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
         _append_run_log(project_dir, err_event)
         yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
-        if _running_engine is engine:
-            _running_engine = None
+        _running_engines.pop(name, None)
+        if not exec_task.done():
+            engine.cancelled = True
+            exec_task.cancel()
 
 
 @router.post("/projects/{name}/review/start/stream")
@@ -1035,6 +1035,13 @@ async def review_start_stream(name: str):
 
 
 async def _review_start_stream(name: str):
+    # 并发保护：如果已有引擎在运行，先停止
+    existing = _running_engines.get(name)
+    if existing is not None:
+        existing.cancelled = True
+        _running_engines.pop(name, None)
+        await asyncio.sleep(0.3)
+
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)
     global_presets = _get_global_presets()
@@ -1058,8 +1065,7 @@ async def _review_start_stream(name: str):
         yield_func=q_emit,
     )
 
-    global _running_engine
-    _running_engine = engine
+    _running_engines[name] = engine
 
     q_emit({"status": "start", "stage": "review", "message": "🚀 开始全局审校"})
 
@@ -1105,19 +1111,21 @@ async def _review_start_stream(name: str):
         _append_run_log(project_dir, err_event)
         yield {"data": json.dumps(err_event, ensure_ascii=False)}
     finally:
-        if _running_engine is engine:
-            _running_engine = None
+        _running_engines.pop(name, None)
+        if not exec_task.done():
+            engine.cancelled = True
+            exec_task.cancel()
 
 
 @router.post("/projects/{name}/engine/stop")
 async def engine_stop(name: str):
     """停止当前运行的引擎。设置取消标志并立即保存 paused 状态。"""
-    global _running_engine
-    if _running_engine is not None:
-        _running_engine.cancelled = True
+    engine = _running_engines.get(name)
+    if engine is not None:
+        engine.cancelled = True
         # 立即保存 paused 状态，确保断点续校能正确恢复
         # （run_review 可能还在 LLM 调用中，来不及保存 paused）
-        if hasattr(_running_engine, 'state') and hasattr(_running_engine.state, 'review_set_status'):
-            _running_engine.state.review_set_status("paused")
+        if hasattr(engine, 'state') and hasattr(engine.state, 'review_set_status'):
+            engine.state.review_set_status("paused")
         return {"success": True, "message": "引擎停止信号已发送"}
     return {"success": True, "message": "没有正在运行的引擎"}

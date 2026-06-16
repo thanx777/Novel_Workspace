@@ -85,8 +85,12 @@ Omni-Agent-Hub 是一个 AI 驱动的长篇小说写作系统，核心解决 **L
    - 原文全文作为参考
 
 4. **Reviewer 评估**：AI 评分 + 硬性校验（章节标题、字数、格式）+ 反幻觉校验（人名/伏笔ID一致性）
+   - 内容为空或 LLM 错误时强制 score=0 且 all_required_passed=false，避免死循环
+   - 内容不足 100 字时跳过 AI 评审，不复用历史评分，强制 score=0
 
-5. **落盘**：LLM 输出清洗FS编号 → 原子写入章节文件 → 更新反幻觉追踪器 → 写入数据库
+5. **落盘**：LLM 输出清洗FS编号 → 检查空内容/LLM错误 → 原子写入章节文件 → 更新反幻觉追踪器 → 写入数据库
+   - 空内容/LLM 错误不落盘，返回空 Draft 标记 `llm_error=True`
+   - 润色结果为 LLM 错误时回退原文，避免覆盖有效内容
 
 **输出文件**：`chapters/第N章.txt`（含 `---PREV/CAST/THREAD/STRAND---` 元数据标记，供写作引擎下一章参考）
 
@@ -115,15 +119,15 @@ Omni-Agent-Hub 是一个 AI 驱动的长篇小说写作系统，核心解决 **L
 6. **清洗落盘**：`_clean_chapter_content` 清除FS编号 + 统一标题格式 + 压缩空行（保留元数据标记）→ 原子写入 → 更新数据库
 
 **断点续校**：
-- 停止时立即保存 `paused` 状态和 `dimensions_done` 列表
+- 停止时立即保存 `paused` 状态和 `dimensions_done` 列表（自动去重）
 - 继续时检测 `paused` 状态，跳过已完成的维度
-- 跳过的维度也记录到 `dimensions_done`，避免无限重试
+- 内容为空或字数缩水 >50% 时不标记维度完成，下次重试
 
 ## 关键机制
 
 ### 1. MWR 循环（Manager-Writer-Reviewer）
 
-所有引擎共享的迭代骨架，无硬性轮数上限：
+所有引擎共享的迭代骨架，轮数上限可配置：
 
 ```
 Manager → 决定任务（首轮 write，后续 polish）
@@ -132,9 +136,13 @@ Reviewer → 评分 + 检查必填字段 + 反馈问题
 
 退出条件：
   - 评分 ≥ 8 且必填字段全过 → 通过
-  - 连续5轮评分无提升 → 卡住，接受当前版本
+  - 连续3轮评分无提升 → 卡住，接受当前版本
+  - 达到 max_rounds 上限 → 强制停止
+  - 连续3轮 LLM 错误/空内容 → 强制停止
   - 用户取消 → 停止
 ```
+
+**项目级配置**：`max_rounds_writing`（默认10）和 `max_rounds_outline`（默认8）可在前端项目配置中调整，控制 MWR 循环的润色轮次上限。
 
 ### 2. 分层大纲
 
@@ -190,7 +198,7 @@ L2 第2卷生成 ← KG 注入（包含第1卷新增实体）
 - **CharacterTracker** — 角色状态追踪（位置/状态/关系变化）
 - **PlotThreadTracker** — 情节线索追踪（伏笔埋设/回收状态）
 - **ConsistencyChecker** — 跨章节一致性交叉验证
-- **FormatValidator** — 章节格式与内容校验
+- **FormatValidator** — 章节格式与内容校验（实例化，支持项目级字数配置，避免多项目竞态）
 
 ### 6. 全局记忆系统
 
@@ -203,6 +211,14 @@ project_dir/memory/
 - `[MEMORY: ...]`：每5章更新，记录角色状态、主线进展、伏笔
 - `[SUMMARY: ...]`：每10章输出，快速剧情摘要
 - 写新章前自动注入全局记忆 + 前文摘要
+
+### 7. LLM 错误处理
+
+所有 LLM 调用统一使用 `[LLM_ERROR: ...]` 前缀标记错误，通过 `is_llm_error()` 函数检测：
+
+- **写作引擎**：空内容/LLM 错误不落盘，返回空 Draft；润色失败回退原文；短内容（<100字）跳过 AI 评审
+- **审校引擎**：空内容/字数缩水时不标记维度完成，下次重试
+- **MWR 循环**：连续 3 轮 LLM 错误/空内容自动停止，避免死循环
 
 ## 快速开始
 
@@ -229,7 +245,8 @@ npm run dev             # → http://localhost:5173
 
 | 组件 | 功能 |
 |------|------|
-| ProjectCenter | 项目创建/管理，设定题材/字数/章节数 |
+| ProjectCenter | 项目创建/管理，设定题材/字数/章节数/MWR轮次 |
+| Workbench | 工作台，预设下拉选择（Manager/Writer/Reviewer）+ 引擎控制 |
 | NovelWorkspace | 小说工作区，章节编辑器 + 侧边栏 |
 | ChapterList | 章节列表，逐章生成时实时更新 |
 | ChapterEditor | 章节内容编辑器 |
@@ -296,10 +313,11 @@ omni-agent-hub/
 │   ├── engines/                   # 三引擎架构
 │   │   ├── common/
 │   │   │   ├── base_engine.py     # MWR 循环骨架
-│   │   │   ├── llm_client.py      # LLM 客户端（OpenAI/Claude）
+│   │   │   ├── llm_client.py      # LLM 客户端 + 错误检测（is_llm_error）
 │   │   │   ├── kg_adapter.py      # KG 读写适配器
 │   │   │   ├── genre_adapter.py   # 体裁规则适配器
 │   │   │   ├── hallucination_guard.py  # 反幻觉适配器
+│   │   │   ├── utils.py           # 公共工具（JSON提取/标题提取）
 │   │   │   ├── prompts.py         # 系统提示词 + 引擎配置
 │   │   │   └── state.py           # 引擎状态管理
 │   │   ├── outline/
@@ -321,6 +339,7 @@ omni-agent-hub/
 │       ├── App.jsx                # 入口组件
 │       ├── components/
 │       │   ├── ProjectCenter.jsx  # 项目中心
+│       │   ├── Workbench.jsx      # 工作台（预设下拉+引擎控制+项目配置）
 │       │   ├── NovelWorkspace.jsx # 小说工作区
 │       │   ├── ChapterList.jsx    # 章节列表
 │       │   ├── ChapterEditor.jsx  # 章节编辑器

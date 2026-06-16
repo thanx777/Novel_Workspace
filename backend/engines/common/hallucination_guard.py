@@ -263,10 +263,15 @@ class ConsistencyChecker:
 class FormatValidator:
     """校验章节文件格式和基本内容质量。"""
 
+    # 类属性作为默认值，实例属性可覆盖
     MIN_WORDS_PER_CHAPTER = 1000
     MAX_WORDS_PER_CHAPTER = 6000
     IDEAL_MIN_WORDS = 3000
     IDEAL_MAX_WORDS = 5000
+
+    def __init__(self, ideal_min: int = None, ideal_max: int = None):
+        self.ideal_min_words = ideal_min if ideal_min is not None else self.IDEAL_MIN_WORDS
+        self.ideal_max_words = ideal_max if ideal_max is not None else self.IDEAL_MAX_WORDS
 
     @staticmethod
     def count_chinese_chars(text: str) -> int:
@@ -284,28 +289,26 @@ class FormatValidator:
                 return True, ""
         return False, f"缺少章节标题（期望：第{expected_num}章）" if expected_num else "缺少章节标题"
 
-    @staticmethod
-    def validate(content: str, chapter_num: int = None) -> Tuple[bool, List[str]]:
+    def validate(self, content: str, chapter_num: int = None) -> Tuple[bool, List[str]]:
         issues = []
         has_title, title_issue = FormatValidator.has_chapter_title(content, chapter_num)
         if not has_title:
             issues.append(title_issue)
         char_count = FormatValidator.count_chinese_chars(content)
-        if char_count < FormatValidator.MIN_WORDS_PER_CHAPTER:
-            issues.append(f"字数不足：{char_count}字（最少{FormatValidator.MIN_WORDS_PER_CHAPTER}字）")
-        elif char_count > FormatValidator.MAX_WORDS_PER_CHAPTER:
-            issues.append(f"字数超标：{char_count}字（最多{FormatValidator.MAX_WORDS_PER_CHAPTER}字）")
-        elif char_count < FormatValidator.IDEAL_MIN_WORDS:
-            issues.append(f"字数偏少：{char_count}字（建议{FormatValidator.IDEAL_MIN_WORDS}-{FormatValidator.IDEAL_MAX_WORDS}字）")
+        if char_count < self.MIN_WORDS_PER_CHAPTER:
+            issues.append(f"字数不足：{char_count}字（最少{self.MIN_WORDS_PER_CHAPTER}字）")
+        elif char_count > self.MAX_WORDS_PER_CHAPTER:
+            issues.append(f"字数超标：{char_count}字（最多{self.MAX_WORDS_PER_CHAPTER}字）")
+        elif char_count < self.ideal_min_words:
+            issues.append(f"字数偏少：{char_count}字（建议{self.ideal_min_words}-{self.ideal_max_words}字）")
         if not content.strip():
             issues.append("章节内容为空")
         if re.search(r'\[TODO\]|\[待写\]|\[此处.*\]', content):
             issues.append("包含占位符，未完成")
         return len(issues) == 0, issues
 
-    @staticmethod
-    def validate_with_quality(content: str, chapter_num: int = None) -> Dict:
-        passed, issues = FormatValidator.validate(content, chapter_num)
+    def validate_with_quality(self, content: str, chapter_num: int = None) -> Dict:
+        passed, issues = self.validate(content, chapter_num)
         char_count = FormatValidator.count_chinese_chars(content)
         return {
             "passed": passed,
@@ -313,15 +316,14 @@ class FormatValidator:
             "char_count": char_count,
             "paragraph_count": len([p for p in content.split("\n\n") if p.strip()]),
             "has_title": FormatValidator.has_chapter_title(content, chapter_num)[0],
-            "quality_score": FormatValidator._quality_score(content, char_count),
+            "quality_score": self._quality_score(content, char_count),
         }
 
-    @staticmethod
-    def _quality_score(content: str, char_count: int) -> int:
+    def _quality_score(self, content: str, char_count: int) -> int:
         score = 50
-        if FormatValidator.IDEAL_MIN_WORDS <= char_count <= FormatValidator.IDEAL_MAX_WORDS:
+        if self.ideal_min_words <= char_count <= self.ideal_max_words:
             score += 20
-        elif char_count >= FormatValidator.MIN_WORDS_PER_CHAPTER:
+        elif char_count >= self.MIN_WORDS_PER_CHAPTER:
             score += 10
         dialogue_count = len(re.findall(r'["""「『].+?[""」』]', content))
         if dialogue_count > 0:
@@ -341,11 +343,11 @@ class FormatValidator:
 class HallucinationGuardAdapter:
     """反幻觉系统统一入口。协调四个子模块，供新引擎 Reviewer 调用。"""
 
-    def __init__(self):
+    def __init__(self, word_count_min: int = 3000, word_count_max: int = 5000):
         self.tracker = CharacterTracker()
         self.plot_tracker = PlotThreadTracker()
         self.consistency = ConsistencyChecker()
-        self.validator = FormatValidator()
+        self.validator = FormatValidator(ideal_min=word_count_min, ideal_max=word_count_max)
 
     def update_memory(self, memory_text: str, chapter_num: int) -> None:
         """从记忆更新角色和情节状态。"""

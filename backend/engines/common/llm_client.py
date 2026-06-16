@@ -39,9 +39,9 @@ async def call_llm(
     api_format = getattr(config, "api_format", "openai")
 
     if not api_key:
-        return "Error: API Key 未配置"
+        return "[LLM_ERROR: API Key 未配置]"
     if not base_url or not model:
-        return "Error: Base URL 或模型名未配置"
+        return "[LLM_ERROR: Base URL 或模型名未配置]"
     try:
         if api_format == "claude":
             headers = {
@@ -63,7 +63,7 @@ async def call_llm(
                 response = await client.post(base_url, json=payload, headers=headers)
 
             if response.status_code != 200:
-                return f"Error: {response.status_code} - {response.text[:500]}"
+                return f"[LLM_ERROR: {response.status_code} - {response.text[:500]}]"
 
             result = response.json()
             full_content = result.get("content", [{}])[0].get("text", "")
@@ -99,27 +99,27 @@ async def call_llm(
                     full_content = msg.reasoning_content or ""
 
         if not full_content.strip():
-            return "Error: 模型返回为空，可能是当前模型不支持该请求格式"
+            return "[LLM_ERROR: 模型返回为空，可能是当前模型不支持该请求格式]"
         return full_content
     except Exception as e:
         error_msg = str(e)
         if "timed out" in error_msg.lower():
             if "nvidia.com" in base_url:
-                return f"Error: NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度"
-            return f"Error: 请求超时"
+                return f"[LLM_ERROR: NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度]"
+            return f"[LLM_ERROR: 请求超时]"
         elif "401" in error_msg or "api_key" in error_msg.lower():
-            return f"Error: API Key 无效或认证失败"
+            return f"[LLM_ERROR: API Key 无效或认证失败]"
         elif "403" in error_msg:
-            return f"Error: 访问被拒绝"
+            return f"[LLM_ERROR: 访问被拒绝]"
         elif "404" in error_msg or "not found" in error_msg.lower():
-            return f"Error: 模型不存在"
+            return f"[LLM_ERROR: 模型不存在]"
         elif "429" in error_msg or "rate" in error_msg.lower():
-            return f"Error: 请求频率过高"
-        return f"Error: {error_msg[:300]}"
+            return f"[LLM_ERROR: 请求频率过高]"
+        return f"[LLM_ERROR: {error_msg[:300]}]"
 
 
 def is_llm_error(text: str) -> bool:
-    return text.strip().startswith("Error:")
+    return text.strip().startswith("[LLM_ERROR")
 
 
 # ============================================

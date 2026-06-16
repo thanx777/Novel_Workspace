@@ -690,6 +690,10 @@ class _ProjectPatch(BaseModel):
     genre: Optional[str] = None
     total_chapters: Optional[int] = None
     outline_review_mode: Optional[str] = None
+    word_count_min: Optional[int] = None
+    word_count_max: Optional[int] = None
+    max_rounds_writing: Optional[int] = None
+    max_rounds_outline: Optional[int] = None
 
 
 @app.patch("/api/v2/projects/{project_name}")
@@ -706,6 +710,14 @@ def v2_patch_project(project_name: str, body: _ProjectPatch):
             kwargs["total_chapters"] = body.total_chapters
         if body.outline_review_mode is not None:
             kwargs["outline_review_mode"] = body.outline_review_mode
+        if body.word_count_min is not None:
+            kwargs["word_count_min"] = body.word_count_min
+        if body.word_count_max is not None:
+            kwargs["word_count_max"] = body.word_count_max
+        if body.max_rounds_writing is not None:
+            kwargs["max_rounds_writing"] = body.max_rounds_writing
+        if body.max_rounds_outline is not None:
+            kwargs["max_rounds_outline"] = body.max_rounds_outline
         if kwargs:
             db.update_project(**kwargs)
         data = db.to_dict()
