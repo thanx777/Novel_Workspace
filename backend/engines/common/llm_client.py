@@ -226,6 +226,8 @@ def is_llm_error(text: str) -> bool:
     新代码应使用 try/except LLMError 替代。
     此函数保留用于向后兼容（LLMClient.call() 仍返回错误字符串）。
     """
+    import warnings
+    warnings.warn("is_llm_error() is deprecated, use try/except LLMError instead", DeprecationWarning, stacklevel=2)
     return isinstance(text, str) and text.strip().startswith("[LLM_ERROR")
 
 
@@ -319,6 +321,8 @@ class LLMClient:
         失败时返回 [LLM_ERROR: ...] 字符串（向后兼容）。
         新代码应使用 call_strict() 获取异常。
         """
+        import warnings
+        warnings.warn("LLMClient.call() is deprecated, use call_strict() instead", DeprecationWarning, stacklevel=2)
         cfg = self.resolve_config(role)
         if not cfg.api_key:
             return "[LLM_ERROR: 未配置 API Key]"
