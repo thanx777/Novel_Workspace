@@ -5,7 +5,7 @@ import re
 from typing import Dict, List, Optional
 
 from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
-from ..common.llm_client import LLMClient
+from ..common.llm_client import LLMClient, LLMError
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
 from ..common.utils import extract_json_from_response
@@ -194,7 +194,11 @@ class OutlineEngine(BaseEngine):
             self._emit({"status": "warning", "message": f"未配置 LLM，{layer} 使用占位内容"})
             md_text = self._placeholder_outline(layer)
         else:
-            md_text = await self.llm.call("writer", system_prompt, user_prompt)
+            try:
+                md_text = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            except LLMError as e:
+                self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，{layer} 使用占位内容"})
+                md_text = self._placeholder_outline(layer)
 
         # 解析 JSON
         json_data = parse_markdown_to_json(layer, md_text)
@@ -312,7 +316,7 @@ class OutlineEngine(BaseEngine):
         user_prompt = f"请评审以下大纲：\n\n{md_text[:6000]}"
 
         try:
-            resp = await self.llm.call("reviewer", system_prompt, user_prompt)
+            resp = await self.llm.call_strict("reviewer", system_prompt, user_prompt)
             # 解析 JSON
             import json
             data = extract_json_from_response(resp)
@@ -321,6 +325,8 @@ class OutlineEngine(BaseEngine):
                 issues = data.get("issues", [])
                 suggestions = data.get("suggestions", [])
                 return score, issues, suggestions
+        except LLMError as e:
+            self._emit({"status": "warning", "message": f"AI 评审调用失败: {e}"})
         except Exception as e:
             self._emit({"status": "warning", "message": f"AI 评审解析失败: {e}"})
 
@@ -684,7 +690,11 @@ class OutlineEngine(BaseEngine):
                 self._emit({"status": "warning", "message": "未配置 LLM，跳过章节细纲生成"})
                 break
 
-            batch_md = await self.llm.call("writer", system_prompt, user_prompt)
+            try:
+                batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            except LLMError as e:
+                self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，跳过本批次章节细纲生成"})
+                break
 
             # 提取章节部分
             chapters_part = self._extract_chapters_from_batch(batch_md, start_ch, end_ch)
@@ -793,8 +803,8 @@ class OutlineEngine(BaseEngine):
         user_prompt = f"以下是 L1 大纲，请补充分卷信息：\n\n{l1_md[:6000]}"
 
         try:
-            resp = await self.llm.call("writer", system_prompt, user_prompt)
-            if not resp or is_llm_error(resp):
+            resp = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            if not resp:
                 return []
 
             # 尝试从 LLM 响应中解析分卷
@@ -818,6 +828,8 @@ class OutlineEngine(BaseEngine):
                                 "message": f"✅ 已自动补充 {len(volumes)} 卷分卷信息"})
 
             return volumes
+        except LLMError:
+            return []
         except Exception as e:
             self._emit({"status": "warning", "layer": "L2", "message": f"自动补充分卷失败: {e}"})
             return []
@@ -979,7 +991,11 @@ class OutlineEngine(BaseEngine):
         if not self.llm.has_valid_config("writer"):
             return ""
 
-        batch_md = await self.llm.call("writer", system_prompt, user_prompt)
+        try:
+            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
+        except LLMError as e:
+            self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，补齐章节失败"})
+            return ""
         return self._extract_chapters_from_batch(batch_md, start_ch, end_ch)
 
     def _extract_last_chapter_tail(self, chapters_md: str) -> str:
@@ -1056,4 +1072,7 @@ class OutlineEngine(BaseEngine):
             system_prompt += "\n\n" + "\n\n".join(context_parts)
 
         user_prompt = message
-        return await self.llm.call("chat", system_prompt, user_prompt)
+        try:
+            return await self.llm.call_strict("chat", system_prompt, user_prompt)
+        except LLMError as e:
+            return f"[对话失败] LLM 调用出错: {e}"

@@ -1,7 +1,9 @@
 import { useState } from 'react'
+import { useApp } from '../context/AppContext'
 import { API_BASE } from '../constants'
 
-export function LogsPanel({ t, logs, setLogs, logEndRef, setShowLogs }) {
+export function LogsPanel({ logs, setLogs, logEndRef, setShowLogs }) {
+  const { t } = useApp()
   const [expandedLogs, setExpandedLogs] = useState({})
   const toggleLog = (i) => {
     setExpandedLogs(prev => ({ ...prev, [i]: !prev[i] }))
@@ -42,7 +44,8 @@ export function LogsPanel({ t, logs, setLogs, logEndRef, setShowLogs }) {
   )
 }
 
-export function FilesPanel({ t, files, activeFile, setActiveFile, fileContent, setFileContent, loadFiles, loadFile, saveFile, showNotification, setShowFiles }) {
+export function FilesPanel({ files, activeFile, setActiveFile, fileContent, setFileContent, loadFiles, loadFile, saveFile, showNotification, setShowFiles }) {
+  const { t } = useApp()
   return (
     <div className="panel files-panel">
       <div className="panel-header">
@@ -71,7 +74,8 @@ export function FilesPanel({ t, files, activeFile, setActiveFile, fileContent, s
   )
 }
 
-export function ProjectModal({ t, showProjectModal, setShowProjectModal, projectName, setProjectName, handleSaveProject, projectList, handleLoadProject, handleDeleteProject, setConfirmDialog, nodes, connections, conversations, memory, logs }) {
+export function ProjectModal({ showProjectModal, setShowProjectModal, projectName, setProjectName, handleSaveProject, projectList, handleLoadProject, handleDeleteProject, setConfirmDialog, nodes, connections, conversations, memory, logs }) {
+  const { t } = useApp()
   if (!showProjectModal) return null
   return (
     <div className="confirm-overlay" onClick={() => setShowProjectModal(false)}>
@@ -111,7 +115,8 @@ export function ProjectModal({ t, showProjectModal, setShowProjectModal, project
   )
 }
 
-export function WorkspaceSettings({ t, showWorkspaceSettings, setShowWorkspaceSettings, workspaceSettings, setWorkspaceSettings, handleSaveWorkspaceConfig, wsConfigLoading }) {
+export function WorkspaceSettings({ showWorkspaceSettings, setShowWorkspaceSettings, workspaceSettings, setWorkspaceSettings, handleSaveWorkspaceConfig, wsConfigLoading }) {
+  const { t } = useApp()
   if (!showWorkspaceSettings) return null
   return (
     <div className="confirm-overlay" onClick={() => setShowWorkspaceSettings(false)}>
@@ -159,7 +164,8 @@ export function WorkspaceSettings({ t, showWorkspaceSettings, setShowWorkspaceSe
   )
 }
 
-export function ConnContextMenu({ t, connContextMenu, setConnContextMenu, connections, setAnnotationText, setEditingAnnotation, setConnections, setSelectedConn }) {
+export function ConnContextMenu({ connContextMenu, setConnContextMenu, connections, setAnnotationText, setEditingAnnotation, setConnections, setSelectedConn }) {
+  const { t } = useApp()
   if (!connContextMenu) return null
   return (
     <div className="conn-context-menu" style={{ position: 'fixed', left: connContextMenu.x, top: connContextMenu.y, zIndex: 10001 }}>
@@ -186,7 +192,8 @@ export function ConnContextMenu({ t, connContextMenu, setConnContextMenu, connec
   )
 }
 
-export function AnnotationEditor({ t, editingAnnotation, setEditingAnnotation, annotationText, setAnnotationText, updateConnAnnotation }) {
+export function AnnotationEditor({ editingAnnotation, setEditingAnnotation, annotationText, setAnnotationText, updateConnAnnotation }) {
+  const { t } = useApp()
   if (!editingAnnotation) return null
   return (
     <div className="confirm-overlay" onClick={() => setEditingAnnotation(null)}>
@@ -211,7 +218,8 @@ export function AnnotationEditor({ t, editingAnnotation, setEditingAnnotation, a
 }
 
 
-export function ConfirmDialog({ t, confirmDialog, setConfirmDialog }) {
+export function ConfirmDialog({ confirmDialog, setConfirmDialog }) {
+  const { t } = useApp()
   if (!confirmDialog) return null
   return (
     <div className="confirm-overlay" onClick={() => setConfirmDialog(null)}>
@@ -229,7 +237,8 @@ export function ConfirmDialog({ t, confirmDialog, setConfirmDialog }) {
   )
 }
 
-export function DangerConfirmModal({ t, language, dangerCommand, setDangerCommand, onConfirm }) {
+export function DangerConfirmModal({ dangerCommand, setDangerCommand, onConfirm }) {
+  const { t, language } = useApp()
   if (!dangerCommand) return null
   return (
     <div className="confirm-overlay" onClick={() => setDangerCommand(null)}>

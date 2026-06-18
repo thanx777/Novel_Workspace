@@ -7,7 +7,7 @@ import asyncio
 from typing import Dict, List, Optional
 
 from ..common.base_engine import BaseEngine
-from ..common.llm_client import LLMClient, is_llm_error
+from ..common.llm_client import LLMClient, LLMError
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
 from ..common.utils import extract_chapter_title
@@ -213,7 +213,10 @@ class ReviewEngine(BaseEngine):
             if not self.llm.has_valid_config("writer"):
                 return {"dim_key": dim_key, "dim_name": dim_name, "skipped": True, "reason": "no_llm_config"}
 
-            new_content = await self.llm.call("writer", system_prompt, user_prompt)
+            try:
+                new_content = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            except LLMError as e:
+                return {"dim_key": dim_key, "dim_name": dim_name, "error": str(e)}
 
             return {
                 "dim_key": dim_key,
@@ -320,9 +323,9 @@ class ReviewEngine(BaseEngine):
                     new_content = result.get("new_content")
                     content = result.get("content")
 
-                    # LLM 错误检查：错误响应不当合法内容处理
-                    if not new_content or not new_content.strip() or is_llm_error(new_content):
-                        error_msg = new_content[:200] if new_content else "空响应"
+                    # LLM 错误检查：空响应或无效内容
+                    if not new_content or not new_content.strip():
+                        error_msg = "空响应"
                         self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校LLM错误: {error_msg}"})
                         continue
 

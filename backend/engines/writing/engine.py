@@ -6,7 +6,7 @@ import json
 from typing import Dict, List, Optional
 
 from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
-from ..common.llm_client import LLMClient
+from ..common.llm_client import LLMClient, LLMError
 from ..common.kg_adapter import KGAdapter
 from ..common.utils import extract_json_from_response, extract_chapter_title
 from ..common.state import EngineState
@@ -299,12 +299,15 @@ class WritingEngine(BaseEngine):
         if not self.llm.has_valid_config("writer"):
             content = f"# 第{ch}章\n\n（未配置 LLM，占位内容）"
         else:
-            content = await self.llm.call("writer", system_prompt, user_prompt)
+            try:
+                content = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            except LLMError as e:
+                self._emit({"status": "warning", "message": f"第{ch}章写作失败（LLM错误）: {e}"})
+                return Draft(content="", chapter_num=ch, metadata={"action": "write", "llm_error": True})
 
-        # 检查 LLM 返回是否为空或错误（包括非标准错误如 "Connection error."）
-        from ..common.llm_client import is_llm_error
+        # 检查 LLM 返回是否为空或过短（包括非标准错误如 "Connection error."）
         cn_count = len(re.findall(r'[\u4e00-\u9fff]', content)) if content else 0
-        if not content or not content.strip() or is_llm_error(content) or cn_count < 50:
+        if not content or not content.strip() or cn_count < 50:
             error_msg = content[:200] if content else "空响应"
             self._emit({"status": "warning", "message": f"第{ch}章写作失败（可能LLM连接异常）: {error_msg}"})
             return Draft(content="", chapter_num=ch, metadata={"action": "write", "llm_error": True})
@@ -406,16 +409,13 @@ class WritingEngine(BaseEngine):
         if not self.llm.has_valid_config("writer"):
             content = original
         else:
-            llm_output = await self.llm.call("writer", system_prompt, user_prompt)
-
-            # 检查 LLM 返回是否为错误
-            from ..common.llm_client import is_llm_error
-            if is_llm_error(llm_output):
-                self._emit({"status": "warning", "message": f"第{ch}章润色失败: {llm_output[:200]}"})
-                content = original  # 回退到原文
-            else:
+            try:
+                llm_output = await self.llm.call_strict("writer", system_prompt, user_prompt)
                 # 解析 LLM 输出，程序化替换段落
                 content = self._apply_paragraph_edits(original, paragraphs, llm_output)
+            except LLMError as e:
+                self._emit({"status": "warning", "message": f"第{ch}章润色失败: {e}"})
+                content = original  # 回退到原文
 
         # 清洗LLM输出中的FS编号
         content = self._clean_fs_ids(content)
@@ -504,14 +504,13 @@ class WritingEngine(BaseEngine):
         if content and not re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
             content = f"# 第{ch}章\n\n{content}"
 
-        # 空内容/LLM错误/极低中文：直接返回低分，强制 all_required_passed=false
+        # 空内容/极低中文：直接返回低分，强制 all_required_passed=false
         cn_count = len(re.findall(r'[\u4e00-\u9fff]', content)) if content else 0
-        from ..common.llm_client import is_llm_error
-        if not content or not content.strip() or is_llm_error(content) or cn_count < 50:
+        if not content or not content.strip() or cn_count < 50:
             error_msg = content[:200] if content else "空响应"
             return ReviewResult(
                 score=0.0,
-                issues=[f"章节内容无效（{cn_count}字）或LLM错误: {error_msg}"],
+                issues=[f"章节内容无效（{cn_count}字）: {error_msg}"],
                 all_required_passed=False,
                 hallucination_warnings=[],
             )
@@ -649,10 +648,12 @@ class WritingEngine(BaseEngine):
         user_prompt = f"请审校第{ch}章：\n\n{content}"
 
         try:
-            resp = await self.llm.call("reviewer", system_prompt, user_prompt)
+            resp = await self.llm.call_strict("reviewer", system_prompt, user_prompt)
             data = extract_json_from_response(resp)
             if data:
                 return float(data.get("score", 5.0)), data.get("issues", []), data.get("suggestions", [])
+        except LLMError as e:
+            self._emit({"status": "warning", "message": f"AI 评审 LLM 调用失败: {e}"})
         except Exception as e:
             self._emit({"status": "warning", "message": f"AI 评审解析异常: {e}"})
         return 5.0, ["AI 评审解析失败"], []
@@ -883,4 +884,7 @@ class WritingEngine(BaseEngine):
         system_prompt = CHAT_SYSTEM
         if context_parts:
             system_prompt += "\n\n" + "\n\n".join(context_parts)
-        return await self.llm.call("chat", system_prompt, message)
+        try:
+            return await self.llm.call_strict("chat", system_prompt, message)
+        except LLMError as e:
+            return f"[对话服务暂时不可用: {e}]"

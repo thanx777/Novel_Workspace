@@ -399,7 +399,7 @@ def t16():
             return json.dumps({"score": 8.0, "issues": [], "suggestions": ["很好"]})
         return ""
 
-    engine.llm.call = _mock_call
+    engine.llm.call_strict = _mock_call
 
     async def _run():
         return await engine.generate_layer("L1")

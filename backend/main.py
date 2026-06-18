@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
 
 # LLM client (migrated from executor.py)
-from engines.common.llm_client import AgentConfig, call_llm, is_llm_error
+from engines.common.llm_client import AgentConfig, call_llm, LLMError
 
 # Workspace & file utilities — 同步 project_db 的路径定义
 from project_db import WORKSPACE_DIR as _PDB_WS, PROJECTS_DIR as _PDB_PJ
@@ -411,9 +411,9 @@ async def optimize_prompt(req: OptimizePromptRequest):
     user_prompt = f"Original task:\n{req.task}\n\nOutput the optimized task:"
     try:
         result = await call_llm(config, OPTIMIZE_SYSTEM_PROMPT, user_prompt, max_tokens=4000, request_timeout_seconds=60)
-        if is_llm_error(result):
-            raise HTTPException(status_code=500, detail=result)
         return {"optimized": result.strip(), "status": "success"}
+    except LLMError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -469,8 +469,9 @@ async def api_create_skill(req: SkillCreateRequest):
                 "You are a skill creator. Generate a concise skill description in Markdown.",
                 f"Skill name: {req.name}\nDescription: {req.description}\nUser prompt: {req.user_prompt}",
                 max_tokens=2000, request_timeout_seconds=120)
-            if not is_llm_error(result):
-                content = result.strip()
+            content = result.strip()
+        except LLMError:
+            pass  # 保持 content 不变
         except Exception:
             pass
     save_skill(req.name, content, req.description, req.category)

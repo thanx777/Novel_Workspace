@@ -7,6 +7,7 @@ sys.path.insert(0, '.')
 
 from project_db import ProjectDB, list_all_projects, create_project, delete_project
 from project_db import _validate_project_name, ProjectNameError, get_project_dir
+from engines.common.llm_client import LLMError
 
 PASSED, FAILED = [], []
 
@@ -339,9 +340,9 @@ def t24():
             engine = WritingEngine(proj_dir, proj_name, total_chapters=1, genre="")
             engine.llm.has_valid_config = lambda role: True
 
-            async def _mock_call(role, system, user):
-                return "[LLM_ERROR: test error]"
-            engine.llm.call = _mock_call
+            async def _mock_call_strict(role, system, user):
+                raise LLMError("test error")
+            engine.llm.call_strict = _mock_call_strict
 
             task = MWRTask(action="polish", chapter_num=1)
             await engine._polish_chapter(1, task)
@@ -377,9 +378,9 @@ def t25():
             engine = WritingEngine(proj_dir, proj_name, total_chapters=1, genre="")
             engine.llm.has_valid_config = lambda role: True
 
-            async def _mock_call(role, system, user):
+            async def _mock_call_strict(role, system, user):
                 return "短内容。" * 10  # ~30 中文字，< 800*0.5=400
-            engine.llm.call = _mock_call
+            engine.llm.call_strict = _mock_call_strict
 
             task = MWRTask(action="polish", chapter_num=1)
             await engine._polish_chapter(1, task)

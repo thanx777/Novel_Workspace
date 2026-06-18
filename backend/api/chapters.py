@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from project_db import ProjectDB, get_project_dir, read_file_safe
 from knowledge_graph import KnowledgeGraph
 from engines.common.kg_adapter import KGAdapter
-from engines.common.llm_client import LLMClient, is_llm_error
+from engines.common.llm_client import LLMClient, LLMError
 from engines.common.genre_adapter import GenreAdapter
 from engines.common.hallucination_guard import HallucinationGuardAdapter
 from engines.common.utils import extract_chapter_title
@@ -203,10 +203,13 @@ async def ai_edit_chapter(name: str, chapter_num: int, req: AiEditRequest):
     project_presets = _get_project_presets(name)
     global_presets = _get_global_presets()
     llm = LLMClient(project_presets, global_presets)
-    result = await llm.call("chat", system_prompt, user_prompt)
+    try:
+        result = await llm.call_strict("chat", system_prompt, user_prompt)
+    except LLMError as e:
+        return {"error": f"AI修改失败: {e}"}
 
     # l. 内容变空检测
-    if not result or not result.strip() or is_llm_error(result):
+    if not result or not result.strip():
         return {"error": "AI修改失败，返回内容为空"}
 
     # 中文字数缩水检测

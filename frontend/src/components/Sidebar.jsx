@@ -173,7 +173,8 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
   )
 }
 
-export function ChatPanel({ t, language, conversations, dialogEndRef, memory, setMemory, showNotification, taskInput, setTaskInput, chapterCount, setChapterCount, isRunning, runTask, handleStop, sendFeedback, optimizing, showOptimizeDropdown, setShowOptimizeDropdown, handleOptimize, presets }) {
+export function ChatPanel({ conversations, dialogEndRef, memory, setMemory, showNotification, taskInput, setTaskInput, chapterCount, setChapterCount, isRunning, runTask, handleStop, sendFeedback, optimizing, showOptimizeDropdown, setShowOptimizeDropdown, handleOptimize, presets }) {
+  const { t, language } = useApp()
   return (
     <div className="sidebar-section dialog-section">
       <div className="sidebar-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

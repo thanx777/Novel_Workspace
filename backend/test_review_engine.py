@@ -232,10 +232,10 @@ def t10():
     _write_chapter(proj_dir, 1, original_content)
     engine.llm.has_valid_config = lambda role: True
 
-    async def _mock_call(role, system, user):
+    async def _mock_call_strict(role, system, user):
         return "第1章 觉醒（修订）\n\n" + "这是修订后的测试内容。" * 100
 
-    engine.llm.call = _mock_call
+    engine.llm.call_strict = _mock_call_strict
 
     async def _run():
         return await engine._review_dimension_phase1(1, "style", "风格统一", "检查风格")
@@ -277,11 +277,11 @@ def t12():
     _write_chapter(proj_dir, 1, content)
     engine.llm.has_valid_config = lambda role: True
 
-    async def _mock_call(role, system, user):
+    async def _mock_call_strict(role, system, user):
         # 返回略微修改的内容（加一个字保证不缩水）
         return "第1章 觉醒\n\n" + "林轩走进了青云山，开始了他的修仙之路。" * 50 + "修订。"
 
-    engine.llm.call = _mock_call
+    engine.llm.call_strict = _mock_call_strict
 
     async def _run():
         return await engine.run_review()

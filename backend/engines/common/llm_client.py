@@ -11,6 +11,59 @@ from openai import AsyncOpenAI
 
 
 # ============================================
+# LLMError — 异常类层级（替代字符串协议）
+# ============================================
+
+class LLMError(Exception):
+    """LLM 调用失败的基类异常。"""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.message = message
+        self.retryable = retryable
+
+    def __str__(self) -> str:
+        return f"[LLM_ERROR: {self.message}]"
+
+
+class LLMConfigError(LLMError):
+    """配置错误（API Key 缺失、Base URL 无效等），不可重试。"""
+
+
+class LLMRateLimitError(LLMError):
+    """速率限制（429），可重试。"""
+
+    def __init__(self, message: str):
+        super().__init__(message, retryable=True)
+
+
+class LLMTimeoutError(LLMError):
+    """请求超时，可重试。"""
+
+    def __init__(self, message: str):
+        super().__init__(message, retryable=True)
+
+
+class LLMAuthError(LLMError):
+    """认证失败（401/403），不可重试。"""
+
+
+class LLMNotFoundError(LLMError):
+    """模型不存在（404），不可重试。"""
+
+
+class LLMServerError(LLMError):
+    """服务端错误（5xx），可重试。"""
+
+    def __init__(self, message: str):
+        super().__init__(message, retryable=True)
+
+
+class LLMEmptyResponseError(LLMError):
+    """模型返回空内容，不可重试。"""
+
+
+# ============================================
 # AgentConfig — LLM 配置模型
 # ============================================
 
@@ -53,18 +106,19 @@ async def call_llm(
     user_prompt: str,
     max_tokens: int,
     request_timeout_seconds: float,
-):
+) -> str:
+    """调用 LLM，成功返回文本，失败抛出 LLMError 子类异常。"""
     api_key = config.api_key.strip()
     base_url = config.base_url.strip().strip("`").strip()
     model = config.model.strip()
     api_format = getattr(config, "api_format", "openai")
 
     if not api_key:
-        return "[LLM_ERROR: API Key 未配置]"
+        raise LLMConfigError("API Key 未配置")
     if not base_url or not model:
-        return "[LLM_ERROR: Base URL 或模型名未配置]"
+        raise LLMConfigError("Base URL 或模型名未配置")
 
-    last_error = ""
+    last_error: LLMError = LLMError("未知错误")
     for attempt in range(_MAX_RETRIES + 1):
         try:
             if api_format == "claude":
@@ -89,10 +143,12 @@ async def call_llm(
                 if response.status_code != 200:
                     err_text = f"{response.status_code} - {response.text[:500]}"
                     if response.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
-                        last_error = err_text
+                        last_error = LLMServerError(err_text)
                         await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
                         continue
-                    return f"[LLM_ERROR: {err_text}]"
+                    if response.status_code == 429:
+                        raise LLMRateLimitError(err_text)
+                    raise LLMServerError(err_text)
 
                 result = response.json()
                 full_content = result.get("content", [{}])[0].get("text", "")
@@ -129,36 +185,48 @@ async def call_llm(
                         full_content = msg.reasoning_content or ""
 
             if not full_content.strip():
-                return "[LLM_ERROR: 模型返回为空，可能是当前模型不支持该请求格式]"
+                raise LLMEmptyResponseError("模型返回为空，可能是当前模型不支持该请求格式")
             return full_content
+        except LLMError:
+            raise
         except Exception as e:
             error_msg = str(e)
-            last_error = error_msg
             # 判断是否可重试
             if attempt < _MAX_RETRIES and _is_retryable_error(error_msg):
+                if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                    last_error = LLMTimeoutError(error_msg)
+                elif "429" in error_msg or "rate" in error_msg.lower():
+                    last_error = LLMRateLimitError(error_msg)
+                else:
+                    last_error = LLMServerError(error_msg)
                 await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
                 continue
 
             if "timed out" in error_msg.lower():
                 if "nvidia.com" in base_url:
-                    return f"[LLM_ERROR: NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度]"
-                return f"[LLM_ERROR: 请求超时]"
+                    raise LLMTimeoutError("NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度")
+                raise LLMTimeoutError("请求超时")
             elif "401" in error_msg or "api_key" in error_msg.lower():
-                return f"[LLM_ERROR: API Key 无效或认证失败]"
+                raise LLMAuthError("API Key 无效或认证失败")
             elif "403" in error_msg:
-                return f"[LLM_ERROR: 访问被拒绝]"
+                raise LLMAuthError("访问被拒绝")
             elif "404" in error_msg or "not found" in error_msg.lower():
-                return f"[LLM_ERROR: 模型不存在]"
+                raise LLMNotFoundError("模型不存在")
             elif "429" in error_msg or "rate" in error_msg.lower():
-                return f"[LLM_ERROR: 请求频率过高]"
-            return f"[LLM_ERROR: {error_msg[:300]}]"
+                raise LLMRateLimitError("请求频率过高")
+            raise LLMError(error_msg[:300])
 
     # 所有重试都失败
-    return f"[LLM_ERROR: 重试 {_MAX_RETRIES} 次后仍失败: {last_error[:300]}]"
+    raise LLMError(f"重试 {_MAX_RETRIES} 次后仍失败: {last_error.message[:300]}")
 
 
 def is_llm_error(text: str) -> bool:
-    return text.strip().startswith("[LLM_ERROR")
+    """[Deprecated] 检查字符串是否为 LLM 错误标记。
+
+    新代码应使用 try/except LLMError 替代。
+    此函数保留用于向后兼容（LLMClient.call() 仍返回错误字符串）。
+    """
+    return isinstance(text, str) and text.strip().startswith("[LLM_ERROR")
 
 
 # ============================================
@@ -246,7 +314,11 @@ class LLMClient:
     async def call(self, role: str, system_prompt: str, user_prompt: str,
                    max_tokens: Optional[int] = None,
                    request_timeout_seconds: int = 300) -> str:
-        """调用 LLM，自动按角色解析配置。"""
+        """[Deprecated] 调用 LLM，自动按角色解析配置。
+
+        失败时返回 [LLM_ERROR: ...] 字符串（向后兼容）。
+        新代码应使用 call_strict() 获取异常。
+        """
         cfg = self.resolve_config(role)
         if not cfg.api_key:
             return "[LLM_ERROR: 未配置 API Key]"
@@ -254,12 +326,30 @@ class LLMClient:
         defaults = ROLE_DEFAULTS.get(role, {})
         mt = max_tokens or defaults.get("max_tokens", 4000)
 
-        text = await call_llm(cfg, system_prompt, user_prompt,
+        try:
+            text = await call_llm(cfg, system_prompt, user_prompt,
+                                  max_tokens=mt,
+                                  request_timeout_seconds=request_timeout_seconds)
+            if not text:
+                return "[LLM_ERROR: 空响应]"
+            return text
+        except LLMError as e:
+            return str(e)
+
+    async def call_strict(self, role: str, system_prompt: str, user_prompt: str,
+                          max_tokens: Optional[int] = None,
+                          request_timeout_seconds: int = 300) -> str:
+        """调用 LLM，失败时抛出 LLMError 异常（推荐新代码使用）。"""
+        cfg = self.resolve_config(role)
+        if not cfg.api_key:
+            raise LLMConfigError("未配置 API Key")
+
+        defaults = ROLE_DEFAULTS.get(role, {})
+        mt = max_tokens or defaults.get("max_tokens", 4000)
+
+        return await call_llm(cfg, system_prompt, user_prompt,
                               max_tokens=mt,
                               request_timeout_seconds=request_timeout_seconds)
-        if not text or text.startswith("[LLM_ERROR"):
-            return text or "[LLM_ERROR: 空响应]"
-        return text
 
     def has_valid_config(self, role: str = "writer") -> bool:
         """检查是否有可用的 LLM 配置。"""

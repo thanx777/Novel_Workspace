@@ -1,4 +1,4 @@
-"""LLM 客户端测试 — 覆盖 AgentConfig / is_llm_error / LLMClient / call_llm。
+"""LLM 客户端测试 — 覆盖 AgentConfig / is_llm_error / LLMClient / call_llm / LLMError 异常类层级。
 
 LLM 调用全部 mock，不依赖真实 API。
 """
@@ -11,6 +11,8 @@ sys.path.insert(0, '.')
 from engines.common.llm_client import (
     AgentConfig, LLMClient, is_llm_error, call_llm,
     _is_retryable_error, _RETRYABLE_STATUS, _MAX_RETRIES,
+    LLMError, LLMConfigError, LLMRateLimitError, LLMTimeoutError,
+    LLMAuthError, LLMNotFoundError, LLMServerError, LLMEmptyResponseError,
 )
 
 PASSED, FAILED = [], []
@@ -165,21 +167,27 @@ def t09():
     return "mock call_llm OK"
 
 
-# ============ 10. call_llm — 空 API Key 返回 LLM_ERROR ============
+# ============ 10. call_llm — 空 API Key 抛出 LLMConfigError ============
 def t10():
     cfg = AgentConfig(api_key="", base_url="https://api.example.com", model="gpt-4")
-    result = asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
-    assert is_llm_error(result)
-    assert "API Key" in result
-    return "空 API Key OK"
+    try:
+        asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+        raise AssertionError("空 API Key 应抛出 LLMConfigError")
+    except LLMConfigError as e:
+        assert "API Key" in e.message, f"异常消息应包含 API Key，实际 {e.message!r}"
+        assert e.retryable is False, "LLMConfigError 应不可重试"
+        return f"抛出 LLMConfigError: {e}"
 
 
-# ============ 11. call_llm — 空 base_url 返回 LLM_ERROR ============
+# ============ 11. call_llm — 空 base_url 抛出 LLMConfigError ============
 def t11():
     cfg = AgentConfig(api_key="sk-test", base_url="", model="gpt-4")
-    result = asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
-    assert is_llm_error(result)
-    return "空 base_url OK"
+    try:
+        asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+        raise AssertionError("空 base_url 应抛出 LLMConfigError")
+    except LLMConfigError as e:
+        assert "Base URL" in e.message or "模型" in e.message, f"异常消息应说明配置缺失，实际 {e.message!r}"
+        return f"抛出 LLMConfigError: {e}"
 
 
 # ============ 12. _is_retryable_error 判定 ============
@@ -265,7 +273,7 @@ def t14():
     return "mock AsyncOpenAI OK"
 
 
-# ============ 15. call_llm — 模型返回空内容 ============
+# ============ 15. call_llm — 模型返回空内容抛出 LLMEmptyResponseError ============
 def t15():
     cfg = AgentConfig(
         api_key="sk-test",
@@ -298,15 +306,18 @@ def t15():
     original = llm_mod.AsyncOpenAI
     llm_mod.AsyncOpenAI = _MockAsyncOpenAI
     try:
-        result = asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+        try:
+            asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+            raise AssertionError("空内容应抛出 LLMEmptyResponseError")
+        except LLMEmptyResponseError as e:
+            assert "为空" in e.message or "不支持" in e.message, f"异常消息应说明空响应，实际 {e.message!r}"
+            assert e.retryable is False, "LLMEmptyResponseError 应不可重试"
+            return f"抛出 LLMEmptyResponseError: {e}"
     finally:
         llm_mod.AsyncOpenAI = original
-    assert is_llm_error(result), f"空内容应返回 LLM_ERROR，实际 {result!r}"
-    assert "为空" in result or "不支持" in result
-    return "空内容 OK"
 
 
-# ============ 16. call_llm — 401 错误（不可重试，立即返回） ============
+# ============ 16. call_llm — 401 错误抛出 LLMAuthError（不可重试） ============
 def t16():
     cfg = AgentConfig(
         api_key="sk-invalid",
@@ -326,15 +337,18 @@ def t16():
     original = llm_mod.AsyncOpenAI
     llm_mod.AsyncOpenAI = _MockAsyncOpenAI
     try:
-        result = asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+        try:
+            asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+            raise AssertionError("401 错误应抛出 LLMAuthError")
+        except LLMAuthError as e:
+            assert "API Key" in e.message or "认证失败" in e.message or "401" in e.message, f"异常消息应说明认证失败，实际 {e.message!r}"
+            assert e.retryable is False, "LLMAuthError 应不可重试"
+            return f"抛出 LLMAuthError: {e}"
     finally:
         llm_mod.AsyncOpenAI = original
-    assert is_llm_error(result)
-    assert "401" in result or "API Key" in result or "认证失败" in result
-    return "401 错误 OK"
 
 
-# ============ 17. call_llm — 404 模型不存在 ============
+# ============ 17. call_llm — 404 模型不存在抛出 LLMNotFoundError ============
 def t17():
     cfg = AgentConfig(
         api_key="sk-test",
@@ -354,12 +368,15 @@ def t17():
     original = llm_mod.AsyncOpenAI
     llm_mod.AsyncOpenAI = _MockAsyncOpenAI
     try:
-        result = asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+        try:
+            asyncio.run(call_llm(cfg, "sys", "usr", max_tokens=100, request_timeout_seconds=30))
+            raise AssertionError("404 错误应抛出 LLMNotFoundError")
+        except LLMNotFoundError as e:
+            assert "模型不存在" in e.message or "not found" in e.message.lower() or "404" in e.message, f"异常消息应说明模型不存在，实际 {e.message!r}"
+            assert e.retryable is False, "LLMNotFoundError 应不可重试"
+            return f"抛出 LLMNotFoundError: {e}"
     finally:
         llm_mod.AsyncOpenAI = original
-    assert is_llm_error(result)
-    assert "404" in result or "模型不存在" in result or "not found" in result.lower()
-    return "404 错误 OK"
 
 
 # ============ 18. LLMClient.call — max_tokens 使用角色默认值 ============
@@ -436,9 +453,90 @@ def t20():
     return "worker ↔ writer 别名 OK"
 
 
+# ============ 21. LLMClient.call_strict — 未配置抛出 LLMConfigError ============
+def t21():
+    client = LLMClient(project_presets={}, global_presets=[])
+    try:
+        asyncio.run(client.call_strict("writer", "system", "user"))
+        raise AssertionError("未配置应抛出 LLMConfigError")
+    except LLMConfigError as e:
+        assert "API Key" in e.message or "未配置" in e.message, f"异常消息应说明未配置，实际 {e.message!r}"
+        return f"call_strict 抛出 LLMConfigError: {e}"
+
+
+# ============ 22. LLMClient.call_strict — 成功路径返回文本 ============
+def t22():
+    presets = {
+        "writer_preset": {
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com",
+            "model": "gpt-4",
+        }
+    }
+    client = LLMClient(project_presets=presets, global_presets=[])
+
+    import engines.common.llm_client as llm_mod
+
+    async def _mock_call_llm(config, system_prompt, user_prompt, max_tokens, request_timeout_seconds):
+        assert config.api_key == "sk-test"
+        assert system_prompt == "sys"
+        assert user_prompt == "usr"
+        return "strict 模式返回内容"
+
+    original = llm_mod.call_llm
+    llm_mod.call_llm = _mock_call_llm
+    try:
+        result = asyncio.run(client.call_strict("writer", "sys", "usr"))
+    finally:
+        llm_mod.call_llm = original
+    assert result == "strict 模式返回内容", f"call_strict 应返回 LLM 文本，实际 {result!r}"
+    return "call_strict 成功路径 OK"
+
+
+# ============ 23. 异常类 retryable 属性 ============
+def t23():
+    # 可重试异常
+    assert LLMRateLimitError("429").retryable is True, "LLMRateLimitError 应可重试"
+    assert LLMTimeoutError("timeout").retryable is True, "LLMTimeoutError 应可重试"
+    assert LLMServerError("500").retryable is True, "LLMServerError 应可重试"
+    # 不可重试异常
+    assert LLMConfigError("config").retryable is False, "LLMConfigError 应不可重试"
+    assert LLMAuthError("401").retryable is False, "LLMAuthError 应不可重试"
+    assert LLMNotFoundError("404").retryable is False, "LLMNotFoundError 应不可重试"
+    assert LLMEmptyResponseError("empty").retryable is False, "LLMEmptyResponseError 应不可重试"
+    # 基类默认不可重试，但可通过参数指定
+    assert LLMError("base").retryable is False, "LLMError 基类默认应不可重试"
+    assert LLMError("custom", retryable=True).retryable is True, "LLMError 基类应支持 retryable=True"
+    return "retryable 属性 OK"
+
+
+# ============ 24. LLMError.__str__ 返回 [LLM_ERROR: ...] 格式 ============
+def t24():
+    e = LLMConfigError("API Key 未配置")
+    s = str(e)
+    assert s.startswith("[LLM_ERROR: "), f"__str__ 应以 [LLM_ERROR: 开头，实际 {s!r}"
+    assert s.endswith("]"), f"__str__ 应以 ] 结尾，实际 {s!r}"
+    assert "API Key 未配置" in s, f"__str__ 应包含消息内容，实际 {s!r}"
+    # 验证 is_llm_error 与 __str__ 的一致性
+    assert is_llm_error(s) is True, f"is_llm_error 应识别 __str__ 输出，实际 {s!r}"
+    # 各子类的 __str__ 都应遵循格式
+    for cls, msg in [
+        (LLMRateLimitError, "rate limit"),
+        (LLMTimeoutError, "timeout"),
+        (LLMAuthError, "auth"),
+        (LLMNotFoundError, "not found"),
+        (LLMServerError, "server error"),
+        (LLMEmptyResponseError, "empty"),
+    ]:
+        s = str(cls(msg))
+        assert s.startswith("[LLM_ERROR: ") and s.endswith("]"), f"{cls.__name__}.__str__ 格式错误: {s!r}"
+        assert is_llm_error(s) is True, f"is_llm_error 应识别 {cls.__name__} 的 __str__ 输出"
+    return "__str__ 格式一致性 OK"
+
+
 if __name__ == '__main__':
     print("=" * 70)
-    print("  LLM 客户端测试 (20 用例)")
+    print("  LLM 客户端测试 (24 用例)")
     print("=" * 70)
     print()
     run("01. is_llm_error 检测前缀", t01)
@@ -450,17 +548,21 @@ if __name__ == '__main__':
     run("07. resolve_config chat 兜底", t07)
     run("08. call 未配置返回 LLM_ERROR", t08)
     run("09. call mock call_llm 正常返回", t09)
-    run("10. call_llm 空 API Key", t10)
-    run("11. call_llm 空 base_url", t11)
+    run("10. call_llm 空 API Key 抛 LLMConfigError", t10)
+    run("11. call_llm 空 base_url 抛 LLMConfigError", t11)
     run("12. _is_retryable_error 判定", t12)
     run("13. 重试常量", t13)
     run("14. call_llm mock AsyncOpenAI 正常", t14)
-    run("15. call_llm 模型返回空内容", t15)
-    run("16. call_llm 401 错误", t16)
-    run("17. call_llm 404 错误", t17)
+    run("15. call_llm 空内容抛 LLMEmptyResponseError", t15)
+    run("16. call_llm 401 抛 LLMAuthError", t16)
+    run("17. call_llm 404 抛 LLMNotFoundError", t17)
     run("18. call 使用角色默认 max_tokens", t18)
     run("19. call LLM_ERROR 透传", t19)
     run("20. worker ↔ writer 别名映射", t20)
+    run("21. call_strict 未配置抛 LLMConfigError", t21)
+    run("22. call_strict 成功路径返回文本", t22)
+    run("23. 异常类 retryable 属性", t23)
+    run("24. LLMError.__str__ 格式一致性", t24)
     print()
     print("=" * 70)
     print(f"  结果:  {len(PASSED)} 通过 / {len(FAILED)} 失败")
