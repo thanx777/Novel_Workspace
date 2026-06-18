@@ -6,6 +6,7 @@ import sys, os, json, shutil, tempfile, asyncio
 sys.path.insert(0, '.')
 
 from project_db import ProjectDB, list_all_projects, create_project, delete_project
+from project_db import _validate_project_name, ProjectNameError, get_project_dir
 
 PASSED, FAILED = [], []
 
@@ -425,6 +426,52 @@ def t26():
     return "KG 边冲突覆盖 OK"
 
 
+# ============ 27. 路径遍历防护 ============
+def t27():
+    """验证项目名路径遍历攻击被拒绝"""
+    # 各种路径遍历尝试
+    malicious_names = [
+        "../../../etc/passwd",
+        "..\\..\\..\\windows\\system32",
+        "../../",
+        "..",
+        "./",
+        "proj/../../etc",
+        "proj\\..\\..\\etc",
+        "proj\x00malicious",  # null byte
+    ]
+    for bad in malicious_names:
+        try:
+            _validate_project_name(bad)
+            # 如果是空字符串或纯分隔符，basename 后可能变空，应抛错
+            # 其他情况应抛错
+            # 这里统一：如果不抛错，则结果不能包含 .. 或分隔符
+            # 但实际上我们的实现应该全部抛错
+            raise AssertionError(f"应拒绝恶意路径 {bad!r}，但通过了")
+        except ProjectNameError:
+            pass  # 预期行为
+        except AssertionError:
+            raise
+        except Exception as e:
+            # 其他异常类型也可接受（如 basename 处理后触发）
+            pass
+
+    # 合法项目名应通过
+    valid_names = ["proj_alpha", "测试项目", "《星辰变》", "proj-2024", "my project"]
+    for good in valid_names:
+        result = _validate_project_name(good)
+        assert result == good, f"合法名 {good!r} 应原样返回，得到 {result!r}"
+
+    # get_project_dir 应拒绝恶意名
+    try:
+        get_project_dir("../../../etc/passwd")
+        raise AssertionError("get_project_dir 应拒绝路径遍历")
+    except ProjectNameError:
+        pass
+
+    return "路径遍历防护 OK"
+
+
 if __name__ == '__main__':
     # 前置清理：确保所有测试项目不存在
     for n in ['proj_alpha', 'proj_beta', 'proj_gamma', 'proj_large',
@@ -433,7 +480,7 @@ if __name__ == '__main__':
         except: pass
 
     print("="*70)
-    print("  Novel Forge 全流程测试 (26 用例)")
+    print("  Novel Forge 全流程测试 (27 用例)")
     print("="*70)
     print()
     run("01. 创建项目", t01)
@@ -466,6 +513,11 @@ if __name__ == '__main__':
     run("24. polish LLM 错误回退", t24)
     run("25. polish 内容缩水回退", t25)
     run("26. KG 边冲突覆盖", t26)
+    print()
+    print("-"*70)
+    print("  安全测试：路径遍历防护")
+    print("-"*70)
+    run("27. 路径遍历防护", t27)
     print()
     print("="*70)
     print(f"  结果:  {len(PASSED)} 通过 / {len(FAILED)} 失败")

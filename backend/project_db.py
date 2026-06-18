@@ -10,6 +10,7 @@ Project Database Module - SQLite 项目数据库
 """
 
 import os
+import re
 import sqlite3
 import json
 import time
@@ -26,12 +27,65 @@ os.makedirs(PROJECTS_DIR, exist_ok=True)
 
 
 # ============================================================
+# 路径安全
+# ============================================================
+
+# 项目名白名单：字母数字、下划线、连字符、中文、书名号、括号、空格
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\u4e00-\u9fa5《》（）()\[\] ]+$")
+
+
+class ProjectNameError(ValueError):
+    """项目名不合法（含路径遍历攻击或非法字符）"""
+
+
+def _validate_project_name(project_name: str) -> str:
+    """校验并清洗项目名，防止路径遍历攻击。
+
+    规则：
+    1. 拒绝空名
+    2. 拒绝原始输入中包含路径分隔符或 .. 的（即使 basename 后看似安全）
+    3. 用 os.path.basename 剥离作为防御性二次保护
+    4. 用白名单正则校验剩余字符
+
+    返回清洗后的安全项目名；不合法则抛出 ProjectNameError。
+    """
+    if not project_name or not isinstance(project_name, str):
+        raise ProjectNameError("项目名不能为空")
+
+    raw = project_name.strip()
+
+    # 第一道防线：原始输入不得包含路径分隔符或 ..
+    # 这是最关键的检查 —— 即使 basename 后看似安全，原始输入含分隔符即视为攻击
+    if "/" in raw or "\\" in raw or ".." in raw:
+        raise ProjectNameError(f"项目名含非法路径字符: {project_name!r}")
+
+    # 第二道防线：basename 剥离（防御性，正常情况下 raw 已无分隔符）
+    name = os.path.basename(raw)
+
+    # 三次校验：basename 后仍不应为空或 . 
+    if not name or name in (".", ".."):
+        raise ProjectNameError(f"非法项目名: {project_name!r}")
+
+    # 白名单校验
+    if not _PROJECT_NAME_RE.match(name):
+        raise ProjectNameError(
+            f"项目名含非法字符: {name!r}（仅允许字母数字、下划线、连字符、中文、书名号、括号、空格）"
+        )
+
+    return name
+
+
+# ============================================================
 # 工具函数
 # ============================================================
 
 def get_project_dir(project_name: str) -> str:
-    """返回项目文件夹路径（自动创建）"""
-    d = os.path.join(PROJECTS_DIR, project_name)
+    """返回项目文件夹路径（自动创建）。
+
+    自动校验项目名，防止路径遍历。
+    """
+    safe_name = _validate_project_name(project_name)
+    d = os.path.join(PROJECTS_DIR, safe_name)
     os.makedirs(d, exist_ok=True)
     os.makedirs(os.path.join(d, "chapters"), exist_ok=True)
     os.makedirs(os.path.join(d, "memory"), exist_ok=True)
@@ -698,9 +752,13 @@ def create_project(name: str, title: str = "", genre: str = "",
                    outline_review_mode: str = "manual",
                    outline_layers: Optional[Dict[str, bool]] = None) -> Dict:
     """创建新项目"""
-    # 清理不合法字符
-    safe_name = "".join(c for c in name if c.isalnum() or c in "_-《》（）()[] ")
-    safe_name = safe_name.strip() or f"project_{int(time.time())}"
+    # 清理不合法字符（兼容旧逻辑：先做字符级过滤，再用统一校验）
+    filtered = "".join(c for c in name if c.isalnum() or c in "_-《》（）()[] ")
+    filtered = filtered.strip()
+    try:
+        safe_name = _validate_project_name(filtered) if filtered else f"project_{int(time.time())}"
+    except ProjectNameError:
+        safe_name = f"project_{int(time.time())}"
 
     db = ProjectDB(safe_name)
     db.update_project(
@@ -719,7 +777,8 @@ def create_project(name: str, title: str = "", genre: str = "",
 
 def delete_project(name: str) -> bool:
     """删除项目（删除整个文件夹）。Windows 上 SQLite 文件可能被占用，需要重试。"""
-    p = os.path.join(PROJECTS_DIR, name)
+    safe_name = _validate_project_name(name)
+    p = os.path.join(PROJECTS_DIR, safe_name)
     if not os.path.exists(p):
         return False
     import shutil
