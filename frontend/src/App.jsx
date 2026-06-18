@@ -16,6 +16,7 @@ function AppInner() {
   const [notification, setNotification] = useState(null)
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [showWorkspaceSettings, setShowWorkspaceSettings] = useState(false)
+  // eslint-disable-next-line no-unused-vars
   const [testLogs, setTestLogs] = useState([])
   const [dangerCommand, setDangerCommand] = useState(null)
   const [depMissing, setDepMissing] = useState(null)
@@ -159,8 +160,8 @@ function AppInner() {
       <DangerConfirmModal dangerCommand={dangerCommand} setDangerCommand={setDangerCommand} onConfirm={handleDangerConfirm} />
 
       {depMissing && (
-        <div className="confirm-overlay" onClick={handleDepSkip}>
-          <div className="danger-confirm-dialog" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()} style={{ borderColor: "var(--orange)" }}>
+        <div className="confirm-overlay" onClick={handleDepSkip} onKeyDown={handleDepSkip} role="button" tabIndex={0}>
+          <div className="danger-confirm-dialog" role="dialog" aria-modal="true">
             <div className="danger-confirm-icon">⚠️</div>
             <div className="danger-confirm-title">{t("missingDependency")}</div>
             <div className="danger-confirm-desc">

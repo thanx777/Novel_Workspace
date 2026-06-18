@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useApp } from "../context/AppContext"
 import ReactMarkdown from "react-markdown"
 
@@ -22,12 +22,11 @@ const VIEW_META = {
 }
 
 export default function OutlinePanel({ projectName, API_BASE, showNotification }) {
-  const { t, language } = useApp()
+  const { t } = useApp()
   const [layer, setLayer] = useState("L1")
   const [view, setView] = useState("md")
   const [data, setData] = useState({})  // {L1: {md, json_data}, L2: {md, json_data}}
   const [status, setStatus] = useState({})  // 2 层状态
-  const [selectedCh, setSelectedCh] = useState(null)
   const [regenerating, setRegenerating] = useState(false)
   const [chatMessages, setChatMessages] = useState([])
   const [chatInput, setChatInput] = useState("")
@@ -141,7 +140,9 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
           return (
             <div key={k} className={`outline-tab ${layer === k ? "active" : ""} ${s.enabled === false ? "disabled" : ""}`}
               style={layer === k ? { borderBottomColor: m.color, color: m.color } : {}}
-              onClick={() => s.enabled !== false && setLayer(k)}>
+              role="button" tabIndex={s.enabled === false ? -1 : 0}
+              onClick={() => s.enabled !== false && setLayer(k)}
+              onKeyDown={e => (e.key === "Enter" || e.key === " ") && s.enabled !== false && setLayer(k)}>
               <span className="tab-icon">{m.icon}</span>
               <span className="tab-label">{m.label}</span>
               {s.exists && <span className="tab-dot" style={{ background: m.color }} />}
@@ -163,12 +164,14 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
 
       <div className="side-panel-body">
         {/* 内容渲染 */}
-        {layer === "L1" && <L1View view={view} data={data.L1} status={status.L1} language={language} />}
-        {layer === "L2" && <L2View view={view} data={data.L2} status={status.L2} language={language} />}
+        {layer === "L1" && <L1View view={view} data={data.L1} status={status.L1} />}
+        {layer === "L2" && <L2View view={view} data={data.L2} status={status.L2} />}
 
         {/* AI 对话 */}
         <div className="outline-chat">
-          <div className="outline-chat-header" onClick={() => setChatExpanded(!chatExpanded)}>
+          <div className="outline-chat-header" role="button" tabIndex={0}
+            onClick={() => setChatExpanded(!chatExpanded)}
+            onKeyDown={e => (e.key === "Enter" || e.key === " ") && setChatExpanded(!chatExpanded)}>
             <span>💬 {t('aiChat')}</span>
             <span className="outline-chat-toggle">{chatExpanded ? "▾" : "▸"}</span>
           </div>
@@ -217,17 +220,17 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
 // ============================================================
 // L1 视图
 // ============================================================
-function L1View({ view, data, status, language }) {
+function L1View({ view, data, status }) {
   if (!status?.exists) {
     return <div className="outline-empty">📚 L1 全书大纲尚未生成</div>
   }
   if (view === "md") return <MarkdownView text={data?.md || ""} />
-  if (view === "tree") return <L1TreeView data={data?.json_data} language={language} />
+  if (view === "tree") return <L1TreeView data={data?.json_data} />
   if (view === "graph") return <div className="outline-graph-hint">🕸 关系网视图请切换到"🕸 知识图谱"标签页查看完整效果</div>
   return null
 }
 
-function L1TreeView({ data, language }) {
+function L1TreeView({ data }) {
   if (!data) return <div className="outline-empty">暂无结构化数据</div>
   const basic = data.basic || {}
   const worldview = data.worldview || {}
@@ -275,7 +278,7 @@ function L1TreeView({ data, language }) {
 // ============================================================
 // L2 视图（合并版：阶段划分 + 逐章细纲）
 // ============================================================
-function L2View({ view, data, status, language }) {
+function L2View({ view, data, status }) {
   if (!status?.exists) {
     return <div className="outline-empty">📝 L2 章节细纲尚未生成</div>
   }
@@ -415,7 +418,9 @@ function TreeNode({ icon, title, defaultOpen = false, children }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
     <div className="tree-node">
-      <div className="tree-node-header" onClick={() => setOpen(!open)}>
+      <div className="tree-node-header" role="button" tabIndex={0}
+        onClick={() => setOpen(!open)}
+        onKeyDown={e => (e.key === "Enter" || e.key === " ") && setOpen(!open)}>
         <span className="tree-arrow">{open ? "▼" : "▶"}</span>
         <span className="tree-icon">{icon}</span>
         <span className="tree-title">{title}</span>
