@@ -41,21 +41,9 @@ class WritingEngine(BaseEngine):
 
     # ---- 文件路径 ----
 
-    def _chapter_path(self, chapter_num: int) -> str:
-        d = os.path.join(self.project_dir, "chapters")
-        os.makedirs(d, exist_ok=True)
-        return os.path.join(d, f"第{chapter_num}章.txt")
-
     def _l3_path(self, chapter_num: int) -> str:
         """兼容旧版 L3 章节路径。"""
         return os.path.join(self.project_dir, "outline_L3", f"chapter_{chapter_num}.md")
-
-    def _write_atomic(self, path: str, content: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
 
     # ---- 读取上下文 ----
 
@@ -100,31 +88,6 @@ class WritingEngine(BaseEngine):
                 return f.read()
 
         return ""
-
-    def _read_chapter(self, chapter_num: int) -> str:
-        path = self._chapter_path(chapter_num)
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
-
-    def _clean_fs_ids(self, content: str) -> str:
-        """清洗LLM输出中的FS编号（如FS-001、FS-002-Variant等）。"""
-        import re as _re
-        content = _re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", content)
-        content = _re.sub(r"[（(]\s*[）)]", "", content)
-        return content
-
-    def _read_recent_chapters(self, n: int = 3) -> str:
-        """读取最近 n 章的全文，清洗FS编号以防误导LLM。"""
-        parts = []
-        start = max(1, self._current_chapter - n)
-        for ch in range(start, self._current_chapter):
-            content = self._read_chapter(ch)
-            if content:
-                content = self._clean_fs_ids(content)
-                parts.append(f"【第{ch}章】\n{content}")
-        return "\n\n".join(parts)
 
     def _read_global_memory(self) -> str:
         """读取全局记忆（用户笔记）。"""
@@ -311,6 +274,10 @@ class WritingEngine(BaseEngine):
         if genre_injection:
             context_parts.append(genre_injection)
 
+        # 上一轮审查反馈（重写时需要参考）
+        if task.context:
+            context_parts.append(f"【上一轮审查反馈 — 重写时必须解决这些问题】\n{task.context}")
+
         system_prompt = self.prompts["writer_writing"] + "\n\n" + "\n\n".join(context_parts)
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
@@ -318,10 +285,15 @@ class WritingEngine(BaseEngine):
             f"请写第{ch}章。严格按照细纲和大纲写作，不要偏离主线。\n\n"
             f"【字数硬性要求】正文必须达到 {word_min}-{word_max} 字，不足 {word_min} 字视为不合格。"
             f"请充分展开场景描写、对话、心理活动和动作细节，确保篇幅达标。\n\n"
+            f"【衔接硬性要求】\n"
+            f"1. 本章开头必须与前一章结尾的场景、角色状态、物理位置自然衔接\n"
+            f"2. 前章已确立的关键状态（如角色受伤、道具损毁、位置转移）不得在本章中被忽略或矛盾\n"
+            f"3. 禁止凭空引入知识图谱中不存在的角色\n\n"
             f"【写作规范】\n"
             f"1. 避免与前文重复的描写模式（如反复用'指节泛白'、'嘴角扯出弧度'、'旧伤作痛'等），每章的描写方式应各不相同\n"
             f"2. 章节开头必须与前一章结尾自然衔接，不要每章都用天气/场景描写开头——延续前文场景时直接接续叙事，切换场景时才用场景描写开头\n"
-            f"3. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理，小说正文不得引用"
+            f"3. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理，小说正文不得引用\n"
+            f"4. 章节开头第一行必须写：# 第{ch}章"
         )
 
         if not self.llm.has_valid_config("writer"):
@@ -340,6 +312,13 @@ class WritingEngine(BaseEngine):
         # 清洗LLM输出中的FS编号（防止LLM忽略禁止指令）
         content = self._clean_fs_ids(content)
 
+        # 去除完全重复的段落（LLM偶发整段复制粘贴）
+        content = self._deduplicate_paragraphs(content)
+
+        # 程序化添加章节标题（避免 LLM 遗漏导致 MWR 卡死）
+        if not re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
+            content = f"# 第{ch}章\n\n{content}"
+
         # 落盘
         self._write_atomic(self._chapter_path(ch), content)
 
@@ -354,12 +333,16 @@ class WritingEngine(BaseEngine):
         return Draft(content=content, chapter_num=ch, metadata={"action": "write"})
 
     async def _polish_chapter(self, ch: int, task: MWRTask) -> Draft:
-        """润色已有章节。"""
+        """润色已有章节 — 针对性修改而非全文重写。"""
         self._emit({"status": "chapter_polishing", "chapter": ch, "polish_round": self._polish_count})
 
         original = self._read_chapter(ch)
         if not original:
             return await self._write_chapter(ch, task)
+
+        # 如果没有具体问题需要修复，直接返回原文
+        if not task.focus_issues:
+            return Draft(content=original, chapter_num=ch, metadata={"action": "polish", "no_changes": True})
 
         context_parts = []
 
@@ -383,30 +366,63 @@ class WritingEngine(BaseEngine):
         if genre_injection:
             context_parts.append(genre_injection)
 
-        # 审查反馈
+        # 前章上下文（润色也需要知道前文以保证衔接）
+        recent = self._read_recent_chapters(3)
+        if recent:
+            context_parts.append(f"【最近章节 — 润色时必须保持衔接】\n{recent}")
+
+        # 审查反馈（issues + suggestions 都要传递给 Writer）
+        feedback_parts = []
         if task.focus_issues:
-            feedback = "\n".join(f"- {iss}" for iss in task.focus_issues)
-            context_parts.append(f"【审查反馈 — 请针对这些问题修改】\n{feedback}")
+            feedback_parts.append("问题：\n" + "\n".join(f"- {iss}" for iss in task.focus_issues))
+        if task.context:
+            feedback_parts.append(task.context)
+        if feedback_parts:
+            context_parts.append(f"【审查反馈 — 请针对这些问题修改】\n" + "\n\n".join(feedback_parts))
 
         system_prompt = self.prompts["writer_polish"] + "\n\n" + "\n\n".join(context_parts)
+
+        # 将原文按段落分割，标注段落编号
+        paragraphs = [p for p in original.split("\n\n") if p.strip()]
+        numbered_original = "\n\n".join(f"[P{i+1}] {p}" for i, p in enumerate(paragraphs))
+
+        word_min = self.mode_config['word_count_min']
+        word_max = self.mode_config['word_count_max']
         user_prompt = (
-            f"请润色第{ch}章。根据审查反馈修改，保持故事连贯性。\n\n"
-            f"--- 原文 ---\n{original}\n--- 原文结束 ---"
+            f"请润色第{ch}章。根据审查反馈进行针对性修改。\n\n"
+            f"【重要】不要重写全文！只输出需要修改的段落。\n"
+            f"输出格式：每处修改用以下格式：\n"
+            f"===REPLACE P{{段落编号}}===\n"
+            f"新段落内容\n"
+            f"===END===\n\n"
+            f"如果某问题需要新增段落，用：\n"
+            f"===INSERT AFTER P{{段落编号}}===\n"
+            f"新段落内容\n"
+            f"===END===\n\n"
+            f"【字数要求】修改后总字数不得低于原文（{word_min}-{word_max}字）。\n\n"
+            f"--- 原文（段落已编号）---\n{numbered_original}\n--- 原文结束 ---"
         )
 
         if not self.llm.has_valid_config("writer"):
             content = original
         else:
-            content = await self.llm.call("writer", system_prompt, user_prompt)
+            llm_output = await self.llm.call("writer", system_prompt, user_prompt)
 
-        # 检查 LLM 返回是否为错误（空内容在后面统一处理）
-        from ..common.llm_client import is_llm_error
-        if is_llm_error(content):
-            self._emit({"status": "warning", "message": f"第{ch}章润色失败: {content[:200]}"})
-            content = original  # 回退到原文
+            # 检查 LLM 返回是否为错误
+            from ..common.llm_client import is_llm_error
+            if is_llm_error(llm_output):
+                self._emit({"status": "warning", "message": f"第{ch}章润色失败: {llm_output[:200]}"})
+                content = original  # 回退到原文
+            else:
+                # 解析 LLM 输出，程序化替换段落
+                content = self._apply_paragraph_edits(original, paragraphs, llm_output)
 
         # 清洗LLM输出中的FS编号
         content = self._clean_fs_ids(content)
+
+        # 程序化添加章节标题
+        if not re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
+            content = f"# 第{ch}章\n\n{content}"
 
         # 内容变空/大幅缩水检测和回退
         if not content or not content.strip():
@@ -415,7 +431,7 @@ class WritingEngine(BaseEngine):
         else:
             original_cn = len(re.findall(r'[\u4e00-\u9fff]', original))
             new_cn = len(re.findall(r'[\u4e00-\u9fff]', content))
-            if new_cn < original_cn * 0.5 and original_cn > 500:
+            if new_cn < original_cn * 0.7 and original_cn > 500:
                 self._emit({"status": "warning", "message": f"第{ch}章润色后字数大幅缩水({new_cn}←{original_cn})，回退到原文"})
                 content = original
 
@@ -432,6 +448,48 @@ class WritingEngine(BaseEngine):
         self._emit({"status": "chapter_polished", "chapter": ch})
         return Draft(content=content, chapter_num=ch, metadata={"action": "polish"})
 
+    def _apply_paragraph_edits(self, original: str, paragraphs: list, llm_output: str) -> str:
+        """解析 LLM 的段落编辑指令，程序化应用到原文。"""
+        result_paragraphs = list(paragraphs)  # 复制
+
+        # 匹配 ===REPLACE P{N}=== ... ===END===
+        for m in re.finditer(r'===REPLACE\s+P(\d+)===\s*\n(.*?)\n===END===', llm_output, re.DOTALL):
+            idx = int(m.group(1)) - 1
+            new_text = m.group(2).strip()
+            if 0 <= idx < len(result_paragraphs):
+                result_paragraphs[idx] = new_text
+
+        # 匹配 ===INSERT AFTER P{N}=== ... ===END===
+        for m in re.finditer(r'===INSERT\s+AFTER\s+P(\d+)===\s*\n(.*?)\n===END===', llm_output, re.DOTALL):
+            idx = int(m.group(1)) - 1
+            new_text = m.group(2).strip()
+            if 0 <= idx < len(result_paragraphs):
+                result_paragraphs.insert(idx + 1, new_text)
+
+        # 如果 LLM 没有输出任何编辑指令（格式不匹配），回退到原文
+        new_content = "\n\n".join(result_paragraphs)
+        if new_content.strip() == "\n\n".join(paragraphs).strip() and llm_output.strip():
+            # LLM 输出了内容但格式不匹配，尝试直接使用（兼容旧格式）
+            pass
+        return new_content
+
+    def _deduplicate_paragraphs(self, content: str) -> str:
+        """去除完全重复的段落（LLM偶发整段复制粘贴）。"""
+        paragraphs = content.split("\n\n")
+        seen = set()
+        result = []
+        for p in paragraphs:
+            stripped = p.strip()
+            if not stripped:
+                result.append(p)
+                continue
+            if stripped in seen:
+                self._emit({"status": "warning", "message": f"检测到重复段落已去除: {stripped[:50]}..."})
+                continue
+            seen.add(stripped)
+            result.append(p)
+        return "\n\n".join(result)
+
     async def reviewer_evaluate(self, draft: Draft) -> ReviewResult:
         """Reviewer：硬性层（KG验证 + 格式校验 + 疲劳词 + 反幻觉本地检查）+ AI 层。
 
@@ -441,6 +499,10 @@ class WritingEngine(BaseEngine):
         """
         ch = draft.chapter_num
         content = draft.content
+
+        # 程序化修复：确保章节标题存在（避免标题缺失成为 persistent_issue 卡死 MWR）
+        if content and not re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
+            content = f"# 第{ch}章\n\n{content}"
 
         # 空内容/LLM错误/极低中文：直接返回低分，强制 all_required_passed=false
         cn_count = len(re.findall(r'[\u4e00-\u9fff]', content)) if content else 0
@@ -495,6 +557,11 @@ class WritingEngine(BaseEngine):
         word_count = len(re.findall(r'[\u4e00-\u9fff]', content))
         if word_count < 1000:
             issues.append(f"章节字数过少: {word_count} 字")
+
+        # 7. 省略号密度检查
+        ellipsis_count = len(re.findall(r'……|\.\.\.\.\.\.', content))
+        if ellipsis_count > 5:
+            issues.append(f"省略号过多：{ellipsis_count}个（建议每章不超过5个）")
 
         # === AI 层 ===
         score = 0.0
@@ -579,15 +646,15 @@ class WritingEngine(BaseEngine):
         if genre_reviewer:
             system_prompt += f"\n\n{genre_reviewer}"
 
-        user_prompt = f"请审校第{ch}章：\n\n{content[:6000]}"
+        user_prompt = f"请审校第{ch}章：\n\n{content}"
 
         try:
             resp = await self.llm.call("reviewer", system_prompt, user_prompt)
             data = extract_json_from_response(resp)
             if data:
                 return float(data.get("score", 5.0)), data.get("issues", []), data.get("suggestions", [])
-        except Exception:
-            pass
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"AI 评审解析异常: {e}"})
         return 5.0, ["AI 评审解析失败"], []
 
     def manager_final_decision(self) -> FinalDecision:
@@ -608,14 +675,6 @@ class WritingEngine(BaseEngine):
             if ch not in completed and not os.path.isfile(self._chapter_path(ch)):
                 return ch
         return self.total_chapters + 1
-
-    def _format_feedback_context(self, result: ReviewResult) -> str:
-        parts = []
-        if result.issues:
-            parts.append("问题：\n" + "\n".join(f"- {i}" for i in result.issues))
-        if result.hallucination_warnings:
-            parts.append("幻觉警告：\n" + "\n".join(f"- {w}" for w in result.hallucination_warnings))
-        return "\n\n".join(parts)
 
     # 常见误判词黑名单：这些词虽能匹配"名词+对话动词"模式，但不是角色名
     _FALSE_POSITIVE_NAMES = frozenset({

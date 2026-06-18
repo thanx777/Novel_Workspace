@@ -83,11 +83,11 @@ export default function NewTaskModal({
               </select>
             </div>
             <div className="form-group form-group-half">
-              <label> {language === "zh" ? "章节数" : "Chapters"}</label>
+              <label> {language === "zh" ? "参考章节数" : "Ref. Chapters"}</label>
               <input
                 type="number" value={chapterCount}
                 onChange={e => setChapterCount(e.target.value)}
-                placeholder="100" min="1" max="2000"
+                placeholder={language === "zh" ? "约100（仅供参考）" : "~100 (reference only)"} min="1" max="2000"
                 className="form-input"
               />
             </div>

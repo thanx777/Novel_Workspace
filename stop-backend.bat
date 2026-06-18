@@ -15,9 +15,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING
 )
 if !FOUND! equ 0 echo   Not running
 
-echo Looking for frontend (port 5173)...
+echo Looking for frontend (port 5176)...
 set FOUND=0
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5173" ^| findstr "LISTENING" 2^>nul') do (
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5176" ^| findstr "LISTENING" 2^>nul') do (
     set /a FOUND+=1
     echo   Killing PID: %%a
     taskkill /F /PID %%a >nul 2>&1

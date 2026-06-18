@@ -81,15 +81,6 @@ class OutlineEngine(BaseEngine):
             return md[:2000]
         return ""
 
-    # ---- 原子写入 ----
-
-    def _write_atomic(self, path: str, content: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
-
     # ---- MWR 实现 ----
 
     def manager_decide(self, round_num: int, last_result: Optional[ReviewResult] = None) -> MWRTask:
@@ -122,6 +113,16 @@ class OutlineEngine(BaseEngine):
         context = {}
         if layer == "L1":
             context["requirements"] = self.requirements
+            # 从项目 DB 读取用户指定的总章节数，注入 L1 prompt 引导 LLM 遵守
+            try:
+                db = ProjectDB(self.project_name)
+                info = db.get_project()
+                db.close()
+                tc = info.get("total_chapters", 0) if info else 0
+                if tc and int(tc) > 0:
+                    context["total_chapters"] = int(tc)
+            except Exception:
+                pass
         elif layer == "L2":
             context["L1_summary"] = self._get_l1_summary()
             # 从 L1 JSON 中提取总章节数，注入 L2 prompt
@@ -329,53 +330,6 @@ class OutlineEngine(BaseEngine):
 
     # ---- 辅助方法 ----
 
-    @staticmethod
-    def _extract_json_from_response(text: str):
-        """从 LLM 响应中提取 JSON，支持嵌套大括号和 markdown 代码块。"""
-        import json
-        # 1. 尝试从 ```json ... ``` 代码块中提取
-        code_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if code_block:
-            try:
-                return json.loads(code_block.group(1))
-            except Exception:
-                pass
-        # 2. 查找包含 "score" 的最外层 JSON 对象（支持嵌套）
-        start = text.find('{')
-        while start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == '{':
-                    depth += 1
-                elif text[i] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[start:i + 1]
-                        try:
-                            data = json.loads(candidate)
-                            if isinstance(data, dict) and "score" in data:
-                                return data
-                        except Exception:
-                            pass
-                        break
-            start = text.find('{', start + 1)
-        # 3. 直接尝试解析整个响应
-        try:
-            return json.loads(text.strip())
-        except Exception:
-            return None
-
-    def _format_feedback_context(self, result: ReviewResult) -> str:
-        """格式化 Reviewer 反馈，供下一轮 Writer 使用。"""
-        parts = []
-        if result.issues:
-            parts.append("问题：\n" + "\n".join(f"- {i}" for i in result.issues))
-        if result.suggestions:
-            parts.append("建议：\n" + "\n".join(f"- {s}" for s in result.suggestions))
-        if result.hallucination_warnings:
-            parts.append("幻觉警告：\n" + "\n".join(f"- {w}" for w in result.hallucination_warnings))
-        return "\n\n".join(parts)
-
     def _extract_character_names(self, text: str) -> List[str]:
         """从文本中提取可能的人名（简单启发式）。"""
         names = set()
@@ -474,8 +428,8 @@ class OutlineEngine(BaseEngine):
                 if l1_id in self.kg_adapter.kg.nodes:
                     self.kg_adapter.kg.add_edge("edge_L2_from_L1", "derived_from", node_id, l1_id)
             self.kg_adapter.kg.save()
-        except Exception:
-            pass  # KG 写入失败不阻塞流程
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"KG 写入失败（不阻塞流程）: {e}"})
 
     async def _ai_ingest_outline(self, layer: str, md_text: str):
         """AI 驱动的大纲摄取到知识图谱。"""
@@ -485,8 +439,8 @@ class OutlineEngine(BaseEngine):
                 llm_client=self.llm,
                 emit=self._emit,
             )
-        except Exception:
-            pass  # 摄取失败不阻塞流程
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"大纲 AI 摄取失败（不阻塞流程）: {e}"})
 
     def _sync_chapters_to_db(self):
         """大纲生成完成后，更新 total_chapters 和章节标题映射（不创建章节条目）。
@@ -842,7 +796,7 @@ class OutlineEngine(BaseEngine):
 
         try:
             resp = await self.llm.call("writer", system_prompt, user_prompt)
-            if not resp or resp.startswith("[LLM_ERROR"):
+            if not resp or is_llm_error(resp):
                 return []
 
             # 尝试从 LLM 响应中解析分卷

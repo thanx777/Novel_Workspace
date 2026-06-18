@@ -20,8 +20,8 @@ class EngineState:
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[warn] 引擎状态文件加载失败，回退到默认值: {self.path} - {e}")
         return self._default()
 
     @staticmethod

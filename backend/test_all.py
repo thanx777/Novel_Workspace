@@ -1,8 +1,8 @@
 """
-Novel Forge - 全流程功能测试 (19 个用例)
-覆盖：ProjectDB / ProjectExecutor / ProjectAssistant / 文件系统
+Novel Forge - 全流程功能测试 (26 个用例)
+覆盖：ProjectDB / ProjectExecutor / ProjectAssistant / 文件系统 / MWR 循环 / polish 回退 / KG 边冲突
 """
-import sys, os, json, shutil
+import sys, os, json, shutil, tempfile, asyncio
 sys.path.insert(0, '.')
 
 from project_db import ProjectDB, list_all_projects, create_project, delete_project
@@ -228,14 +228,212 @@ def t19():
     return "所有测试项目删除成功"
 
 
+# ============================================================
+# 核心单测：MWR 退出条件 / polish 回退 / KG 边冲突
+# ============================================================
+
+def _make_mock_engine_class():
+    """构造一个轻量 MockEngine，仅实现 run_mwr_cycle 所需的接口。"""
+    from engines.common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
+
+    class _MockEngine(BaseEngine):
+        def __init__(self, scores, passed=None):
+            # 不调用 super().__init__，避免依赖项目目录/DB
+            self._scores = list(scores)
+            self._passed = list(passed) if passed else [True] * len(scores)
+            self._idx = 0
+            self.yield_func = lambda x: None
+            self.cancelled = False
+            self._issue_consecutive_counts = {}
+            self._completed = False
+            self._final_reason = None
+
+        def manager_decide(self, round_num, last_result=None):
+            return MWRTask(action="write", chapter_num=1)
+
+        async def writer_execute(self, task):
+            return Draft(content="x", chapter_num=1)
+
+        async def reviewer_evaluate(self, draft):
+            i = min(self._idx, len(self._scores) - 1)
+            s = self._scores[i]
+            p = self._passed[i]
+            self._idx += 1
+            return ReviewResult(score=s, issues=[], all_required_passed=p)
+
+        def manager_final_decision(self):
+            self._final_reason = "final"
+            return FinalDecision(accepted=True, reason="test")
+
+        def _on_cycle_completed(self, round_num, result):
+            self._completed = True
+
+    return _MockEngine
+
+
+# ============ 20. MWR 退出条件 — 评分达标 ============
+def t20():
+    _MockEngine = _make_mock_engine_class()
+    eng = _MockEngine([9.0], [True])
+    r = asyncio.run(eng.run_mwr_cycle(max_rounds=5, score_threshold=8.0))
+    assert r.score == 9.0, f"期望 9.0，实际 {r.score}"
+    assert eng._completed, "评分达标应调用 _on_cycle_completed"
+    return "评分达标立即退出 OK"
+
+
+# ============ 21. MWR 退出条件 — 连续3轮无提升 ============
+def t21():
+    _MockEngine = _make_mock_engine_class()
+    # 5 轮都 5.0，永远不达标，第 4 轮时 recent_scores 长度达 3 → break
+    eng = _MockEngine([5.0, 5.0, 5.0, 5.0, 5.0], [True] * 5)
+    r = asyncio.run(eng.run_mwr_cycle(max_rounds=10, score_threshold=8.0))
+    assert r.score == 5.0
+    # 第 4 轮触发卡住检测（recent_scores=[5.0,5.0,5.0]）
+    assert eng._idx == 4, f"期望 4 轮后退出，实际 {eng._idx} 轮"
+    return "连续3轮无提升退出 OK"
+
+
+# ============ 22. MWR 退出条件 — max_rounds 上限 ============
+def t22():
+    _MockEngine = _make_mock_engine_class()
+    eng = _MockEngine([5.0, 5.0, 5.0], [True] * 3)
+    r = asyncio.run(eng.run_mwr_cycle(max_rounds=2, score_threshold=8.0))
+    assert r.score == 5.0
+    # 第 3 轮 round_num=3 > max_rounds=2 → break，reviewer 只被调用 2 次
+    assert eng._idx == 2, f"期望 2 次评审后退出，实际 {eng._idx} 次"
+    return "max_rounds 上限退出 OK"
+
+
+# ============ 23. MWR 退出条件 — 连续3轮 LLM 错误 ============
+def t23():
+    _MockEngine = _make_mock_engine_class()
+    # score=0 + all_required_passed=False → 模拟 LLM 错误
+    eng = _MockEngine([0.0, 0.0, 0.0, 0.0], [False, False, False, False])
+    r = asyncio.run(eng.run_mwr_cycle(max_rounds=10, score_threshold=8.0))
+    assert r.score == 0.0
+    # 第 3 轮 consecutive_llm_errors=3 >= 3 → break
+    assert eng._idx == 3, f"期望 3 轮后退出，实际 {eng._idx} 轮"
+    return "连续3轮 LLM 错误退出 OK"
+
+
+# ============ 24. polish 回退 — LLM 错误 ============
+def t24():
+    from engines.writing.engine import WritingEngine
+    from engines.common.base_engine import MWRTask
+
+    proj_name = "test_polish_24"
+    cleanup([proj_name])
+    create_project(proj_name, "测试", "测试", 5)
+    proj_dir = os.path.join('workspace', 'projects', proj_name)
+    try:
+        ch_dir = os.path.join(proj_dir, "chapters")
+        os.makedirs(ch_dir, exist_ok=True)
+        ch_path = os.path.join(ch_dir, "第1章.txt")
+        original = "第1章 测试\n\n" + "这是测试内容。" * 200  # >500 中文字
+        with open(ch_path, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        # 引擎需在 async 上下文中创建（KGAdapter.__init__ 会创建 asyncio.Lock）
+        async def _run():
+            engine = WritingEngine(proj_dir, proj_name, total_chapters=1, genre="")
+            engine.llm.has_valid_config = lambda role: True
+
+            async def _mock_call(role, system, user):
+                return "[LLM_ERROR: test error]"
+            engine.llm.call = _mock_call
+
+            task = MWRTask(action="polish", chapter_num=1)
+            await engine._polish_chapter(1, task)
+
+        asyncio.run(_run())
+
+        with open(ch_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert content == original, "LLM 错误时应回退到原文"
+    finally:
+        cleanup([proj_name])
+    return "polish LLM 错误回退 OK"
+
+
+# ============ 25. polish 回退 — 内容大幅缩水 ============
+def t25():
+    from engines.writing.engine import WritingEngine
+    from engines.common.base_engine import MWRTask
+
+    proj_name = "test_polish_25"
+    cleanup([proj_name])
+    create_project(proj_name, "测试", "测试", 5)
+    proj_dir = os.path.join('workspace', 'projects', proj_name)
+    try:
+        ch_dir = os.path.join(proj_dir, "chapters")
+        os.makedirs(ch_dir, exist_ok=True)
+        ch_path = os.path.join(ch_dir, "第1章.txt")
+        original = "第1章 测试\n\n" + "这是测试内容。" * 200  # ~800 中文字
+        with open(ch_path, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        async def _run():
+            engine = WritingEngine(proj_dir, proj_name, total_chapters=1, genre="")
+            engine.llm.has_valid_config = lambda role: True
+
+            async def _mock_call(role, system, user):
+                return "短内容。" * 10  # ~30 中文字，< 800*0.5=400
+            engine.llm.call = _mock_call
+
+            task = MWRTask(action="polish", chapter_num=1)
+            await engine._polish_chapter(1, task)
+
+        asyncio.run(_run())
+
+        with open(ch_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert content == original, f"内容缩水应回退到原文，实际长度 {len(content)}"
+    finally:
+        cleanup([proj_name])
+    return "polish 内容缩水回退 OK"
+
+
+# ============ 26. KG 边冲突 — 相同 edge_id 覆盖 ============
+def t26():
+    from knowledge_graph import KnowledgeGraph
+
+    with tempfile.TemporaryDirectory() as tmp:
+        kg = KnowledgeGraph(tmp)
+        kg.add_node("char_A", "character", "A")
+        kg.add_node("char_B", "character", "B")
+
+        # 第一次添加关系边
+        kg.add_edge("rel_A_B", "relates_to", "char_A", "char_B",
+                    attrs={"relation": "朋友", "chapter_num": 1})
+        assert kg.edges["rel_A_B"]["attrs"]["relation"] == "朋友"
+
+        # 第二次添加相同 edge_id，不同 attrs（模拟第5章重新提取关系）
+        kg.add_edge("rel_A_B", "relates_to", "char_A", "char_B",
+                    attrs={"relation": "敌人", "chapter_num": 5})
+
+        # 验证：第二次覆盖第一次
+        assert kg.edges["rel_A_B"]["attrs"]["relation"] == "敌人", "相同 edge_id 应被覆盖"
+        assert kg.edges["rel_A_B"]["attrs"]["chapter_num"] == 5
+        assert len(kg.edges) == 1, f"期望 1 条边，实际 {len(kg.edges)}"
+
+        # 验证持久化后仍为覆盖后的值
+        kg.save()
+        kg2 = KnowledgeGraph(tmp)
+        kg2.load()
+        assert kg2.edges["rel_A_B"]["attrs"]["relation"] == "敌人"
+
+    return "KG 边冲突覆盖 OK"
+
+
 if __name__ == '__main__':
     # 前置清理：确保所有测试项目不存在
-    for n in ['proj_alpha', 'proj_beta', 'proj_gamma', 'proj_large']:
+    for n in ['proj_alpha', 'proj_beta', 'proj_gamma', 'proj_large',
+              'test_polish_24', 'test_polish_25']:
         try: delete_project(n)
         except: pass
 
     print("="*70)
-    print("  Novel Forge 全流程测试 (19 用例)")
+    print("  Novel Forge 全流程测试 (26 用例)")
     print("="*70)
     print()
     run("01. 创建项目", t01)
@@ -257,6 +455,17 @@ if __name__ == '__main__':
     run("17. 对话历史", t17)
     run("18. 大纲确认→写作", t18)
     run("19. 删除项目", t19)
+    print()
+    print("-"*70)
+    print("  核心单测：MWR 退出条件 / polish 回退 / KG 边冲突")
+    print("-"*70)
+    run("20. MWR 评分达标退出", t20)
+    run("21. MWR 连续3轮无提升退出", t21)
+    run("22. MWR max_rounds 上限退出", t22)
+    run("23. MWR 连续3轮 LLM 错误退出", t23)
+    run("24. polish LLM 错误回退", t24)
+    run("25. polish 内容缩水回退", t25)
+    run("26. KG 边冲突覆盖", t26)
     print()
     print("="*70)
     print(f"  结果:  {len(PASSED)} 通过 / {len(FAILED)} 失败")

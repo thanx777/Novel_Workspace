@@ -3,10 +3,11 @@
 import os
 import re
 import difflib
+import asyncio
 from typing import Dict, List, Optional
 
 from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
-from ..common.llm_client import LLMClient
+from ..common.llm_client import LLMClient, is_llm_error
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
 from ..common.utils import extract_chapter_title
@@ -89,42 +90,6 @@ class ReviewEngine(BaseEngine):
                     chapters[ch] = fh.read()
         return chapters
 
-    def _write_atomic(self, path: str, content: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
-
-    def _read_chapter(self, ch_num: int) -> str:
-        """读取指定章节全文。"""
-        path = self._chapter_path(ch_num)
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
-
-    def _read_recent_chapters(self, n: int = 3) -> str:
-        """读取最近 n 章的全文，清洗FS编号以防误导LLM。"""
-        parts = []
-        start = max(1, self._current_chapter - n)
-        for ch in range(start, self._current_chapter):
-            content = self._read_chapter(ch)
-            if content:
-                content = self._clean_fs_ids(content)
-                parts.append(f"【第{ch}章】\n{content}")
-        return "\n\n".join(parts)
-
-    def _clean_fs_ids(self, content: str) -> str:
-        """清洗FS编号（如FS-001、FS-002-Variant等）。"""
-        content = re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", content)
-        content = re.sub(r"[（(]\s*[）)]", "", content)
-        return content
-
-    def _chapter_path(self, ch_num: int) -> str:
-        """获取章节文件路径。"""
-        return os.path.join(self.project_dir, "chapters", f"第{ch_num}章.txt")
-
     def _get_chapter_summary(self, ch_num: int) -> str:
         """获取指定章节的摘要（前300字）。"""
         content = self._read_chapter(ch_num)
@@ -158,8 +123,125 @@ class ReviewEngine(BaseEngine):
 
     # ---- 公开 API ----
 
+    async def _review_dimension_phase1(self, ch_num: int, dim_key: str,
+                                       dim_name: str, dim_desc: str) -> Dict:
+        """阶段1（可并行）：读取章节内容 + 构建 prompt + 调用 LLM。
+        每个维度独立读取章节内容（因为并行时不能共享文件状态）。
+        返回 dict，包含 dim_key, dim_name, new_content, content，或 skipped/error 标记。
+        """
+        try:
+            # 读取当前章节全文（每个维度独立读取）
+            content = self._read_chapter(ch_num)
+            if not content:
+                return {"dim_key": dim_key, "dim_name": dim_name, "skipped": True, "reason": "empty_content"}
+
+            # 构建上下文
+            context_parts = []
+            kg_ctx = self.kg_adapter.format_character_context()
+            if kg_ctx:
+                context_parts.append(kg_ctx)
+            fs_ctx = self.kg_adapter.format_foreshadowing_context()
+            if fs_ctx:
+                context_parts.append(fs_ctx)
+
+            # 前后章摘要
+            prev_summary = self._get_chapter_summary(ch_num - 1)
+            next_summary = self._get_chapter_summary(ch_num + 1)
+            if prev_summary:
+                context_parts.append(f"【前一章摘要】\n{prev_summary}")
+            if next_summary:
+                context_parts.append(f"【下一章摘要】\n{next_summary}")
+
+            # 体裁规范
+            genre_injection = self.genre_adapter.get_writer_injection()
+            if genre_injection:
+                context_parts.append(genre_injection)
+
+            # 反幻觉上下文
+            guard_ctx = self.hallucination_guard.get_writing_context(ch_num)
+            if guard_ctx:
+                context_parts.append(guard_ctx)
+
+            # 构建prompt
+            system_prompt = (
+                f"你是一位专业的小说审校编辑。当前审校维度：{dim_desc}\n\n"
+                f"要求：\n"
+                f"1. 基于当前维度检查并修改章节内容\n"
+                f"2. 保留原有故事情节和人物关系\n"
+                f"3. 保留章节标题（第X章 ...）\n"
+                f"4. 直接输出修改后的完整章节全文，用中文撰写，不要输出JSON、分析报告或英文内容\n"
+                f"5. 如果当前维度没有问题，原样输出章节内容\n"
+                f"6. 你的输出将直接替换原章节文件，因此必须是一篇完整的中文小说章节\n"
+                f"7. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理\n\n"
+            )
+
+            # AI痕迹维度：注入前3章全文用于对比重复描写
+            if dim_key == "ai_trace":
+                prev_chapters = self._read_recent_chapters(3)
+                if prev_chapters:
+                    system_prompt += (
+                        f"【重复描写检测规则】\n"
+                        f"请对比以下前文，检测当前章节中与前文重复的描写模式，包括：\n"
+                        f"- 重复的动作描写（如反复攥拳、指节泛白、死死盯着）\n"
+                        f"- 重复的神态描写（如反复冷笑、嘴角扯出弧度）\n"
+                        f"- 重复的身体状态描写（如反复旧伤作痛、低血糖眩晕）\n"
+                        f"- 重复的比喻（如反复用'像刀'、'像冰'形容眼神）\n"
+                        f"为重复描写提供多样化的替代表达，使每章的描写方式各不相同。\n\n"
+                        f"【前文参考（用于对比重复）】\n{prev_chapters}\n\n"
+                    )
+                system_prompt += (
+                    f"【章节衔接规则】\n"
+                    f"章节开头必须与前一章结尾自然衔接。不要每章都用固定模式（如天气/场景描写）开头：\n"
+                    f"- 如果是延续前文场景，直接接续叙事\n"
+                    f"- 如果是切换场景，可以用场景描写开头\n"
+                    f"- 避免每章都以'雨'或天气描写开头\n\n"
+                )
+
+            # 跨章一致性维度：注入角色设定和前一章全文
+            if dim_key == "consistency":
+                # 注入角色身份设定
+                character_ctx = self.kg_adapter.format_character_context()
+                if character_ctx:
+                    system_prompt += (
+                        f"【角色身份设定 — 必须严格遵守，不得矛盾】\n"
+                        f"{character_ctx}\n\n"
+                    )
+                # 注入前一章全文作为参考（清洗FS编号）
+                prev_content = self._read_chapter(ch_num - 1) if ch_num > 1 else None
+                if prev_content:
+                    prev_content = self._clean_fs_ids(prev_content)
+                    system_prompt += (
+                        f"【前一章全文 — 当前章节必须与前文一致】\n"
+                        f"{prev_content}\n\n"
+                        f"请对照前一章检查：\n"
+                        f"- 角色身份是否矛盾（如前文说某人是分析师，本章不能说他是记者）\n"
+                        f"- 时间线是否矛盾（如前文某角色被囚禁，本章不能突然自由活动）\n"
+                        f"- 角色状态是否矛盾（如前文某角色受伤，本章不能突然痊愈）\n"
+                        f"- 关键事实是否矛盾（如伤疤来源、人物关系等）\n\n"
+                    )
+
+            system_prompt += "\n\n".join(context_parts)
+            user_prompt = f"【第{ch_num}章原文】\n{content}\n\n请基于「{dim_name}」维度审校并修改上述章节。{dim_desc}。注意：必须输出完整的中文小说章节全文，不要输出分析报告。"
+
+            # 调用LLM
+            if not self.llm.has_valid_config("writer"):
+                return {"dim_key": dim_key, "dim_name": dim_name, "skipped": True, "reason": "no_llm_config"}
+
+            new_content = await self.llm.call("writer", system_prompt, user_prompt)
+
+            return {
+                "dim_key": dim_key,
+                "dim_name": dim_name,
+                "new_content": new_content,
+                "content": content,
+            }
+        except Exception as e:
+            return {"dim_key": dim_key, "dim_name": dim_name, "error": str(e)}
+
     async def run_review(self) -> Dict:
-        """逐章逐维度审校修改。支持断点续校：跳过已完成的维度。"""
+        """逐章逐维度审校修改。支持断点续校：跳过已完成的维度。
+        同一章节的6个审校维度并行调用LLM，文件写回保持串行以避免冲突。
+        """
         chapters = self._get_all_chapters()
         results = {}
 
@@ -183,11 +265,15 @@ class ReviewEngine(BaseEngine):
         for ch_num in sorted(chapters.keys()):
             self._current_chapter = ch_num
 
-            # 检查取消
+            # 检查取消（章节级别，在并行启动前检查）
             if self.cancelled:
                 self._emit({"status": "review_cancelled", "chapter": ch_num, "reason": "用户取消"})
                 was_cancelled = True
                 break
+
+            # 阶段1：收集所有未跳过、未取消的维度任务，并行执行 LLM 调用
+            dim_tasks = []
+            collection_cancelled = False
 
             for dim_idx, (dim_key, dim_name, dim_desc) in enumerate(self._dimensions):
                 self._current_dimension = dim_idx
@@ -197,13 +283,13 @@ class ReviewEngine(BaseEngine):
                 if done_key in dimensions_done:
                     continue
 
-                # 检查取消
+                # 检查取消（在并行启动前检查）
                 if self.cancelled:
                     self._emit({"status": "review_cancelled", "chapter": ch_num, "dimension": dim_key, "reason": "用户取消"})
-                    was_cancelled = True
+                    collection_cancelled = True
                     break
 
-                # 推送进度
+                # 推送进度（reviewing 事件在并行启动前发送）
                 self._emit({
                     "status": "reviewing",
                     "chapter": ch_num,
@@ -212,178 +298,123 @@ class ReviewEngine(BaseEngine):
                     "message": f"正在审校第{ch_num}章 - {dim_name}"
                 })
 
-                # 读取当前章节全文
-                content = self._read_chapter(ch_num)
-                if not content:
-                    continue
+                # 收集阶段1任务
+                dim_tasks.append(self._review_dimension_phase1(ch_num, dim_key, dim_name, dim_desc))
 
-                # 构建上下文
-                context_parts = []
-                kg_ctx = self.kg_adapter.format_character_context()
-                if kg_ctx:
-                    context_parts.append(kg_ctx)
-                fs_ctx = self.kg_adapter.format_foreshadowing_context()
-                if fs_ctx:
-                    context_parts.append(fs_ctx)
+            if collection_cancelled:
+                # 清理未执行的协程，避免 "coroutine was never awaited" 警告
+                for task in dim_tasks:
+                    task.close()
+                was_cancelled = True
+                break
 
-                # 前后章摘要
-                prev_summary = self._get_chapter_summary(ch_num - 1)
-                next_summary = self._get_chapter_summary(ch_num + 1)
-                if prev_summary:
-                    context_parts.append(f"【前一章摘要】\n{prev_summary}")
-                if next_summary:
-                    context_parts.append(f"【下一章摘要】\n{next_summary}")
+            # 并行执行阶段1（LLM 调用最耗时，并行化加速）
+            if dim_tasks:
+                phase1_results = await asyncio.gather(*dim_tasks, return_exceptions=True)
 
-                # 体裁规范
-                genre_injection = self.genre_adapter.get_writer_injection()
-                if genre_injection:
-                    context_parts.append(genre_injection)
+                # 阶段2：串行处理结果（检查错误 + 写回文件 + 更新数据库 + 更新状态）
+                for result in phase1_results:
+                    # gather 中某个任务抛出异常（理论上 phase1 已捕获，但兜底）
+                    if isinstance(result, Exception):
+                        self._emit({"status": "warning", "message": f"审校阶段1异常: {result}"})
+                        continue
 
-                # 反幻觉上下文
-                guard_ctx = self.hallucination_guard.get_writing_context(ch_num)
-                if guard_ctx:
-                    context_parts.append(guard_ctx)
+                    dim_key = result["dim_key"]
+                    dim_name = result["dim_name"]
 
-                # 构建prompt
-                system_prompt = (
-                    f"你是一位专业的小说审校编辑。当前审校维度：{dim_desc}\n\n"
-                    f"要求：\n"
-                    f"1. 基于当前维度检查并修改章节内容\n"
-                    f"2. 保留原有故事情节和人物关系\n"
-                    f"3. 保留章节标题（第X章 ...）\n"
-                    f"4. 直接输出修改后的完整章节全文，用中文撰写，不要输出JSON、分析报告或英文内容\n"
-                    f"5. 如果当前维度没有问题，原样输出章节内容\n"
-                    f"6. 你的输出将直接替换原章节文件，因此必须是一篇完整的中文小说章节\n"
-                    f"7. 正文中禁止出现FS编号（如FS-001、FS-002等），伏笔编号仅用于大纲和知识图谱的内部管理\n\n"
-                )
+                    # 处理跳过情况
+                    if result.get("skipped"):
+                        continue
 
-                # AI痕迹维度：注入前3章全文用于对比重复描写
-                if dim_key == "ai_trace":
-                    prev_chapters = self._read_recent_chapters(3)
-                    if prev_chapters:
-                        system_prompt += (
-                            f"【重复描写检测规则】\n"
-                            f"请对比以下前文，检测当前章节中与前文重复的描写模式，包括：\n"
-                            f"- 重复的动作描写（如反复攥拳、指节泛白、死死盯着）\n"
-                            f"- 重复的神态描写（如反复冷笑、嘴角扯出弧度）\n"
-                            f"- 重复的身体状态描写（如反复旧伤作痛、低血糖眩晕）\n"
-                            f"- 重复的比喻（如反复用'像刀'、'像冰'形容眼神）\n"
-                            f"为重复描写提供多样化的替代表达，使每章的描写方式各不相同。\n\n"
-                            f"【前文参考（用于对比重复）】\n{prev_chapters}\n\n"
-                        )
-                    system_prompt += (
-                        f"【章节衔接规则】\n"
-                        f"章节开头必须与前一章结尾自然衔接。不要每章都用固定模式（如天气/场景描写）开头：\n"
-                        f"- 如果是延续前文场景，直接接续叙事\n"
-                        f"- 如果是切换场景，可以用场景描写开头\n"
-                        f"- 避免每章都以'雨'或天气描写开头\n\n"
-                    )
+                    # 处理异常
+                    if result.get("error"):
+                        self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校异常: {result['error']}"})
+                        continue
 
-                # 跨章一致性维度：注入角色设定和前一章全文
-                if dim_key == "consistency":
-                    # 注入角色身份设定
-                    character_ctx = self.kg_adapter.format_character_context()
-                    if character_ctx:
-                        system_prompt += (
-                            f"【角色身份设定 — 必须严格遵守，不得矛盾】\n"
-                            f"{character_ctx}\n\n"
-                        )
-                    # 注入前一章全文作为参考（清洗FS编号）
-                    prev_content = self._read_chapter(ch_num - 1) if ch_num > 1 else None
-                    if prev_content:
-                        prev_content = self._clean_fs_ids(prev_content)
-                        system_prompt += (
-                            f"【前一章全文 — 当前章节必须与前文一致】\n"
-                            f"{prev_content}\n\n"
-                            f"请对照前一章检查：\n"
-                            f"- 角色身份是否矛盾（如前文说某人是分析师，本章不能说他是记者）\n"
-                            f"- 时间线是否矛盾（如前文某角色被囚禁，本章不能突然自由活动）\n"
-                            f"- 角色状态是否矛盾（如前文某角色受伤，本章不能突然痊愈）\n"
-                            f"- 关键事实是否矛盾（如伤疤来源、人物关系等）\n\n"
-                        )
+                    new_content = result.get("new_content")
+                    content = result.get("content")
 
-                system_prompt += "\n\n".join(context_parts)
-                user_prompt = f"【第{ch_num}章原文】\n{content}\n\n请基于「{dim_name}」维度审校并修改上述章节。{dim_desc}。注意：必须输出完整的中文小说章节全文，不要输出分析报告。"
+                    # LLM 错误检查：错误响应不当合法内容处理
+                    if not new_content or not new_content.strip() or is_llm_error(new_content):
+                        error_msg = new_content[:200] if new_content else "空响应"
+                        self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校LLM错误: {error_msg}"})
+                        continue
 
-                # 调用LLM
-                if self.llm.has_valid_config("writer"):
-                    new_content = await self.llm.call("writer", system_prompt, user_prompt)
-                else:
-                    continue
+                    # 尝试从markdown代码块中提取内容（LLM可能用```包裹）
+                    if new_content and len(re.findall(r'[\u4e00-\u9fff]', new_content)) == 0:
+                        code_block_match = re.search(r'```(?:markdown|md|text)?\s*\n([\s\S]*?)\n```', new_content)
+                        if code_block_match:
+                            new_content = code_block_match.group(1)
 
-                # 尝试从markdown代码块中提取内容（LLM可能用```包裹）
-                if new_content and len(re.findall(r'[\u4e00-\u9fff]', new_content)) == 0:
-                    code_block_match = re.search(r'```(?:markdown|md|text)?\s*\n([\s\S]*?)\n```', new_content)
-                    if code_block_match:
-                        new_content = code_block_match.group(1)
+                    # 内容变空/缩水检测
+                    if not new_content or not new_content.strip():
+                        self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后内容为空，跳过"})
+                        continue
 
-                # 内容变空/缩水检测
-                if not new_content or not new_content.strip():
-                    self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后内容为空，跳过"})
-                    continue
+                    original_cn = len(re.findall(r'[\u4e00-\u9fff]', content))
+                    new_cn = len(re.findall(r'[\u4e00-\u9fff]', new_content))
+                    if new_cn < original_cn * 0.5 and original_cn > 500:
+                        self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后字数大幅缩水({new_cn}←{original_cn})，跳过"})
+                        continue
 
-                original_cn = len(re.findall(r'[\u4e00-\u9fff]', content))
-                new_cn = len(re.findall(r'[\u4e00-\u9fff]', new_content))
-                if new_cn < original_cn * 0.5 and original_cn > 500:
-                    self._emit({"status": "warning", "message": f"第{ch_num}章{dim_name}审校后字数大幅缩水({new_cn}←{original_cn})，跳过"})
-                    continue
+                    # 判断是否有实质修改并生成报告
+                    content_changed = new_content.strip() != content.strip()
+                    if content_changed:
+                        diff_cn = new_cn - original_cn
+                        sign = "+" if diff_cn >= 0 else ""
+                        # 生成简洁的修改摘要
+                        old_lines = content.splitlines()
+                        new_lines = new_content.splitlines()
+                        diff = list(difflib.unified_diff(old_lines, new_lines, lineterm='', n=0))
+                        added = [l[1:].strip() for l in diff if l.startswith('+') and not l.startswith('+++')]
+                        removed = [l[1:].strip() for l in diff if l.startswith('-') and not l.startswith('---')]
+                        report_parts = [f"第{ch_num}章{dim_name}审校完成，已修改（{sign}{diff_cn}字）"]
+                        if removed:
+                            sample_removed = removed[:3]
+                            report_parts.append(f"删除{len(removed)}行，如：{'；'.join(sample_removed[:2])}")
+                        if added:
+                            sample_added = added[:3]
+                            report_parts.append(f"新增{len(added)}行，如：{'；'.join(sample_added[:2])}")
+                        self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": True, "message": "，".join(report_parts)})
+                    else:
+                        self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": False, "message": f"第{ch_num}章{dim_name}审校完成，无需修改"})
 
-                # 判断是否有实质修改并生成报告
-                content_changed = new_content.strip() != content.strip()
-                if content_changed:
-                    diff_cn = new_cn - original_cn
-                    sign = "+" if diff_cn >= 0 else ""
-                    # 生成简洁的修改摘要
-                    old_lines = content.splitlines()
-                    new_lines = new_content.splitlines()
-                    diff = list(difflib.unified_diff(old_lines, new_lines, lineterm='', n=0))
-                    added = [l[1:].strip() for l in diff if l.startswith('+') and not l.startswith('+++')]
-                    removed = [l[1:].strip() for l in diff if l.startswith('-') and not l.startswith('---')]
-                    report_parts = [f"第{ch_num}章{dim_name}审校完成，已修改（{sign}{diff_cn}字）"]
-                    if removed:
-                        sample_removed = removed[:3]
-                        report_parts.append(f"删除{len(removed)}行，如：{'；'.join(sample_removed[:2])}")
-                    if added:
-                        sample_added = added[:3]
-                        report_parts.append(f"新增{len(added)}行，如：{'；'.join(sample_added[:2])}")
-                    self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": True, "message": "，".join(report_parts)})
-                else:
-                    self._emit({"status": "review_dim_done", "chapter": ch_num, "dimension": dim_key, "dimension_name": dim_name, "changed": False, "message": f"第{ch_num}章{dim_name}审校完成，无需修改"})
+                    # 写回章节文件前，清洗元数据标记和FS编号
+                    new_content = self._clean_chapter_content(new_content)
 
-                # 写回章节文件前，清洗元数据标记和FS编号
-                new_content = self._clean_chapter_content(new_content)
+                    # 写回章节文件
+                    self._write_atomic(self._chapter_path(ch_num), new_content)
 
-                # 写回章节文件
-                self._write_atomic(self._chapter_path(ch_num), new_content)
+                    # 同步更新数据库标题
+                    try:
+                        from project_db import ProjectDB
+                        db = ProjectDB(self.project_name)
+                        title = extract_chapter_title(new_content)
+                        db.upsert_chapter(chapter_index=ch_num, title=title, status="reviewed")
+                        db.close()
+                    except Exception as e:
+                        self._emit({"status": "warning", "message": f"第{ch_num}章DB标题同步失败: {e}"})
 
-                # 同步更新数据库标题
-                try:
-                    from project_db import ProjectDB
-                    db = ProjectDB(self.project_name)
-                    title = extract_chapter_title(new_content)
-                    db.upsert_chapter(chapter_index=ch_num, title=title, status="reviewed")
-                    db.close()
-                except Exception as e:
-                    self._emit({"status": "warning", "message": f"第{ch_num}章DB标题同步失败: {e}"})
+                    # 简单硬性检查
+                    has_title = bool(re.match(r'#?\s*第\d+章', new_content))
+                    word_ratio = new_cn / original_cn if original_cn > 0 else 1.0
 
-                # 简单硬性检查
-                has_title = bool(re.match(r'#?\s*第\d+章', new_content))
-                word_ratio = new_cn / original_cn if original_cn > 0 else 1.0
+                    results[f"ch{ch_num}_{dim_key}"] = {
+                        "chapter": ch_num,
+                        "dimension": dim_name,
+                        "word_ratio": round(word_ratio, 2),
+                        "has_title": has_title,
+                        "passed": has_title and word_ratio >= 0.8,
+                    }
 
-                results[f"ch{ch_num}_{dim_key}"] = {
-                    "chapter": ch_num,
-                    "dimension": dim_name,
-                    "word_ratio": round(word_ratio, 2),
-                    "has_title": has_title,
-                    "passed": has_title and word_ratio >= 0.8,
-                }
+                    dimensions_done.add(f"ch{ch_num}_{dim_key}")
+                    review_data = self.state.data.setdefault("review", {})
+                    review_data["dimensions_done"] = list(dimensions_done)
+                    self.state.save()
 
-                dimensions_done.add(done_key)
-                review_data = self.state.data.setdefault("review", {})
-                review_data["dimensions_done"] = list(dimensions_done)
-                self.state.save()
-
-            if was_cancelled:
+            # 章节循环结束检查取消（并行期间可能被取消，下一章前检查）
+            if self.cancelled:
+                was_cancelled = True
                 break
 
         # 根据是否被取消设置不同状态

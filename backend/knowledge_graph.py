@@ -100,11 +100,13 @@ class KnowledgeGraph:
     """知识图谱主类。"""
 
     GRAPH_FILENAME = "knowledge_graph.json"
+    BACKUP_FILENAME = "knowledge_graph.json.bak"
 
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
         self.memory_dir = os.path.join(project_dir, "memory")
         self.graph_path = os.path.join(self.memory_dir, self.GRAPH_FILENAME)
+        self.backup_path = os.path.join(self.memory_dir, self.BACKUP_FILENAME)
         self.nodes: Dict[str, Dict] = {}
         self.edges: Dict[str, Dict] = {}
         self._loaded = False
@@ -119,15 +121,45 @@ class KnowledgeGraph:
             "edges": self.edges,
             "last_ingest": time.time(),
         }
+        # 先写入临时文件，成功后原子替换，并备份旧文件
+        tmp_path = self.graph_path + ".tmp"
         try:
-            with open(self.graph_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            # 备份当前正式文件（若存在）
+            if os.path.isfile(self.graph_path):
+                try:
+                    if os.path.isfile(self.backup_path):
+                        os.remove(self.backup_path)
+                    os.rename(self.graph_path, self.backup_path)
+                except Exception:
+                    pass
+            os.replace(tmp_path, self.graph_path)
             return True
         except Exception:
+            # 清理临时文件
+            try:
+                if os.path.isfile(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             return False
 
     def load(self) -> bool:
         if not os.path.isfile(self.graph_path):
+            # 尝试从备份恢复
+            if os.path.isfile(self.backup_path):
+                try:
+                    with open(self.backup_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self.nodes = data.get("nodes", {})
+                    self.edges = data.get("edges", {})
+                    self._loaded = True
+                    # 恢复后立即保存为正式文件
+                    self.save()
+                    return True
+                except Exception:
+                    pass
             self._loaded = True
             return False
         try:
@@ -138,6 +170,21 @@ class KnowledgeGraph:
             self._loaded = True
             return True
         except Exception:
+            # 正式文件损坏，尝试从备份恢复
+            if os.path.isfile(self.backup_path):
+                try:
+                    with open(self.backup_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self.nodes = data.get("nodes", {})
+                    self.edges = data.get("edges", {})
+                    self._loaded = True
+                    self.save()
+                    return True
+                except Exception:
+                    pass
+            # 备份也损坏，初始化空图谱
+            self.nodes = {}
+            self.edges = {}
             self._loaded = True
             return False
 

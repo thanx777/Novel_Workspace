@@ -3,6 +3,7 @@
 从 executor.py 迁移而来，消除对旧引擎的依赖。
 """
 
+import asyncio
 import httpx
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
@@ -26,6 +27,26 @@ class AgentConfig(BaseModel):
 # call_llm — 统一 LLM 调用
 # ============================================
 
+# 可重试的 HTTP 状态码（5xx 服务端错误 + 429 限流）
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # 指数退避基数（秒）
+
+
+def _is_retryable_error(error_msg: str) -> bool:
+    """判断错误信息是否值得重试（超时、限流、服务端错误）。"""
+    low = error_msg.lower()
+    if "timed out" in low or "timeout" in low:
+        return True
+    if "429" in error_msg or "rate" in low:
+        return True
+    if any(f"{code}" in error_msg for code in ("500", "502", "503", "504")):
+        return True
+    if "connection" in low or "reset" in low or "temporarily" in low:
+        return True
+    return False
+
+
 async def call_llm(
     config: AgentConfig,
     system_prompt: str,
@@ -42,80 +63,98 @@ async def call_llm(
         return "[LLM_ERROR: API Key 未配置]"
     if not base_url or not model:
         return "[LLM_ERROR: Base URL 或模型名未配置]"
-    try:
-        if api_format == "claude":
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
 
-            payload = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
-                ],
-                "temperature": 0.7
-            }
+    last_error = ""
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            if api_format == "claude":
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                }
 
-            async with httpx.AsyncClient(timeout=request_timeout_seconds) as client:
-                response = await client.post(base_url, json=payload, headers=headers)
+                payload = {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
+                    ],
+                    "temperature": 0.7
+                }
 
-            if response.status_code != 200:
-                return f"[LLM_ERROR: {response.status_code} - {response.text[:500]}]"
+                async with httpx.AsyncClient(timeout=request_timeout_seconds) as client:
+                    response = await client.post(base_url, json=payload, headers=headers)
 
-            result = response.json()
-            full_content = result.get("content", [{}])[0].get("text", "")
+                if response.status_code != 200:
+                    err_text = f"{response.status_code} - {response.text[:500]}"
+                    if response.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
+                        last_error = err_text
+                        await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                        continue
+                    return f"[LLM_ERROR: {err_text}]"
 
-        else:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=request_timeout_seconds, max_retries=0)
-            kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": max_tokens
-            }
+                result = response.json()
+                full_content = result.get("content", [{}])[0].get("text", "")
 
-            if config.chat_template_kwargs:
-                kwargs["extra_body"] = {"chat_template_kwargs": config.chat_template_kwargs}
-            elif "nvidia.com" in base_url:
-                kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": False}}
-            elif "deepseek.com" in base_url:
-                mode = getattr(config, "thinking_mode", None) or "disabled"
-                kwargs["extra_body"] = {"thinking": {"type": mode}}
-            kwargs["stream"] = False
+            else:
+                # openai SDK 自带 max_retries，但仅对连接错误/5xx/429 重试
+                client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=request_timeout_seconds, max_retries=3)
+                kwargs = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": max_tokens
+                }
 
-            response = await client.chat.completions.create(**kwargs)
+                if config.chat_template_kwargs:
+                    kwargs["extra_body"] = {"chat_template_kwargs": config.chat_template_kwargs}
+                elif "nvidia.com" in base_url:
+                    kwargs["extra_body"] = {"chat_template_kwargs": {"thinking": False}}
+                elif "deepseek.com" in base_url:
+                    mode = getattr(config, "thinking_mode", None) or "disabled"
+                    kwargs["extra_body"] = {"thinking": {"type": mode}}
+                kwargs["stream"] = False
 
-            full_content = ""
-            if response.choices and response.choices[0].message:
-                msg = response.choices[0].message
-                full_content = msg.content or ""
-                if not full_content.strip() and getattr(msg, "reasoning_content", None):
-                    full_content = msg.reasoning_content or ""
+                response = await client.chat.completions.create(**kwargs)
 
-        if not full_content.strip():
-            return "[LLM_ERROR: 模型返回为空，可能是当前模型不支持该请求格式]"
-        return full_content
-    except Exception as e:
-        error_msg = str(e)
-        if "timed out" in error_msg.lower():
-            if "nvidia.com" in base_url:
-                return f"[LLM_ERROR: NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度]"
-            return f"[LLM_ERROR: 请求超时]"
-        elif "401" in error_msg or "api_key" in error_msg.lower():
-            return f"[LLM_ERROR: API Key 无效或认证失败]"
-        elif "403" in error_msg:
-            return f"[LLM_ERROR: 访问被拒绝]"
-        elif "404" in error_msg or "not found" in error_msg.lower():
-            return f"[LLM_ERROR: 模型不存在]"
-        elif "429" in error_msg or "rate" in error_msg.lower():
-            return f"[LLM_ERROR: 请求频率过高]"
-        return f"[LLM_ERROR: {error_msg[:300]}]"
+                full_content = ""
+                if response.choices and response.choices[0].message:
+                    msg = response.choices[0].message
+                    full_content = msg.content or ""
+                    if not full_content.strip() and getattr(msg, "reasoning_content", None):
+                        full_content = msg.reasoning_content or ""
+
+            if not full_content.strip():
+                return "[LLM_ERROR: 模型返回为空，可能是当前模型不支持该请求格式]"
+            return full_content
+        except Exception as e:
+            error_msg = str(e)
+            last_error = error_msg
+            # 判断是否可重试
+            if attempt < _MAX_RETRIES and _is_retryable_error(error_msg):
+                await asyncio.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+                continue
+
+            if "timed out" in error_msg.lower():
+                if "nvidia.com" in base_url:
+                    return f"[LLM_ERROR: NVIDIA API 超时。建议尝试更快的模型或减少任务复杂度]"
+                return f"[LLM_ERROR: 请求超时]"
+            elif "401" in error_msg or "api_key" in error_msg.lower():
+                return f"[LLM_ERROR: API Key 无效或认证失败]"
+            elif "403" in error_msg:
+                return f"[LLM_ERROR: 访问被拒绝]"
+            elif "404" in error_msg or "not found" in error_msg.lower():
+                return f"[LLM_ERROR: 模型不存在]"
+            elif "429" in error_msg or "rate" in error_msg.lower():
+                return f"[LLM_ERROR: 请求频率过高]"
+            return f"[LLM_ERROR: {error_msg[:300]}]"
+
+    # 所有重试都失败
+    return f"[LLM_ERROR: 重试 {_MAX_RETRIES} 次后仍失败: {last_error[:300]}]"
 
 
 def is_llm_error(text: str) -> bool:

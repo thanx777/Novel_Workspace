@@ -1,6 +1,7 @@
 """BaseEngine — 三引擎共享的 MWR 循环骨架。"""
 
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -78,22 +79,22 @@ class BaseEngine(ABC):
         self.yield_func = yield_func or (lambda x: None)
         self.cancelled = False  # 外部可设置，用于中断 MWR 循环
 
-        # 引擎配置与提示词
-        self.mode_config = ENGINE_CONFIG
+        # 引擎配置与提示词（深拷贝避免污染全局 ENGINE_CONFIG）
+        self.mode_config = dict(ENGINE_CONFIG)
         self.prompts = get_formatted_prompts()
 
-        # 从项目DB读取项目级字数配置，覆盖全局默认值
+        # 从项目DB读取项目级配置，覆盖全局默认值
         try:
             from project_db import ProjectDB
             db = ProjectDB(project_name)
             proj = db.get_project()
             if proj:
-                for key in ("word_count_min", "word_count_max", "max_rounds_writing", "max_rounds_outline"):
+                for key in ("word_count_min", "word_count_max", "max_rounds_writing", "max_rounds_outline", "max_polish_rounds"):
                     val = proj.get(key)
                     if val is not None:
                         self.mode_config[key] = int(val)
-        except Exception:
-            pass  # DB不可用时使用全局默认值
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"读取项目配置失败，使用默认值: {e}"})
 
         # 使用项目级字数配置创建 HallucinationGuardAdapter（实例级，不污染类属性）
         self.hallucination_guard = HallucinationGuardAdapter(
@@ -105,6 +106,67 @@ class BaseEngine(ABC):
         """发送状态更新。"""
         if self.yield_func:
             self.yield_func(data)
+
+    # ---- 公共文件操作（子类共享，避免重复代码）----
+
+    def _chapter_path(self, chapter_num: int) -> str:
+        """获取章节文件路径，确保目录存在。"""
+        d = os.path.join(self.project_dir, "chapters")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, f"第{chapter_num}章.txt")
+
+    def _write_atomic(self, path: str, content: str):
+        """原子写入文件：先写 .tmp，再 os.replace 替换。"""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+
+    def _read_chapter(self, chapter_num: int) -> str:
+        """读取指定章节全文，不存在则返回空字符串。"""
+        path = self._chapter_path(chapter_num)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        return ""
+
+    def _clean_fs_ids(self, content: str) -> str:
+        """清洗 LLM 输出中的 FS 编号（如 FS-001、FS-002-Variant 等）。"""
+        content = re.sub(r"\bFS-\d+(?:-\d+)?(?:-Variant)?\b", "", content)
+        content = re.sub(r"[（(]\s*[）)]", "", content)
+        return content
+
+    def _read_recent_chapters(self, n: int = 3) -> str:
+        """读取最近章节上下文：前2章给结尾摘要，紧邻章给全文以保证完美衔接。"""
+        parts = []
+        start = max(1, self._current_chapter - n)
+        for ch in range(start, self._current_chapter):
+            is_adjacent = (ch == self._current_chapter - 1)
+            content = self._read_chapter(ch)
+            if content:
+                content = self._clean_fs_ids(content)
+                if is_adjacent:
+                    # 紧邻章：注入全文，保证完美衔接
+                    parts.append(f"【第{ch}章·全文 — 必须自然衔接】\n{content}")
+                else:
+                    # 前2章：只注入结尾段落（KG 前情提要在融合记忆中已全局覆盖）
+                    tail_len = 500
+                    if len(content) > tail_len:
+                        content = f"[前文摘要]\n{content[-tail_len:]}"
+                    parts.append(f"【第{ch}章·结尾】\n{content}")
+        return "\n\n".join(parts)
+
+    def _format_feedback_context(self, result: ReviewResult) -> str:
+        """格式化 Reviewer 反馈，供下一轮 Writer 使用。"""
+        parts = []
+        if result.issues:
+            parts.append("问题：\n" + "\n".join(f"- {i}" for i in result.issues))
+        if result.suggestions:
+            parts.append("建议：\n" + "\n".join(f"- {s}" for s in result.suggestions))
+        if result.hallucination_warnings:
+            parts.append("幻觉警告：\n" + "\n".join(f"- {w}" for w in result.hallucination_warnings))
+        return "\n\n".join(parts)
 
     async def run_mwr_cycle(self, max_rounds: int = 5,
                             score_threshold: float = 8.0) -> ReviewResult:
@@ -144,9 +206,12 @@ class BaseEngine(ABC):
             task = self.manager_decide(round_num, last_result)
             self._emit({"status": "manager_decided", "round": round_num, "action": task.action})
 
-            # accept_current：润色用尽，直接结束循环
+            # accept_current：润色用尽，走 final_decision 钩子后结束循环
             if task.action == "accept_current":
                 self._emit({"status": "cycle_ended", "accepted": True, "reason": "润色次数用尽，接受当前内容"})
+                final = self.manager_final_decision()
+                if final.accepted:
+                    self._on_cycle_completed(round_num, last_result)
                 return last_result or ReviewResult(score=0.0, issues=["润色用尽"])
 
             # 2. Writer 执行
@@ -205,11 +270,12 @@ class BaseEngine(ABC):
                 for issue in current_issues_set:
                     new_issue_counts[issue] = self._issue_consecutive_counts.get(issue, 0) + 1
                 self._issue_consecutive_counts = new_issue_counts
-                stuck_issues = [iss for iss, cnt in self._issue_consecutive_counts.items() if cnt >= 5]
+                stuck_issues = [iss for iss, cnt in self._issue_consecutive_counts.items() if cnt >= 3]
                 if stuck_issues:
                     self._emit({"status": "cycle_stuck", "round": round_num,
-                                "reason": f"连续5轮未解决问题: {stuck_issues[:3]}，继续尝试"})
+                                "reason": f"连续3轮未解决问题: {stuck_issues[:3]}，提前退出"})
                     self._issue_consecutive_counts = {}
+                    break
             else:
                 self._issue_consecutive_counts = {}
 

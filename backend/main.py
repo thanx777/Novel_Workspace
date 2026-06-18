@@ -28,16 +28,25 @@ def _resolve_workspace_dir(path: str, default_name: str) -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), default_name))
 
 def get_full_path(filename: str) -> str:
-    """Get full path for a workspace file."""
-    return os.path.join(WORKSPACE_DIR, filename)
+    """Get full path for a workspace file, with path traversal protection."""
+    full = os.path.abspath(os.path.join(WORKSPACE_DIR, filename))
+    if not full.startswith(os.path.abspath(WORKSPACE_DIR)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return full
+
+def safe_join(root: str, *paths: str) -> str:
+    """安全拼接路径，防止路径穿越。返回的绝对路径必须在 root 内。"""
+    root_abs = os.path.abspath(root)
+    full = os.path.abspath(os.path.join(root_abs, *paths))
+    if not full.startswith(root_abs + os.sep) and full != root_abs:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return full
 
 class FileContent(BaseModel):
     content: str
 
 class WorkspaceConfig(BaseModel):
     path: str
-from agent_loader import load_all_agents, build_role_catalog, get_agent_by_name
-from skill_loader import load_all_skills, load_skill_content, save_skill, delete_skill, search_skills
 from test_runner import parse_test_instructions, execute_test, terminal_executor_stream, is_dangerous, execute_terminal_force
 
 # V2 API Router（分层大纲 + 知识图谱）
@@ -83,9 +92,23 @@ class TerminalManager:
 
 app = FastAPI()
 
+# CORS 白名单：仅允许本地开发前端访问，避免任意源跨域
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -267,7 +290,7 @@ class FolderStructure(BaseModel):
 
 @app.get("/api/workspace/files")
 def list_files(folder: str = ""):
-    target_dir = os.path.join(WORKSPACE_DIR, folder) if folder else WORKSPACE_DIR
+    target_dir = safe_join(WORKSPACE_DIR, folder) if folder else os.path.abspath(WORKSPACE_DIR)
     if not os.path.isdir(target_dir):
         return {"files": [], "folder": folder}
     files = []
@@ -280,7 +303,8 @@ def list_files(folder: str = ""):
 @app.post("/api/workspace/folders")
 def create_folders(structure: FolderStructure):
     for folder in structure.folders:
-        os.makedirs(os.path.join(WORKSPACE_DIR, folder), exist_ok=True)
+        target = safe_join(WORKSPACE_DIR, folder)
+        os.makedirs(target, exist_ok=True)
     return {"status": "success"}
 
 @app.get("/api/workspace/files/{filename:path}")
@@ -361,16 +385,8 @@ def get_prompt_templates():
 
 @app.get("/api/agent-catalog")
 def get_agent_catalog():
-    agents_list = load_all_agents()
-    agents = []
-    for a in agents_list:
-        agents.append({
-            "name": a["name"],
-            "description": a["description"],
-            "emoji": a["emoji"],
-            "department": a["department"],
-        })
-    return {"agents": agents}
+    """角色目录（已迁移到新引擎，此端点保留兼容，返回空列表）。"""
+    return {"agents": []}
 
 # ============================================
 # API — Optimize Prompt
@@ -607,7 +623,7 @@ async def terminal_websocket(websocket: WebSocket):
 
 from project_db import (
     ProjectDB, list_all_projects, create_project, delete_project,
-    get_project_file, read_file_safe, write_file_safe,
+    get_project_file, get_project_dir, read_file_safe, write_file_safe,
     WORKSPACE_DIR as PDB_WS, PROJECTS_DIR as PDB_PJ,
 )
 from assistant import ProjectAssistant
@@ -1166,9 +1182,8 @@ def v2_get_project_file(project_name: str, file_path: str):
     章节文件（chapters/*.txt）返回时清洗元数据标记，源文件保留。
     """
     try:
-        if ".." in file_path:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        full_path = get_project_file(project_name, file_path)
+        project_dir = get_project_dir(project_name)
+        full_path = safe_join(project_dir, file_path)
         if not os.path.exists(full_path):
             raise HTTPException(status_code=404, detail="File not found")
         with open(full_path, "r", encoding="utf-8") as f:
@@ -1190,10 +1205,9 @@ def v2_get_project_file(project_name: str, file_path: str):
 def v2_put_project_file(project_name: str, file_path: str, body: dict):
     """写入项目内任意文件。"""
     try:
-        if ".." in file_path:
-            raise HTTPException(status_code=400, detail="Invalid path")
+        project_dir = get_project_dir(project_name)
         content = body.get("content", "")
-        full_path = get_project_file(project_name, file_path)
+        full_path = safe_join(project_dir, file_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)

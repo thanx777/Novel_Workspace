@@ -97,7 +97,77 @@ export default function Workbench({
   const [aiMode, setAiMode] = useState(false)
   const [aiInstruction, setAiInstruction] = useState("")
   const [aiLoading, setAiLoading] = useState(false)
-  const engineActionLock = useRef(false)  // 防止 handleEngineAction 重入
+  const engineActionLock = useRef({})  // 防止 handleEngineAction 重入
+
+  // ---- Volume (分卷) 展开/折叠 ----
+  // volumes: [{ num, name, startChapter, endChapter }]
+  const [volumes, setVolumes] = useState([])
+  const [expandedVolumes, setExpandedVolumes] = useState({})  // { volNum: true/false }
+
+  // 从 L1 大纲解析分卷信息；解析失败则按每 30 章自动分组
+  useEffect(() => {
+    if (!activeProject?.name || !getFile) {
+      setVolumes([])
+      setExpandedVolumes({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const l1 = await getFile(activeProject.name, "outline_L1.md")
+      if (cancelled) return
+      const chapters = activeProject.chapters || []
+      const total = activeProject.total_chapters || chapters.length || 0
+      let parsed = []
+      if (l1) {
+        // 匹配 "### 第X卷 卷名" 块
+        const volRegex = /###\s*第\s*(\d+)\s*卷\s*[：:]*\s*(.+?)(?=\n###|\n##|\n#|$)/gs
+        let m
+        const rawVols = []
+        while ((m = volRegex.exec(l1)) !== null) {
+          const num = parseInt(m[1], 10)
+          const name = m[2].trim().split("\n")[0].trim()
+          // 尝试提取卷总章节
+          const block = m[2]
+          const chMatch = block.match(/卷总章节\*{0,2}\s*[：:]*\s*\*{0,2}\s*(\d+)/)
+          const chCount = chMatch ? parseInt(chMatch[1], 10) : 0
+          rawVols.push({ num, name, chCount })
+        }
+        // 计算每卷的章节范围
+        let cursor = 1
+        for (const v of rawVols) {
+          const cnt = v.chCount > 0 ? v.chCount : 30
+          parsed.push({
+            num: v.num,
+            name: v.name || `第${v.num}卷`,
+            startChapter: cursor,
+            endChapter: cursor + cnt - 1,
+          })
+          cursor += cnt
+        }
+      }
+      // 兜底：按每 30 章自动分组
+      if (parsed.length === 0 && total > 0) {
+        const perVol = 30
+        const volCount = Math.ceil(total / perVol)
+        for (let i = 0; i < volCount; i++) {
+          parsed.push({
+            num: i + 1,
+            name: `第${i + 1}卷`,
+            startChapter: i * perVol + 1,
+            endChapter: Math.min((i + 1) * perVol, total),
+          })
+        }
+      }
+      if (cancelled) return
+      setVolumes(parsed)
+      // 默认展开第一卷和包含当前选中章节的卷
+      const init = {}
+      parsed.forEach(v => { init[v.num] = false })
+      if (parsed.length > 0) init[parsed[0].num] = true
+      setExpandedVolumes(init)
+    })()
+    return () => { cancelled = true }
+  }, [activeProject?.name, activeProject?.total_chapters, activeProject?.chapters?.length, getFile])
 
   // Sync editDraft when chapterDraft changes
   useEffect(() => { setEditDraft(chapterDraft) }, [chapterDraft])
@@ -107,6 +177,7 @@ export default function Workbench({
   const [newName, setNewName] = useState("")
   const [newGenre, setNewGenre] = useState("")
   const [newExtraReqs, setNewExtraReqs] = useState("")
+  const [newTotalChapters, setNewTotalChapters] = useState(0)
   const [newWordCountMin, setNewWordCountMin] = useState(3000)
   const [newWordCountMax, setNewWordCountMax] = useState(5000)
   const [newMaxRoundsWriting, setNewMaxRoundsWriting] = useState(10)
@@ -414,7 +485,7 @@ export default function Workbench({
       name: newName.trim(),
       title: "",  // 标题由大纲生成阶段产生
       genre: newGenre,
-      total_chapters: 0,
+      total_chapters: Number(newTotalChapters) || 0,
       outline_layers: { L1: true, L2: true },
       extra_requirements: newExtraReqs.trim(),
       role_presets: rolePresets,
@@ -427,6 +498,7 @@ export default function Workbench({
       setNewName("")
       setNewGenre("")
       setNewExtraReqs("")
+      setNewTotalChapters(0)
       setNewWordCountMin(3000)
       setNewWordCountMax(5000)
       setNewManagerIdx(-1); setNewWorkerIdx(-1); setNewReviewerIdx(-1)
@@ -642,17 +714,66 @@ export default function Workbench({
                   ))}
                 </div>
                 <div className="wb-sidebar-content" style={{ flex: 1, overflowY: "auto" }}>
-                  {/* 章节列表 */}
+                  {/* 章节列表 — 按分卷展开/折叠 */}
                   {activeSidePanel === "chapters" && (
                     <div className="chapter-items">
-                      {(activeProject.chapters || []).map((c) => (
-                        <div key={c.chapter_index} className="chapter-item"
-                          onClick={() => handleSelectChapter(c)}>
-                          <div className="chapter-item-num">{c.chapter_index}</div>
-                          <div className="chapter-item-name">{c.title || (language === "zh" ? "(未命名)" : "(Untitled)")}</div>
-                        </div>
-                      ))}
-                      {activeProject.chapters?.length === 0 && (
+                      {volumes.length > 0 ? (
+                        volumes.map(vol => {
+                          const volChapters = (activeProject.chapters || []).filter(c =>
+                            c.chapter_index >= vol.startChapter && c.chapter_index <= vol.endChapter
+                          )
+                          const isExpanded = expandedVolumes[vol.num]
+                          const doneCount = volChapters.filter(c => c.status === "completed" || c.word_count > 0).length
+                          return (
+                            <div key={vol.num} className="volume-group">
+                              <div
+                                className="volume-header"
+                                onClick={() => setExpandedVolumes(prev => ({ ...prev, [vol.num]: !prev[vol.num] }))}
+                                style={{
+                                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                                  padding: "6px 10px", cursor: "pointer",
+                                  background: isExpanded ? "var(--bg-active, rgba(99,102,241,0.1))" : "transparent",
+                                  borderBottom: "1px solid var(--border)",
+                                  fontSize: 12, fontWeight: 600, userSelect: "none",
+                                }}
+                              >
+                                <span>
+                                  <span style={{ display: "inline-block", width: 12, transition: "transform 0.15s", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
+                                  {" "}第{vol.num}卷 · {vol.name}
+                                </span>
+                                <span style={{ fontSize: 10, opacity: 0.6 }}>
+                                  {doneCount}/{volChapters.length || (vol.endChapter - vol.startChapter + 1)} 章
+                                </span>
+                              </div>
+                              {isExpanded && (
+                                <div className="volume-chapters">
+                                  {volChapters.length > 0 ? volChapters.map(c => (
+                                    <div key={c.chapter_index} className="chapter-item"
+                                      onClick={() => handleSelectChapter(c)}>
+                                      <div className="chapter-item-num">{c.chapter_index}</div>
+                                      <div className="chapter-item-name">{c.title || (language === "zh" ? "(未命名)" : "(Untitled)")}</div>
+                                    </div>
+                                  )) : (
+                                    <div className="chapter-list-empty" style={{ padding: "8px 16px", fontSize: 11 }}>
+                                      {language === "zh" ? "本卷暂无章节" : "No chapters in this volume"}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })
+                      ) : (
+                        // 无分卷信息时，平铺显示
+                        (activeProject.chapters || []).map((c) => (
+                          <div key={c.chapter_index} className="chapter-item"
+                            onClick={() => handleSelectChapter(c)}>
+                            <div className="chapter-item-num">{c.chapter_index}</div>
+                            <div className="chapter-item-name">{c.title || (language === "zh" ? "(未命名)" : "(Untitled)")}</div>
+                          </div>
+                        ))
+                      )}
+                      {activeProject.chapters?.length === 0 && volumes.length === 0 && (
                         <div className="chapter-list-empty">{language === "zh" ? "无章节" : "No chapters"}</div>
                       )}
                     </div>
@@ -837,8 +958,8 @@ export default function Workbench({
                                 try { await stopTask(activeProject.name) } catch {}
                                 return
                               }
-                              if (engineActionLock.current) return  // 防止重入（仅限启动）
-                              engineActionLock.current = true
+                              if (engineActionLock.current[stage.key]) return  // 防止同阶段重入（仅限启动）
+                              engineActionLock.current[stage.key] = true
                               try {
                                 // 清空日志并切换到日志面板
                                 clearRunLogsLocal()
@@ -862,7 +983,7 @@ export default function Workbench({
                                   await engineReviewStart(activeProject.name, { onLogEvent: appendRunLog })
                                 }
                               } finally {
-                                engineActionLock.current = false
+                                engineActionLock.current[stage.key] = false
                               }
                             }
 
@@ -1237,7 +1358,7 @@ export default function Workbench({
                     </select>
                   </div>
                   <div className="editor-field">
-                    <label>{language === "zh" ? "预计章节数" : "Estimated Chapters"}</label>
+                    <label>{language === "zh" ? "参考章节数" : "Ref. Chapters"}</label>
                     <input type="number" value={editTotalChapters} onChange={(e) => setEditTotalChapters(e.target.value)} min={1} max={999} />
                   </div>
                   <div className="editor-field">
@@ -1368,6 +1489,19 @@ export default function Workbench({
                 </select>
                 <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
                   {language === "zh" ? "选择题材后，AI 会注入对应的体裁写作指南和审校维度" : "Genre selection injects tailored writing guides and review dimensions"}
+                </div>
+              </div>
+
+              {/* 预计总章节数 */}
+              <div className="editor-field">
+                <label>{language === "zh" ? "参考总章节数" : "Ref. Total Chapters"}</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="number" value={newTotalChapters || ""} onChange={(e) => setNewTotalChapters(Number(e.target.value))}
+                    min={0} max={2000} step={10} placeholder="0" style={{ width: 100 }} />
+                  <span style={{ fontSize: 12, opacity: 0.6 }}>{language === "zh" ? "章（0=由AI决定）" : "chapters (0=AI decides)"}</span>
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>
+                  {language === "zh" ? "填 0 或留空则由大纲 AI 自行规划卷数和章数" : "Leave 0 or empty to let outline AI decide volumes and chapters"}
                 </div>
               </div>
 

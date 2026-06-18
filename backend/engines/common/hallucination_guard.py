@@ -269,9 +269,10 @@ class FormatValidator:
     IDEAL_MIN_WORDS = 3000
     IDEAL_MAX_WORDS = 5000
 
-    def __init__(self, ideal_min: int = None, ideal_max: int = None):
+    def __init__(self, ideal_min: int = None, ideal_max: int = None, max_words: int = None):
         self.ideal_min_words = ideal_min if ideal_min is not None else self.IDEAL_MIN_WORDS
         self.ideal_max_words = ideal_max if ideal_max is not None else self.IDEAL_MAX_WORDS
+        self.max_words_per_chapter = max_words if max_words is not None else self.MAX_WORDS_PER_CHAPTER
 
     @staticmethod
     def count_chinese_chars(text: str) -> int:
@@ -297,8 +298,8 @@ class FormatValidator:
         char_count = FormatValidator.count_chinese_chars(content)
         if char_count < self.MIN_WORDS_PER_CHAPTER:
             issues.append(f"字数不足：{char_count}字（最少{self.MIN_WORDS_PER_CHAPTER}字）")
-        elif char_count > self.MAX_WORDS_PER_CHAPTER:
-            issues.append(f"字数超标：{char_count}字（最多{self.MAX_WORDS_PER_CHAPTER}字）")
+        elif char_count > self.max_words_per_chapter:
+            issues.append(f"字数超标：{char_count}字（最多{self.max_words_per_chapter}字）")
         elif char_count < self.ideal_min_words:
             issues.append(f"字数偏少：{char_count}字（建议{self.ideal_min_words}-{self.ideal_max_words}字）")
         if not content.strip():
@@ -347,7 +348,7 @@ class HallucinationGuardAdapter:
         self.tracker = CharacterTracker()
         self.plot_tracker = PlotThreadTracker()
         self.consistency = ConsistencyChecker()
-        self.validator = FormatValidator(ideal_min=word_count_min, ideal_max=word_count_max)
+        self.validator = FormatValidator(ideal_min=word_count_min, ideal_max=word_count_max, max_words=word_count_max)
 
     def update_memory(self, memory_text: str, chapter_num: int) -> None:
         """从记忆更新角色和情节状态。"""

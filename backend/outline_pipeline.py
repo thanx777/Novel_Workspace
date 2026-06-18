@@ -21,13 +21,16 @@ from engines.common.kg_adapter import KGAdapter
 
 # LLM 调用（从 llm_client 导入）
 try:
-    from engines.common.llm_client import call_llm, AgentConfig
+    from engines.common.llm_client import call_llm, AgentConfig, is_llm_error
 except ImportError:
     async def call_llm(*args, **kwargs):
         return "[LLM_NOT_AVAILABLE]"
 
     class AgentConfig:
         pass
+
+    def is_llm_error(text):
+        return bool(text) and text.strip().startswith("[LLM_ERROR")
 
 
 # ============================================================
@@ -566,7 +569,7 @@ class OutlinePipeline:
                 cfg = preset
             user_prompt = f"请按上面的要求生成 {layer} 大纲。严格按 Markdown 格式输出，不要任何额外说明。"
             text = await call_llm(cfg, prompt, user_prompt, max_tokens=16000, request_timeout_seconds=300)
-            if not text or text.startswith("[LLM_ERROR"):
+            if not text or is_llm_error(text):
                 self.yield_func({"status": "warning", "message": f"LLM 返回异常: {text[:100]}"})
                 return self._placeholder_outline(layer)
             return text

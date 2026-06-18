@@ -29,6 +29,8 @@ router = APIRouter(prefix="/api/v2", tags=["v2"])
 
 # 当前运行的引擎引用（用于 stop 端点取消），按项目名索引
 _running_engines: Dict[str, object] = {}
+# 引擎启动/停止的互斥锁，防止并发竞态
+_engine_lock = asyncio.Lock()
 
 
 # ============================================================
@@ -309,7 +311,7 @@ async def ai_edit_chapter(name: str, chapter_num: int, req: AiEditRequest):
     result = await llm.call("chat", system_prompt, user_prompt)
 
     # l. 内容变空检测
-    if not result or not result.strip() or result.startswith("[LLM_ERROR"):
+    if not result or not result.strip() or is_llm_error(result):
         return {"error": "AI修改失败，返回内容为空"}
 
     # 中文字数缩水检测
@@ -676,7 +678,12 @@ def clear_project_logs(name: str):
     project_dir = get_project_dir(name)
     log_path = os.path.join(project_dir, "run_log.jsonl")
     if os.path.isfile(log_path):
-        os.remove(log_path)
+        # 清空文件内容而非删除，避免 Windows 文件锁导致 PermissionError
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.truncate(0)
+        except PermissionError:
+            pass
     return {"success": True}
 
 
@@ -842,20 +849,29 @@ async def outline_generate_stream(name: str, req: OutlineGenerateRequest):
     return EventSourceResponse(_outline_generate_stream(name, req))
 
 
-async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
-    # 并发保护：如果已有引擎在运行，先停止
-    existing = _running_engines.get(name)
-    if existing is not None:
-        existing.cancelled = True
-        _running_engines.pop(name, None)
-        await asyncio.sleep(0.3)
+async def _run_engine_stream(
+    name: str,
+    stage: str,
+    setup,
+    make_done_event=None,
+):
+    """通用 SSE 引擎流：封装并发保护、消息队列、主循环、清理逻辑。
+
+    Args:
+        name: 项目名
+        stage: 阶段名（outline / writing / review）
+        setup: 回调函数 (name, project_dir, q_emit) -> (engine, exec_task, start_events: list[dict])
+        make_done_event: 可选回调 (result) -> dict，默认返回标准 done 事件
+    """
+    # 并发保护：加锁防止竞态
+    async with _engine_lock:
+        existing = _running_engines.get(name)
+        if existing is not None:
+            existing.cancelled = True
+            _running_engines.pop(name, None)
+            await asyncio.sleep(0.3)
 
     project_dir = get_project_dir(name)
-    project_presets = _get_project_presets(name)
-    global_presets = _get_global_presets()
-    kg = KnowledgeGraph(project_dir)
-    kg.load()
-
     q = asyncio.Queue()
 
     def q_emit(data):
@@ -864,31 +880,11 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         except Exception:
             pass
 
-    engine = OutlineEngine(
-        project_dir, name,
-        project_presets=project_presets,
-        global_presets=global_presets,
-        kg=kg,
-        genre=_get_project_genre(name),
-        yield_func=q_emit,
-    )
-
+    # 引擎创建 + 任务启动 + 起始事件
+    engine, exec_task, start_events = setup(name, project_dir, q_emit)
     _running_engines[name] = engine
-
-    # 从 engine_state.json 恢复大纲进度：跳过已完成的层
-    resume_info = ""
-    if not req.layer:
-        engine_state = EngineState(project_dir)
-        completed = engine_state.data.get("outline", {}).get("completed_layers", [])
-        if completed:
-            resume_info = f"（已完成: {', '.join(completed)}，从下一层继续）"
-
-    q_emit({"status": "start", "stage": "outline", "message": f"🚀 开始大纲生成{resume_info}"})
-
-    exec_task = asyncio.create_task(
-        engine.generate_all(requirements=req.requirements) if not req.layer
-        else engine.generate_layer(req.layer, requirements=req.requirements)
-    )
+    for evt in start_events:
+        q_emit(evt)
 
     try:
         while True:
@@ -916,7 +912,11 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
             db.close()
         except Exception:
             pass
-        done_event = {"status": "done", "stage": "outline", "result": str(result)[:500]}
+
+        if make_done_event:
+            done_event = make_done_event(result)
+        else:
+            done_event = {"status": "done", "stage": stage, "result": str(result)[:500]}
         _append_run_log(project_dir, done_event)
         yield {"data": json.dumps(done_event, ensure_ascii=False)}
     except Exception as e:
@@ -928,6 +928,41 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
         if not exec_task.done():
             engine.cancelled = True
             exec_task.cancel()
+
+
+async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
+    def setup(name, project_dir, q_emit):
+        project_presets = _get_project_presets(name)
+        global_presets = _get_global_presets()
+        kg = KnowledgeGraph(project_dir)
+        kg.load()
+
+        engine = OutlineEngine(
+            project_dir, name,
+            project_presets=project_presets,
+            global_presets=global_presets,
+            kg=kg,
+            genre=_get_project_genre(name),
+            yield_func=q_emit,
+        )
+
+        # 从 engine_state.json 恢复大纲进度：跳过已完成的层
+        resume_info = ""
+        if not req.layer:
+            engine_state = EngineState(project_dir)
+            completed = engine_state.data.get("outline", {}).get("completed_layers", [])
+            if completed:
+                resume_info = f"（已完成: {', '.join(completed)}，从下一层继续）"
+
+        exec_task = asyncio.create_task(
+            engine.generate_all(requirements=req.requirements) if not req.layer
+            else engine.generate_layer(req.layer, requirements=req.requirements)
+        )
+        start_events = [{"status": "start", "stage": "outline", "message": f"🚀 开始大纲生成{resume_info}"}]
+        return engine, exec_task, start_events
+
+    async for chunk in _run_engine_stream(name, "outline", setup):
+        yield chunk
 
 
 @router.post("/projects/{name}/writing/start/stream")
@@ -937,95 +972,41 @@ async def writing_start_stream(name: str, req: WritingStartRequest):
 
 
 async def _writing_start_stream(name: str, req: WritingStartRequest):
-    # 并发保护：如果已有引擎在运行，先停止
-    existing = _running_engines.get(name)
-    if existing is not None:
-        existing.cancelled = True
-        _running_engines.pop(name, None)
-        await asyncio.sleep(0.3)  # 等待旧引擎退出
+    def setup(name, project_dir, q_emit):
+        db = ProjectDB(name)
+        project_presets = db.get_presets()
+        global_presets = _get_global_presets()
+        kg = KnowledgeGraph(project_dir)
+        kg.load()
 
-    project_dir = get_project_dir(name)
-    db = ProjectDB(name)
-    project_presets = db.get_presets()
-    global_presets = _get_global_presets()
-    kg = KnowledgeGraph(project_dir)
-    kg.load()
+        total = req.total_chapters or db.get_project().get("total_chapters", 0)
 
-    total = req.total_chapters or db.get_project().get("total_chapters", 0)
+        engine = WritingEngine(
+            project_dir, name,
+            project_presets=project_presets,
+            global_presets=global_presets,
+            kg=kg,
+            total_chapters=total,
+            genre=_get_project_genre(name),
+            yield_func=q_emit,
+        )
 
-    q = asyncio.Queue()
-
-    def q_emit(data):
-        try:
-            q.put_nowait(data)
-        except Exception:
-            pass
-
-    engine = WritingEngine(
-        project_dir, name,
-        project_presets=project_presets,
-        global_presets=global_presets,
-        kg=kg,
-        total_chapters=total,
-        genre=_get_project_genre(name),
-        yield_func=q_emit,
-    )
-
-    _running_engines[name] = engine
-
-    # 从 engine_state.json 恢复进度：如果已有完成章节，从下一章继续
-    start_chapter = req.start_chapter
-    if start_chapter <= 1:
-        engine_state = EngineState(project_dir)
-        completed = engine_state.data.get("writing", {}).get("completed_chapters", [])
-        if completed:
-            start_chapter = max(completed) + 1
-            q_emit({"status": "info", "stage": "writing", "message": f"📋 从第 {start_chapter} 章继续（已完成 {len(completed)} 章）"})
-
-    q_emit({"status": "start", "stage": "writing", "message": "🚀 开始写作"})
-
-    exec_task = asyncio.create_task(
-        engine.write_all(start_chapter=start_chapter)
-    )
-
-    try:
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=0.5)
-                _append_run_log(project_dir, msg)
-                yield {"data": json.dumps(msg, ensure_ascii=False)}
-            except asyncio.TimeoutError:
-                if exec_task.done():
-                    while not q.empty():
-                        try:
-                            msg = q.get_nowait()
-                            _append_run_log(project_dir, msg)
-                            yield {"data": json.dumps(msg, ensure_ascii=False)}
-                        except asyncio.QueueEmpty:
-                            break
-                    break
-
-        result = await exec_task
-        # Sync project.db current_stage with engine_state
-        try:
-            db = ProjectDB(name)
+        # 从 engine_state.json 恢复进度：如果已有完成章节，从下一章继续
+        start_chapter = req.start_chapter
+        start_events = []
+        if start_chapter <= 1:
             engine_state = EngineState(project_dir)
-            db.set_stage(engine_state.current_stage)
-            db.close()
-        except Exception:
-            pass
-        done_event = {"status": "done", "stage": "writing", "result": str(result)[:500]}
-        _append_run_log(project_dir, done_event)
-        yield {"data": json.dumps(done_event, ensure_ascii=False)}
-    except Exception as e:
-        err_event = {"status": "error", "message": str(e)}
-        _append_run_log(project_dir, err_event)
-        yield {"data": json.dumps(err_event, ensure_ascii=False)}
-    finally:
-        _running_engines.pop(name, None)
-        if not exec_task.done():
-            engine.cancelled = True
-            exec_task.cancel()
+            completed = engine_state.data.get("writing", {}).get("completed_chapters", [])
+            if completed:
+                start_chapter = max(completed) + 1
+                start_events.append({"status": "info", "stage": "writing", "message": f"📋 从第 {start_chapter} 章继续（已完成 {len(completed)} 章）"})
+
+        exec_task = asyncio.create_task(engine.write_all(start_chapter=start_chapter))
+        start_events.append({"status": "start", "stage": "writing", "message": "🚀 开始写作"})
+        return engine, exec_task, start_events
+
+    async for chunk in _run_engine_stream(name, "writing", setup):
+        yield chunk
 
 
 @router.post("/projects/{name}/review/start/stream")
@@ -1035,86 +1016,33 @@ async def review_start_stream(name: str):
 
 
 async def _review_start_stream(name: str):
-    # 并发保护：如果已有引擎在运行，先停止
-    existing = _running_engines.get(name)
-    if existing is not None:
-        existing.cancelled = True
-        _running_engines.pop(name, None)
-        await asyncio.sleep(0.3)
+    def setup(name, project_dir, q_emit):
+        project_presets = _get_project_presets(name)
+        global_presets = _get_global_presets()
+        kg = KnowledgeGraph(project_dir)
+        kg.load()
 
-    project_dir = get_project_dir(name)
-    project_presets = _get_project_presets(name)
-    global_presets = _get_global_presets()
-    kg = KnowledgeGraph(project_dir)
-    kg.load()
+        engine = ReviewEngine(
+            project_dir, name,
+            project_presets=project_presets,
+            global_presets=global_presets,
+            kg=kg,
+            genre=_get_project_genre(name),
+            yield_func=q_emit,
+        )
 
-    q = asyncio.Queue()
+        exec_task = asyncio.create_task(engine.run_review())
+        start_events = [{"status": "start", "stage": "review", "message": "🚀 开始全局审校"}]
+        return engine, exec_task, start_events
 
-    def q_emit(data):
-        try:
-            q.put_nowait(data)
-        except Exception:
-            pass
-
-    engine = ReviewEngine(
-        project_dir, name,
-        project_presets=project_presets,
-        global_presets=global_presets,
-        kg=kg,
-        genre=_get_project_genre(name),
-        yield_func=q_emit,
-    )
-
-    _running_engines[name] = engine
-
-    q_emit({"status": "start", "stage": "review", "message": "🚀 开始全局审校"})
-
-    exec_task = asyncio.create_task(engine.run_review())
-
-    try:
-        while True:
-            try:
-                msg = await asyncio.wait_for(q.get(), timeout=0.5)
-                _append_run_log(project_dir, msg)
-                yield {"data": json.dumps(msg, ensure_ascii=False)}
-            except asyncio.TimeoutError:
-                if exec_task.done():
-                    while not q.empty():
-                        try:
-                            msg = q.get_nowait()
-                            _append_run_log(project_dir, msg)
-                            yield {"data": json.dumps(msg, ensure_ascii=False)}
-                        except asyncio.QueueEmpty:
-                            break
-                    break
-
-        result = await exec_task
-        # Sync project.db current_stage with engine_state
-        try:
-            db = ProjectDB(name)
-            engine_state = EngineState(project_dir)
-            db.set_stage(engine_state.current_stage)
-            db.close()
-        except Exception:
-            pass
-
-        # 根据是否被取消推送不同事件
+    def make_done_event(result):
         is_cancelled = isinstance(result, dict) and result.get("cancelled")
         if is_cancelled:
-            done_event = {"status": "review_cancelled", "stage": "review", "message": "审校已暂停，可继续"}
-        else:
-            done_event = {"status": "done", "stage": "review", "result": str(result)[:500]}
-        _append_run_log(project_dir, done_event)
-        yield {"data": json.dumps(done_event, ensure_ascii=False)}
-    except Exception as e:
-        err_event = {"status": "error", "message": str(e)}
-        _append_run_log(project_dir, err_event)
-        yield {"data": json.dumps(err_event, ensure_ascii=False)}
-    finally:
-        _running_engines.pop(name, None)
-        if not exec_task.done():
-            engine.cancelled = True
-            exec_task.cancel()
+            return {"status": "review_cancelled", "stage": "review", "message": "审校已暂停，可继续"}
+        return {"status": "done", "stage": "review", "result": str(result)[:500]}
+
+    async for chunk in _run_engine_stream(name, "review", setup, make_done_event):
+        yield chunk
 
 
 @router.post("/projects/{name}/engine/stop")
@@ -1123,9 +1051,16 @@ async def engine_stop(name: str):
     engine = _running_engines.get(name)
     if engine is not None:
         engine.cancelled = True
-        # 立即保存 paused 状态，确保断点续校能正确恢复
-        # （run_review 可能还在 LLM 调用中，来不及保存 paused）
-        if hasattr(engine, 'state') and hasattr(engine.state, 'review_set_status'):
-            engine.state.review_set_status("paused")
+        # 立即保存状态，确保断点续传能正确恢复
+        if hasattr(engine, 'state'):
+            # 审校引擎：保存 paused 状态
+            if hasattr(engine.state, 'review_set_status'):
+                engine.state.review_set_status("paused")
+            # 写作引擎：保存 writing 状态为 paused
+            elif hasattr(engine.state, 'writing_set_status'):
+                engine.state.writing_set_status("paused")
+            # 大纲引擎：保存 outline 状态为 paused
+            elif hasattr(engine.state, 'outline_set_status'):
+                engine.state.outline_set_status("paused")
         return {"success": True, "message": "引擎停止信号已发送"}
     return {"success": True, "message": "没有正在运行的引擎"}

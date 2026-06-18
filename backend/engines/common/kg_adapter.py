@@ -1,6 +1,7 @@
 """知识图谱适配器 — 供 Writer 和 Reviewer 查询 KG 实体，防止幻觉。
 同时提供 AI 驱动的摄取功能，从章节/大纲内容中提取实体写入图谱。"""
 
+import asyncio
 import json
 import os
 import re
@@ -13,6 +14,8 @@ class KGAdapter:
     def __init__(self, kg=None, project_dir: str = ""):
         self._kg = kg
         self.project_dir = project_dir
+        # 并发锁：保护涉及 kg.save() 的异步方法，防止并发写入丢数据
+        self._lock = asyncio.Lock()
 
     @property
     def kg(self):
@@ -245,7 +248,7 @@ class KGAdapter:
         return "\n".join(lines)
 
     def _format_previous_chapters(self, chapter_num: int) -> str:
-        """格式化前 N-1 章的摘要，供当前章参考。"""
+        """格式化前 N-1 章的摘要，供当前章参考。包含所有前章摘要（每章仅1行，与 KG 其他全局信息保持一致）。"""
         if not self.kg or chapter_num <= 1:
             return ""
         prev_chapters = []
@@ -258,10 +261,9 @@ class KGAdapter:
         if not prev_chapters:
             return ""
         prev_chapters.sort(key=lambda x: x[0])
-        # 只取最近 5 章
-        recent = prev_chapters[-5:]
-        lines = [f"【知识图谱 · 前情提要（第{recent[0][0]}-{recent[-1][0]}章）】"]
-        for ch_num, node in recent:
+        # 包含所有前章摘要（每章仅1行，120章也只有120行，与 KG 其他全局信息保持一致）
+        lines = [f"【知识图谱 · 前情提要（第{prev_chapters[0][0]}-{prev_chapters[-1][0]}章）】"]
+        for ch_num, node in prev_chapters:
             label = node.get("label", f"第{ch_num}章")
             summary = node.get("summary", "")
             lines.append(f"- {label}：{summary}" if summary else f"- {label}")
@@ -411,42 +413,44 @@ class KGAdapter:
         if emit:
             emit({"status": "kg_ingesting", "chapter": chapter_num, "message": f"AI 正在摄取第{chapter_num}章到知识图谱..."})
 
-        # 先添加章节节点（基础信息）
-        title = ""
-        title_match = re.search(r"第\d+章[：:\s]*(.+?)[\n\r]", chapter_text)
-        if title_match:
-            title = title_match.group(1).strip()
-        self.add_chapter_node(chapter_num, title, chapter_text[:200])
+        # 并发锁保护：防止多章并发摄取时 KG 数据丢失
+        async with self._lock:
+            # 先添加章节节点（基础信息）
+            title = ""
+            title_match = re.search(r"第\d+章[：:\s]*(.+?)[\n\r]", chapter_text)
+            if title_match:
+                title = title_match.group(1).strip()
+            self.add_chapter_node(chapter_num, title, chapter_text[:200])
 
-        # 如果没有 LLM，用规则 fallback
-        if not llm_client or not llm_client.has_valid_config("reviewer"):
-            if emit:
-                emit({"status": "kg_ingest_fallback", "chapter": chapter_num, "message": "无 AI 配置，使用规则摄取"})
-            return self._rule_ingest_chapter(chapter_num, chapter_text)
+            # 如果没有 LLM，用规则 fallback
+            if not llm_client or not llm_client.has_valid_config("reviewer"):
+                if emit:
+                    emit({"status": "kg_ingest_fallback", "chapter": chapter_num, "message": "无 AI 配置，使用规则摄取"})
+                return self._rule_ingest_chapter(chapter_num, chapter_text)
 
-        # AI 摄取
-        from .prompts import KG_INGEST_SYSTEM
+            # AI 摄取
+            from .prompts import KG_INGEST_SYSTEM
 
-        # 构建已有 KG 上下文，让 AI 知道哪些实体已存在
-        existing_context = self._format_existing_entities()
+            # 构建已有 KG 上下文，让 AI 知道哪些实体已存在
+            existing_context = self._format_existing_entities()
 
-        user_prompt = f"请从以下章节内容中提取实体，更新知识图谱。\n\n"
-        if existing_context:
-            user_prompt += f"【已有知识图谱实体（已存在的不要重复创建，只更新状态）】\n{existing_context}\n\n"
-        user_prompt += f"--- 第{chapter_num}章正文 ---\n{chapter_text[:8000]}\n--- 正文结束 ---"
+            user_prompt = f"请从以下章节内容中提取实体，更新知识图谱。\n\n"
+            if existing_context:
+                user_prompt += f"【已有知识图谱实体（已存在的不要重复创建，只更新状态）】\n{existing_context}\n\n"
+            user_prompt += f"--- 第{chapter_num}章正文 ---\n{chapter_text[:8000]}\n--- 正文结束 ---"
 
-        try:
-            response = await llm_client.call("reviewer", KG_INGEST_SYSTEM, user_prompt)
-            entities = self._parse_ingest_response(response)
-            stats = self._write_entities_to_kg(entities, chapter_num)
-            if emit:
-                emit({"status": "kg_ingested", "chapter": chapter_num, **stats})
-            return {"success": True, "chapter": chapter_num, **stats}
-        except Exception as e:
-            if emit:
-                emit({"status": "kg_ingest_error", "chapter": chapter_num, "error": str(e)})
-            # fallback 到规则摄取
-            return self._rule_ingest_chapter(chapter_num, chapter_text)
+            try:
+                response = await llm_client.call("reviewer", KG_INGEST_SYSTEM, user_prompt)
+                entities = self._parse_ingest_response(response)
+                stats = self._write_entities_to_kg(entities, chapter_num)
+                if emit:
+                    emit({"status": "kg_ingested", "chapter": chapter_num, **stats})
+                return {"success": True, "chapter": chapter_num, **stats}
+            except Exception as e:
+                if emit:
+                    emit({"status": "kg_ingest_error", "chapter": chapter_num, "error": str(e)})
+                # fallback 到规则摄取
+                return self._rule_ingest_chapter(chapter_num, chapter_text)
 
     async def ai_ingest_outline(self, layer: str, outline_text: str,
                                  json_data: Dict = None,
@@ -466,91 +470,129 @@ class KGAdapter:
         if emit:
             emit({"status": "kg_ingesting_outline", "layer": layer, "message": f"AI 正在摄取{layer}大纲到知识图谱..."})
 
-        # 先添加大纲节点
-        from .prompts import LAYER_NAMES
-        node_id = f"outline_{layer}_root"
-        self.kg.add_node(node_id, "outline_node",
-                         LAYER_NAMES.get(layer, layer),
-                         summary=outline_text[:500],
-                         attrs={"layer": layer})
-        if layer == "L2":
-            l1_id = "outline_L1_root"
-            if l1_id in self.kg.nodes:
-                self.kg.add_edge("edge_L2_from_L1", "derived_from", node_id, l1_id)
-        self.kg.save()
+        # 并发锁保护：防止并发摄取时 KG 数据丢失
+        async with self._lock:
+            # 先添加大纲节点
+            from .prompts import LAYER_NAMES
+            node_id = f"outline_{layer}_root"
+            self.kg.add_node(node_id, "outline_node",
+                             LAYER_NAMES.get(layer, layer),
+                             summary=outline_text[:500],
+                             attrs={"layer": layer})
+            if layer == "L2":
+                l1_id = "outline_L1_root"
+                if l1_id in self.kg.nodes:
+                    self.kg.add_edge("edge_L2_from_L1", "derived_from", node_id, l1_id)
+            self.kg.save()
 
-        # 如果没有 LLM，只写入大纲节点
-        if not llm_client or not llm_client.has_valid_config("reviewer"):
-            return {"success": True, "layer": layer, "outline_node": True, "entities": "no_llm"}
+            # 如果没有 LLM，只写入大纲节点
+            if not llm_client or not llm_client.has_valid_config("reviewer"):
+                return {"success": True, "layer": layer, "outline_node": True, "entities": "no_llm"}
 
-        from .prompts import KG_INGEST_OUTLINE_SYSTEM
+            from .prompts import KG_INGEST_OUTLINE_SYSTEM
 
-        existing_context = self._format_existing_entities()
-        user_prompt = f"请从以下{layer}大纲中提取实体，初始化知识图谱。\n\n"
-        if existing_context:
-            user_prompt += f"【已有知识图谱实体】\n{existing_context}\n\n"
-        user_prompt += f"--- {layer}大纲 ---\n{outline_text[:8000]}\n--- 大纲结束 ---"
+            existing_context = self._format_existing_entities()
+            user_prompt = f"请从以下{layer}大纲中提取实体，初始化知识图谱。\n\n"
+            if existing_context:
+                user_prompt += f"【已有知识图谱实体】\n{existing_context}\n\n"
+            user_prompt += f"--- {layer}大纲 ---\n{outline_text[:8000]}\n--- 大纲结束 ---"
 
-        try:
-            response = await llm_client.call("reviewer", KG_INGEST_OUTLINE_SYSTEM, user_prompt)
-            entities = self._parse_ingest_response(response)
-            stats = self._write_entities_to_kg(entities, chapter_num=0)
-            if emit:
-                emit({"status": "kg_outline_ingested", "layer": layer, **stats})
-            return {"success": True, "layer": layer, "outline_node": True, **stats}
-        except Exception as e:
-            if emit:
-                emit({"status": "kg_ingest_error", "layer": layer, "error": str(e)})
-            return {"success": True, "layer": layer, "outline_node": True, "entities": "error"}
+            try:
+                response = await llm_client.call("reviewer", KG_INGEST_OUTLINE_SYSTEM, user_prompt)
+                entities = self._parse_ingest_response(response)
+                stats = self._write_entities_to_kg(entities, chapter_num=0)
+                if emit:
+                    emit({"status": "kg_outline_ingested", "layer": layer, **stats})
+                return {"success": True, "layer": layer, "outline_node": True, **stats}
+            except Exception as e:
+                if emit:
+                    emit({"status": "kg_ingest_error", "layer": layer, "error": str(e)})
+                return {"success": True, "layer": layer, "outline_node": True, "entities": "error"}
 
     # ---- 内部方法 ----
 
-    def _format_existing_entities(self) -> str:
-        """格式化已有 KG 实体，供 AI 参考避免重复。"""
+    def _format_existing_entities(self, max_per_type: int = 20) -> str:
+        """格式化已有 KG 实体，供 AI 参考避免重复。
+
+        Args:
+            max_per_type: 每类实体最多显示的数量（防止 prompt 过长）
+        """
         if not self.kg:
             return ""
         lines = []
+
+        def _truncate(items, formatter):
+            """截断实体列表，超过 max_per_type 时只显示前 N 个并标注总数。"""
+            if not items:
+                return None
+            if len(items) <= max_per_type:
+                return formatter(items)
+            shown = items[:max_per_type]
+            return f"{formatter(shown)} 等{len(items)}个"
+
         chars = self.get_characters()
         if chars:
-            lines.append("已有角色：" + "、".join(c.get("label", "") for c in chars))
+            s = _truncate(chars, lambda cs: "、".join(c.get("label", "") for c in cs))
+            if s:
+                lines.append("已有角色：" + s)
         fs = self.get_foreshadowings()
         if fs:
-            fs_labels = [f.get("label", "") for f in fs]
-            lines.append("已有伏笔：" + "、".join(fs_labels))
+            s = _truncate(fs, lambda fsl: "、".join(f.get("label", "") for f in fsl))
+            if s:
+                lines.append("已有伏笔：" + s)
         scenes = [n for n in self.kg.nodes.values() if n.get("type") == "scene"]
         if scenes:
-            lines.append("已有场景：" + "、".join(s.get("label", "") for s in scenes))
+            s = _truncate(scenes, lambda ss: "、".join(s.get("label", "") for s in ss))
+            if s:
+                lines.append("已有场景：" + s)
         facts = self.get_world_facts()
         if facts:
-            lines.append("已有世界观：" + "、".join(f.get("label", "") for f in facts))
+            s = _truncate(facts, lambda fs: "、".join(f.get("label", "") for f in fs))
+            if s:
+                lines.append("已有世界观：" + s)
         threads = [n for n in self.kg.nodes.values() if n.get("type") == "plot_thread"]
         if threads:
-            lines.append("已有剧情线：" + "、".join(t.get("label", "") for t in threads))
+            s = _truncate(threads, lambda ts: "、".join(t.get("label", "") for t in ts))
+            if s:
+                lines.append("已有剧情线：" + s)
         # 新增：角色关系
         rels = self.get_character_relationships()
         if rels:
-            rel_strs = []
-            for r in rels:
-                s_name = r.get("source", "").replace("char_", "")
-                t_name = r.get("target", "").replace("char_", "")
-                rel_type = r.get("attrs", {}).get("relation", "")
-                rel_strs.append(f"{s_name}→{t_name}({rel_type})")
-            lines.append("已有角色关系：" + "、".join(rel_strs))
+            def _fmt_rels(rs):
+                rel_strs = []
+                for r in rs:
+                    s_name = r.get("source", "").replace("char_", "")
+                    t_name = r.get("target", "").replace("char_", "")
+                    rel_type = r.get("attrs", {}).get("relation", "")
+                    rel_strs.append(f"{s_name}→{t_name}({rel_type})")
+                return "、".join(rel_strs)
+            s = _truncate(rels, _fmt_rels)
+            if s:
+                lines.append("已有角色关系：" + s)
         # 新增：Strand 标签
         strands = self.get_strand_tags()
         if strands:
-            strand_strs = [f"第{s.get('attrs', {}).get('chapter_num', '?')}章:{s.get('attrs', {}).get('strand_type', '')}" for s in strands]
-            lines.append("已有Strand标签：" + "、".join(strand_strs))
+            s = _truncate(strands, lambda ss: "、".join(
+                f"第{s.get('attrs', {}).get('chapter_num', '?')}章:{s.get('attrs', {}).get('strand_type', '')}" for s in ss
+            ))
+            if s:
+                lines.append("已有Strand标签：" + s)
         # 新增：爽点
         cps = self.get_coolpoints()
         if cps:
-            cp_strs = [f"第{c.get('attrs', {}).get('chapter_num', '?')}章:{c.get('attrs', {}).get('coolpoint_type', '')}" for c in cps]
-            lines.append("已有爽点：" + "、".join(cp_strs))
+            s = _truncate(cps, lambda cs: "、".join(
+                f"第{c.get('attrs', {}).get('chapter_num', '?')}章:{c.get('attrs', {}).get('coolpoint_type', '')}" for c in cs
+            ))
+            if s:
+                lines.append("已有爽点：" + s)
         # 新增：钩子
         hooks = self.get_hooks()
         if hooks:
-            hook_strs = [f"第{h.get('attrs', {}).get('chapter_num', '?')}章:{h.get('attrs', {}).get('hook_type', '')}" for h in hooks]
-            lines.append("已有钩子：" + "、".join(hook_strs))
+            s = _truncate(hooks, lambda hs: "、".join(
+                f"第{h.get('attrs', {}).get('chapter_num', '?')}章:{h.get('attrs', {}).get('hook_type', '')}" for h in hs
+            ))
+            if s:
+                lines.append("已有钩子：" + s)
         return "\n".join(lines)
 
     def _parse_ingest_response(self, response: str) -> Dict:

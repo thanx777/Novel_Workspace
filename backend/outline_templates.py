@@ -244,7 +244,14 @@ def get_prompt(layer: str, context: Optional[Dict] = None) -> str:
 
     if layer == "L1":
         requirements = context.get("requirements", "")
+        total_chapters = context.get("total_chapters", 0)
         prefix = f"用户需求：{requirements}\n\n" if requirements else ""
+        # 用户指定了总章节数时，强制注入约束引导 LLM 遵守
+        if total_chapters and int(total_chapters) > 0:
+            prefix += f"""【参考约束 — 请灵活遵守】
+用户期望本书约 **{total_chapters} 章**左右。请以此作为参考规划分卷，但可根据故事需要适当增减（±20%以内）。在"基础信息栏"的第4项中填写你最终确定的总章节数，分卷的章节范围之和应等于该最终值。
+
+"""
         return prefix + template
 
     elif layer == "L2":
@@ -264,8 +271,8 @@ def get_prompt(layer: str, context: Optional[Dict] = None) -> str:
         if total_chapters and int(total_chapters) > 0:
             chapter_constraint = f"""
 
-【重要约束 — 必须严格遵守】
-根据 L1 全书大纲，本书共 **{total_chapters} 章**。你必须为每一章都生成细纲，从第1章到第{total_chapters}章，一章不少、一章不多。阶段划分中的章节范围之和必须等于 {total_chapters}。
+【参考约束 — 请灵活遵守】
+用户期望本书约 **{total_chapters} 章**左右。请参考此数量生成章节细纲，但可根据故事需要适当增减。阶段划分中的章节范围之和应等于你最终确定的总章节数。
 
 """
         return prefix + chapter_constraint + template
@@ -347,13 +354,15 @@ def validate_template(layer: str, json_data: Dict, total_chapters: int = 0) -> T
                         for i, item in enumerate(section_data):
                             if isinstance(item, dict) and not item.get(f):
                                 missing.append(f"{section}[{i}].{f}")
-        # L2 章数一致性校验
+        # L2 章数一致性校验（允许 ±20% 偏差）
         if total_chapters > 0:
             chapters = json_data.get("chapters", [])
             if isinstance(chapters, list):
                 actual_count = len(chapters)
-                if actual_count != total_chapters:
-                    missing.append(f"章数不一致：L1 规定 {total_chapters} 章，L2 实际生成 {actual_count} 章")
+                lower = int(total_chapters * 0.8)
+                upper = int(total_chapters * 1.2)
+                if actual_count < lower or actual_count > upper:
+                    missing.append(f"章数偏差较大：参考 {total_chapters} 章，实际生成 {actual_count} 章（允许范围 {lower}-{upper}）")
     return (len(missing) == 0, missing)
 
 
