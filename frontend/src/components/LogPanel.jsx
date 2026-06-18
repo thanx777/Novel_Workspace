@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react"
+import { useApp } from "../context/AppContext"
 
 /**
  * LogPanel — 运行日志面板
@@ -8,11 +9,11 @@ export default function LogPanel({
   logs = [],
   isRunning = false,
   elapsed = 0,
-  language = "zh",
   onClear = null,
   activeProject = null,
   emptyMessage = null,
 }) {
+  const { t, language } = useApp()
   const listRef = useRef(null)
   const [autoScroll, setAutoScroll] = useState(true)
 
@@ -45,19 +46,17 @@ export default function LogPanel({
     }
   }
 
-  const defaultEmpty = language === "zh"
-    ? "在左侧项目阶段标签点击「启动」按钮，或在工具栏点击「启动阶段」后，AI 生成过程会实时显示在这里。"
-    : "Click 'Start' on a stage in the sidebar or 'Run Stage' in the toolbar. AI generation progress will appear here in real time."
+  const defaultEmpty = t('logPanelDefaultEmpty')
 
   return (
     <div className="log-panel">
       <div className="log-panel-header">
         <div className="log-panel-title">
           <span style={{ fontSize: 16 }}>📜</span>
-          <span>{language === "zh" ? "运行日志" : "Run Logs"}</span>
+          <span>{t('runLogs')}</span>
           {isRunning && (
             <span className="log-panel-running">
-              <span className="running-dot" /> {language === "zh" ? "运行中" : "Running"}
+              <span className="running-dot" /> {t('running')}
             </span>
           )}
           {isRunning && (
@@ -70,13 +69,13 @@ export default function LogPanel({
           </span>
           {!autoScroll && (
             <button className="wb-btn-sm" onClick={() => { setAutoScroll(true); if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight }}
-              title={language === "zh" ? "跳到底部" : "Jump to bottom"}>
+              title={t('jumpToBottom')}>
               ⬇
             </button>
           )}
           {onClear && (
             <button className="wb-btn-sm" onClick={onClear}
-              title={language === "zh" ? "清空" : "Clear"}>
+              title={t('clear')}>
               🗑
             </button>
           )}
@@ -88,14 +87,14 @@ export default function LogPanel({
           <div className="log-panel-empty">
             <div style={{ fontSize: 48, marginBottom: 12, opacity: 0.3 }}>📜</div>
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-              {language === "zh" ? "暂无日志" : "No logs yet"}
+              {t('noLogsYet')}
             </div>
             <div style={{ fontSize: 12, opacity: 0.6, maxWidth: 320, lineHeight: 1.6 }}>
               {emptyMessage || defaultEmpty}
             </div>
             {activeProject && (
               <div style={{ marginTop: 16, fontSize: 11, opacity: 0.5 }}>
-                {language === "zh" ? "当前项目：" : "Project: "} <strong>{activeProject.title || activeProject.name}</strong>
+                {t('currentProjectLabel')} <strong>{activeProject.title || activeProject.name}</strong>
               </div>
             )}
           </div>
@@ -116,15 +115,15 @@ export default function LogPanel({
       {logs.length > 0 && (
         <div className="log-panel-footer">
           <span>
-            {language === "zh" ? "最后状态：" : "Last: "}
+            {t('lastStatus')}
             <strong className={`log-status-${logs[logs.length - 1].status || "info"}`}>
               {logs[logs.length - 1].status}
             </strong>
           </span>
           <span style={{ opacity: 0.5 }}>
             {isRunning
-              ? (language === "zh" ? "正在接收事件..." : "Receiving events...")
-              : (language === "zh" ? "已停止" : "Stopped")}
+              ? (t('receivingEvents'))
+              : (t('stopped'))}
           </span>
         </div>
       )}

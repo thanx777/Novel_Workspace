@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
+import { useApp } from "../context/AppContext"
 
 // ============================================================
 // 节点类型元数据 — 极简主题（stone + ink + amber）
@@ -25,7 +26,8 @@ const VIEWS = [
 // ============================================================
 // 主组件
 // ============================================================
-export default function KnowledgeGraphView({ API_BASE, projectName, language = "zh" }) {
+export default function KnowledgeGraphView({ API_BASE, projectName }) {
+  const { language } = useApp()
   const [view, setView] = useState("graph")
   const [data, setData] = useState({ nodes: [], edges: [], stats: { node_count: 0, edge_count: 0, by_type: {} } })
   const [loading, setLoading] = useState(true)

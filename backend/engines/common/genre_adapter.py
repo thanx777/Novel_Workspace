@@ -3,14 +3,7 @@
 从旧引擎 genre_data/ 和 hallucination_guard.py 迁移整合。
 """
 
-import os
-import sys
-
-# 将 backend 根目录加入 path，以便导入 genre_data
-_backend_root = os.path.join(os.path.dirname(__file__), "..", "..")
-if _backend_root not in sys.path:
-    sys.path.insert(0, os.path.abspath(_backend_root))
-
+# sys.path 已由 engines/__init__.py 统一设置，可直接导入 backend 根目录下的模块
 from genre_data.inkos_data import (
     INKOS_GENRES, INKOS_AUDIT_DIMENSIONS, INKOS_FATIGUE_WORDS,
     get_inkos_genre, get_fatigue_words, get_setting_terms, get_chapter_types,

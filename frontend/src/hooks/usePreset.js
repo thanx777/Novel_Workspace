@@ -1,7 +1,10 @@
 import { useState, useCallback } from 'react'
 import { API_BASE } from '../constants'
+import { useApp } from '../context/AppContext'
 
-export default function usePreset({ language, showNotification, setNodes }) {
+export default function usePreset({ showNotification, setNodes }) {
+  const { t, language } = useApp()
+  const safeSetNodes = setNodes || (() => {})
   const [presets, setPresets] = useState([])
   const [showAddPreset, setShowAddPreset] = useState(false)
   const [newPresetName, setNewPresetName] = useState('')
@@ -77,7 +80,7 @@ export default function usePreset({ language, showNotification, setNodes }) {
         .then((data) => {
           if (data.presets) setPresets(data.presets)
           else fetchPresets()
-          setNodes(prev => prev.map(n =>
+          safeSetNodes(prev => prev.map(n =>
             n.config.preset_name === presetName ? { ...n, config: { ...n.config, preset_name: '' } } : n
           ))
           if (editingPreset === presetName) setEditingPreset(null)
@@ -86,7 +89,7 @@ export default function usePreset({ language, showNotification, setNodes }) {
         })
         .catch(err => { showNotification(language === 'zh' ? '删除预设失败: ' : 'Delete preset failed: ' + err.message, 'error'); resolve() })
     })
-  }, [language, showNotification, fetchPresets, editingPreset, setNodes])
+  }, [language, showNotification, fetchPresets, editingPreset, safeSetNodes])
 
   const openEditPreset = useCallback((presetName) => {
     const preset = presets.find(p => p.name === presetName)
@@ -116,7 +119,7 @@ export default function usePreset({ language, showNotification, setNodes }) {
         else fetchPresets()
         const oldName = editingPreset, newName = editPresetConfig.name.trim()
         if (oldName !== newName) {
-          setNodes(prev => prev.map(n =>
+          safeSetNodes(prev => prev.map(n =>
             n.config.preset_name === oldName ? { ...n, config: { ...n.config, preset_name: newName } } : n
           ))
         }
@@ -124,7 +127,7 @@ export default function usePreset({ language, showNotification, setNodes }) {
         showNotification(t('presetUpdated'), 'success')
       })
       .catch(err => { showNotification(language === 'zh' ? '更新预设失败: ' : 'Update preset failed: ' + err.message, 'error') })
-  }, [editPresetConfig, editingPreset, language, showNotification, fetchPresets, setNodes])
+  }, [editPresetConfig, editingPreset, language, showNotification, fetchPresets, safeSetNodes, t])
 
   const runTestConnection = useCallback(async (config, t) => {
     if (!config || !config.api_key || !config.api_key.trim()) {

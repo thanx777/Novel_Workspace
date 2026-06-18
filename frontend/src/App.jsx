@@ -1,17 +1,16 @@
-﻿import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback } from "react"
 import "./App.css"
 import "./styles/kg_v2.css"
-import translations from "./translations"
 import { API_BASE } from "./constants"
 import usePreset from "./hooks/usePreset"
 import useProjectV2 from "./hooks/useProjectV2"
-import Workbench from "./components/Workbench"
+import Workbench from "./components/Workbench/index"
 import { PresetPanel } from "./components/Sidebar"
 import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./components/Modals"
+import { AppProvider, useApp } from "./context/AppContext"
 
-function App() {
-  const [language, setLanguage] = useState("zh")
-  const [isDark, setIsDark] = useState(false)
+function AppInner() {
+  const { t, language } = useApp()
   const [agentCatalog, setAgentCatalog] = useState([])
   const [notification, setNotification] = useState(null)
   const [confirmDialog, setConfirmDialog] = useState(null)
@@ -21,20 +20,13 @@ function App() {
   const [depMissing, setDepMissing] = useState(null)
   const [showPresetSidebar, setShowPresetSidebar] = useState(false)
 
-  const t = (key) => translations[language][key] || key
-
   const showNotification = useCallback((msg, type = "info") => {
     setNotification({ msg, type, id: Date.now() })
     setTimeout(() => setNotification(null), 3500)
   }, [])
 
-  const presetHook = usePreset({ t, showNotification })
+  const presetHook = usePreset({ showNotification })
   const projectV2 = useProjectV2({ t, showNotification, presets: presetHook.presets })
-
-  // Apply dark theme to document root
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light")
-  }, [isDark])
 
   useEffect(() => {
     fetch(`${API_BASE}/agent-catalog`)
@@ -116,8 +108,6 @@ function App() {
                 </button>
               </div>
               <PresetPanel
-                t={t} language={language}
-                isDark={isDark}
                 presets={presetHook.presets}
                 defaultPreset={presetHook.defaultPreset}
                 handleSetDefaultPreset={presetHook.handleSetDefaultPreset}
@@ -144,12 +134,8 @@ function App() {
         )}
 
         <Workbench
-          t={t} language={language}
-          isDark={isDark} setIsDark={setIsDark}
-          setLanguage={setLanguage}
           setShowWorkspaceSettings={setShowWorkspaceSettings}
-          setShowPresetSidebar={setShowPresetSidebar}
-          showPresetSidebar={showPresetSidebar}
+          setShowPresetSidebar={setShowPresetSidebar} showPresetSidebar={showPresetSidebar}
           presets={presetHook.presets}
           defaultPreset={presetHook.defaultPreset}
           showNotification={showNotification}
@@ -161,31 +147,31 @@ function App() {
       </div>
 
       <WorkspaceSettings
-        t={t} showWorkspaceSettings={showWorkspaceSettings}
+        showWorkspaceSettings={showWorkspaceSettings}
         setShowWorkspaceSettings={setShowWorkspaceSettings}
         workspaceSettings={workspaceSettings} setWorkspaceSettings={setWorkspaceSettings}
         handleSaveWorkspaceConfig={handleSaveWorkspaceConfig}
         wsConfigLoading={wsConfigLoading}
       />
 
-      <ConfirmDialog t={t} confirmDialog={confirmDialog} setConfirmDialog={setConfirmDialog} />
-      <DangerConfirmModal t={t} language={language} dangerCommand={dangerCommand} setDangerCommand={setDangerCommand} onConfirm={handleDangerConfirm} />
+      <ConfirmDialog confirmDialog={confirmDialog} setConfirmDialog={setConfirmDialog} />
+      <DangerConfirmModal dangerCommand={dangerCommand} setDangerCommand={setDangerCommand} onConfirm={handleDangerConfirm} />
 
       {depMissing && (
         <div className="confirm-overlay" onClick={handleDepSkip}>
           <div className="danger-confirm-dialog" onClick={e => e.stopPropagation()} style={{ borderColor: "var(--orange)" }}>
-            <div className="danger-confirm-icon">\u26a0\ufe0f</div>
-            <div className="danger-confirm-title">{language === "zh" ? "\u73af\u5883\u4f9d\u8d56\u7f3a\u5931" : "Missing Dependency"}</div>
+            <div className="danger-confirm-icon">⚠️</div>
+            <div className="danger-confirm-title">{t("missingDependency")}</div>
             <div className="danger-confirm-desc">
               {language === "zh"
-                ? `Agent \u6d4b\u8bd5\u65f6\u53d1\u73b0\u7f3a\u5c11\u4f9d\u8d56 "${depMissing.module}"\uff0c\u662f\u5426\u5b89\u88c5\uff1f`
+                ? `Agent 测试时发现缺少依赖 "${depMissing.module}"，是否安装？`
                 : `Agent detected missing dependency "${depMissing.module}". Install?`}
             </div>
             <div className="danger-confirm-cmd">{depMissing.suggestion}</div>
             <div className="danger-confirm-actions">
-              <button className="danger-confirm-reject" onClick={handleDepSkip}>{language === "zh" ? "\u8df3\u8fc7" : "Skip"}</button>
+              <button className="danger-confirm-reject" onClick={handleDepSkip}>{t("skip")}</button>
               <button className="danger-confirm-approve" onClick={() => handleDepInstall(depMissing)}>
-                {language === "zh" ? `\u5b89\u88c5 ${depMissing.module}` : `Install ${depMissing.module}`}
+                {language === "zh" ? `安装 ${depMissing.module}` : `Install ${depMissing.module}`}
               </button>
             </div>
           </div>
@@ -199,4 +185,10 @@ function App() {
   )
 }
 
-export default App
+export default function App() {
+  return (
+    <AppProvider>
+      <AppInner />
+    </AppProvider>
+  )
+}

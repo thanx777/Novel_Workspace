@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { API_FORMATS } from '../constants'
 import TestResultCard from './TestResultCard'
+import { useApp } from '../context/AppContext'
 
-export function PresetPanel({ t, language, presets, defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset, showAddPreset, setShowAddPreset, newPresetName, setNewPresetName, newPresetConfig, setNewPresetConfig, handleAddPreset, handleDeletePreset, editingPreset, setEditingPreset, editPresetConfig, setEditPresetConfig, handleUpdatePreset, runTestConnection, testConnState, testConnResult, selectedNode, updateNodeConfig, openEditPreset, showNotification, setConfirmDialog, applyPresetToAll, allNodes }) {
+export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset, showAddPreset, setShowAddPreset, newPresetName, setNewPresetName, newPresetConfig, setNewPresetConfig, handleAddPreset, handleDeletePreset, editingPreset, setEditingPreset, editPresetConfig, setEditPresetConfig, handleUpdatePreset, runTestConnection, testConnState, testConnResult, selectedNode, updateNodeConfig, openEditPreset, showNotification, setConfirmDialog, applyPresetToAll, allNodes }) {
+  const { t, language } = useApp()
   return (
     <div className="sidebar-section preset-section">
       <div className="sidebar-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -277,7 +279,8 @@ export function ChatPanel({ t, language, conversations, dialogEndRef, memory, se
   )
 }
 
-export function TaskPanel({ t, language, tasks, onResume, onDelete, onRefresh, isRunning }) {
+export function TaskPanel({ tasks, onResume, onDelete, onRefresh, isRunning }) {
+  const { t, language } = useApp()
   const [expanded, setExpanded] = useState(false)
   const statusLabels = { completed: language === 'zh' ? '已完成' : 'Done', in_progress: language === 'zh' ? '已中断' : 'Paused', unknown: language === 'zh' ? '未知' : 'Unknown' }
 

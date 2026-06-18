@@ -6,7 +6,7 @@ import difflib
 import asyncio
 from typing import Dict, List, Optional
 
-from ..common.base_engine import BaseEngine, MWRTask, Draft, ReviewResult, FinalDecision
+from ..common.base_engine import BaseEngine
 from ..common.llm_client import LLMClient, is_llm_error
 from ..common.kg_adapter import KGAdapter
 from ..common.state import EngineState
@@ -53,20 +53,6 @@ class ReviewEngine(BaseEngine):
         self._current_dimension = 0
         self._current_chapter = 0
         self._dimensions_done: List[str] = []
-
-    # ---- MWR 抽象方法存根（不再使用 MWR 循环，但需满足 BaseEngine 接口）----
-
-    def manager_decide(self, round_num: int, last_result: Optional[ReviewResult] = None) -> MWRTask:
-        return MWRTask(action="review")
-
-    async def writer_execute(self, task: MWRTask) -> Draft:
-        return Draft()
-
-    async def reviewer_evaluate(self, draft: Draft) -> ReviewResult:
-        return ReviewResult()
-
-    def manager_final_decision(self) -> FinalDecision:
-        return FinalDecision(accepted=True)
 
     # ---- 取消控制 ----
 

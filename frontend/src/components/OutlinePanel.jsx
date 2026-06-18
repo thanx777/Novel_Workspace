@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react"
+import { useApp } from "../context/AppContext"
 
 const LAYER_META = {
   L1: { icon: "📚", label: "L1 全书大纲", color: "#1c1917" },
@@ -19,7 +20,8 @@ const VIEW_META = {
   ],
 }
 
-export default function OutlinePanel({ t, language, projectName, API_BASE, showNotification }) {
+export default function OutlinePanel({ projectName, API_BASE, showNotification }) {
+  const { t, language } = useApp()
   const [layer, setLayer] = useState("L1")
   const [view, setView] = useState("md")
   const [data, setData] = useState({})  // {L1: {md, json_data}, L2: {md, json_data}}
@@ -75,13 +77,13 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   const onRegenerate = async () => {
     if (!projectName) return
     setRegenerating(true)
-    showNotification?.(language === "zh" ? "🔄 正在重新生成..." : "🔄 Regenerating...", "info")
+    showNotification?.(t('regenerating'), "info")
     try {
       const url = `${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${layer}/regenerate`
       await fetch(url, { method: "POST" })
       await loadStatus()
       await loadLayer(layer)
-      showNotification?.(language === "zh" ? "✅ 重新生成完成" : "✅ Regenerated", "success")
+      showNotification?.(t('regenerated'), "success")
     } catch (e) {
       showNotification?.(String(e), "error")
     } finally {
@@ -123,7 +125,7 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
   return (
     <div className="side-panel outline-panel outline-panel-v2">
       <div className="side-panel-header">
-        <span>📋 {language === "zh" ? "大纲" : "Outline"}</span>
+        <span>📋 {t('outline')}</span>
         <button className="side-panel-action" onClick={() => onRegenerate()}
           disabled={regenerating || !status[layer]?.enabled}>
           {regenerating ? "⏳" : "🔄"}
@@ -166,14 +168,14 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
         {/* AI 对话 */}
         <div className="outline-chat">
           <div className="outline-chat-header" onClick={() => setChatExpanded(!chatExpanded)}>
-            <span>💬 {language === "zh" ? "AI 对话" : "AI Chat"}</span>
+            <span>💬 {t('aiChat')}</span>
             <span className="outline-chat-toggle">{chatExpanded ? "▾" : "▸"}</span>
           </div>
           {chatExpanded && (
             <div className="outline-chat-body">
               <div className="outline-chat-messages">
                 {chatMessages.length === 0 && (
-                  <div className="outline-chat-hint">{language === "zh" ? "输入反馈或修改指令，AI 将帮你调整大纲" : "Type feedback or instructions, AI will help modify the outline"}</div>
+                  <div className="outline-chat-hint">{t('outlineChatHint')}</div>
                 )}
                 {chatMessages.map((m, i) => (
                   <div key={i} className={`outline-chat-msg ${m.role}`}>
@@ -184,7 +186,7 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
                 {chatLoading && (
                   <div className="outline-chat-msg assistant">
                     <span className="outline-chat-msg-role">🤖</span>
-                    <span className="outline-chat-msg-content loading">{language === "zh" ? "思考中…" : "Thinking…"}</span>
+                    <span className="outline-chat-msg-content loading">{t('thinkingEllipsisZh')}</span>
                   </div>
                 )}
                 <div ref={chatEndRef} />
@@ -196,7 +198,7 @@ export default function OutlinePanel({ t, language, projectName, API_BASE, showN
                   value={chatInput}
                   onChange={e => setChatInput(e.target.value)}
                   onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage() } }}
-                  placeholder={language === "zh" ? "输入修改意见…" : "Type feedback…"}
+                  placeholder={t('typeFeedback')}
                   disabled={chatLoading}
                 />
                 <button className="outline-chat-send" onClick={sendChatMessage} disabled={chatLoading || !chatInput.trim()}>

@@ -52,7 +52,7 @@ from test_runner import parse_test_instructions, execute_test, terminal_executor
 # V2 API Router（分层大纲 + 知识图谱）
 v2_router = None
 try:
-    from v2_api import router as _v2_router
+    from api.v2_router import router as _v2_router
     v2_router = _v2_router
 except Exception as _v2_err:
     print(f"[warn] v2_api 加载失败: {_v2_err}")

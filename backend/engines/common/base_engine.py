@@ -2,7 +2,6 @@
 
 import os
 import re
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -53,7 +52,7 @@ class FinalDecision:
     reason: str = ""
 
 
-class BaseEngine(ABC):
+class BaseEngine:
     """三引擎共享的 MWR 循环骨架。
 
     子类只需实现 4 个方法：
@@ -286,25 +285,21 @@ class BaseEngine(ABC):
         self._emit({"status": "cycle_ended", "accepted": final.accepted, "reason": final.reason})
         return last_result or ReviewResult(score=0.0, issues=["循环结束且无评审结果"])
 
-    @abstractmethod
     def manager_decide(self, round_num: int, last_result: Optional[ReviewResult] = None) -> MWRTask:
-        """Manager 决定本轮任务。"""
-        ...
+        """Manager 决定本轮任务。子类使用 MWR 循环时必须实现。"""
+        raise NotImplementedError("Subclass using MWR cycle must implement manager_decide")
 
-    @abstractmethod
     async def writer_execute(self, task: MWRTask) -> Draft:
-        """Writer 执行写作任务。"""
-        ...
+        """Writer 执行写作任务。子类使用 MWR 循环时必须实现。"""
+        raise NotImplementedError("Subclass using MWR cycle must implement writer_execute")
 
-    @abstractmethod
     async def reviewer_evaluate(self, draft: Draft) -> ReviewResult:
-        """Reviewer 评审草稿。"""
-        ...
+        """Reviewer 评审草稿。子类使用 MWR 循环时必须实现。"""
+        raise NotImplementedError("Subclass using MWR cycle must implement reviewer_evaluate")
 
-    @abstractmethod
     def manager_final_decision(self) -> FinalDecision:
-        """Manager 最终决策（达到轮数上限时）。"""
-        ...
+        """Manager 最终决策（达到轮数上限时）。子类使用 MWR 循环时必须实现。"""
+        raise NotImplementedError("Subclass using MWR cycle must implement manager_final_decision")
 
     def _on_cycle_completed(self, round_num: int, result: ReviewResult):
         """循环完成后的钩子（子类可覆盖）。"""

@@ -15,9 +15,7 @@ from ..common.prompts import (
 )
 from project_db import ProjectDB
 
-# 复用现有模板和解析
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# 复用现有模板和解析（sys.path 已由 engines/__init__.py 统一设置）
 from outline_templates import (
     get_prompt, parse_markdown_to_json, validate_template,
     LAYER_NAMES, REQUIRED_FIELDS_L1, REQUIRED_FIELDS_L2,
