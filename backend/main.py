@@ -7,8 +7,12 @@ import json
 import os
 import re
 import time
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
@@ -92,6 +96,11 @@ class TerminalManager:
 
 app = FastAPI()
 
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS 白名单：仅允许本地开发前端访问，避免任意源跨域
 _ALLOWED_ORIGINS = [
     "http://localhost:5173",
@@ -113,6 +122,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SlowAPIMiddleware)
 
 # 挂载 v2 router
 if v2_router is not None:
@@ -161,7 +171,8 @@ class PresetUpdate(BaseModel):
     thinking_mode: Optional[str] = None
 
 @app.get("/api/presets")
-def get_presets():
+@limiter.limit("60/minute")
+def get_presets(request: Request):
     config_path = os.path.join(os.path.dirname(__file__), "config.json")
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
@@ -169,7 +180,8 @@ def get_presets():
     return {"presets": []}
 
 @app.post("/api/presets")
-def add_preset(preset: PresetCreate):
+@limiter.limit("60/minute")
+def add_preset(request: Request, preset: PresetCreate):
     data = _read_config()
     if "presets" not in data:
         data["presets"] = []
@@ -178,7 +190,8 @@ def add_preset(preset: PresetCreate):
     return data
 
 @app.delete("/api/presets")
-def delete_preset(name: str):
+@limiter.limit("60/minute")
+def delete_preset(request: Request, name: str):
     data = _read_config()
     if "presets" not in data:
         data["presets"] = []
@@ -187,7 +200,8 @@ def delete_preset(name: str):
     return data
 
 @app.put("/api/presets")
-def update_preset(preset: PresetUpdate):
+@limiter.limit("60/minute")
+def update_preset(request: Request, preset: PresetUpdate):
     data = _read_config()
     if "presets" not in data:
         data["presets"] = []
@@ -199,7 +213,8 @@ def update_preset(preset: PresetUpdate):
     raise HTTPException(status_code=404, detail="Preset not found")
 
 @app.put("/api/presets/default")
-def set_default_preset(name: str):
+@limiter.limit("60/minute")
+def set_default_preset(request: Request, name: str):
     """设置默认预设（新项目自动使用此预设）。"""
     data = _read_config()
     # 验证预设存在
@@ -211,7 +226,8 @@ def set_default_preset(name: str):
     return data
 
 @app.delete("/api/presets/default")
-def clear_default_preset():
+@limiter.limit("60/minute")
+def clear_default_preset(request: Request):
     """清除默认预设。"""
     data = _read_config()
     data.pop("default_preset", None)
@@ -227,7 +243,8 @@ class WorkspaceConfigModel(BaseModel):
     projects_dir: str = ""
 
 @app.get("/api/workspace-config")
-def get_workspace_config():
+@limiter.limit("60/minute")
+def get_workspace_config(request: Request):
     data = _read_config()
     return {
         "workspace_dir": data.get("workspace_dir", ""),
@@ -239,7 +256,8 @@ def get_workspace_config():
     }
 
 @app.put("/api/workspace-config")
-def update_workspace_config(cfg: WorkspaceConfigModel):
+@limiter.limit("60/minute")
+def update_workspace_config(request: Request, cfg: WorkspaceConfigModel):
     global WORKSPACE_DIR, PROJECTS_DIR
     data = _read_config()
 
@@ -271,11 +289,13 @@ def update_workspace_config(cfg: WorkspaceConfigModel):
     }
 
 @app.get("/api/workspace/config")
-def get_workspace():
+@limiter.limit("60/minute")
+def get_workspace(request: Request):
     return WorkspaceConfig(path=WORKSPACE_DIR)
 
 @app.post("/api/workspace/config")
-def set_workspace(config: WorkspaceConfig):
+@limiter.limit("60/minute")
+def set_workspace(request: Request, config: WorkspaceConfig):
     global WORKSPACE_DIR
     WORKSPACE_DIR = config.path
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -289,7 +309,8 @@ class FolderStructure(BaseModel):
     folders: List[str]
 
 @app.get("/api/workspace/files")
-def list_files(folder: str = ""):
+@limiter.limit("60/minute")
+def list_files(request: Request, folder: str = ""):
     target_dir = safe_join(WORKSPACE_DIR, folder) if folder else os.path.abspath(WORKSPACE_DIR)
     if not os.path.isdir(target_dir):
         return {"files": [], "folder": folder}
@@ -301,14 +322,16 @@ def list_files(folder: str = ""):
     return {"files": files, "folder": folder}
 
 @app.post("/api/workspace/folders")
-def create_folders(structure: FolderStructure):
+@limiter.limit("60/minute")
+def create_folders(request: Request, structure: FolderStructure):
     for folder in structure.folders:
         target = safe_join(WORKSPACE_DIR, folder)
         os.makedirs(target, exist_ok=True)
     return {"status": "success"}
 
 @app.get("/api/workspace/files/{filename:path}")
-def get_file(filename: str):
+@limiter.limit("60/minute")
+def get_file(request: Request, filename: str):
     path = get_full_path(filename)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -316,7 +339,8 @@ def get_file(filename: str):
         return {"content": f.read(), "filename": filename}
 
 @app.post("/api/workspace/files/{filename:path}")
-def save_file(filename: str, body: FileContent):
+@limiter.limit("60/minute")
+def save_file(request: Request, filename: str, body: FileContent):
     path = get_full_path(filename)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -324,7 +348,8 @@ def save_file(filename: str, body: FileContent):
     return {"status": "success", "filename": filename}
 
 @app.delete("/api/workspace/files/{filename:path}")
-def delete_file(filename: str):
+@limiter.limit("60/minute")
+def delete_file(request: Request, filename: str):
     path = get_full_path(filename)
     if os.path.exists(path):
         os.remove(path)
@@ -336,7 +361,8 @@ def delete_file(filename: str):
 # ============================================
 
 @app.get("/api/projects")
-def list_projects():
+@limiter.limit("60/minute")
+def list_projects(request: Request):
     projects = []
     if os.path.isdir(PROJECTS_DIR):
         for f in sorted(os.listdir(PROJECTS_DIR)):
@@ -345,7 +371,8 @@ def list_projects():
     return {"projects": projects}
 
 @app.post("/api/projects")
-def save_project(project: dict):
+@limiter.limit("60/minute")
+def save_project(request: Request, project: dict):
     name = project.get("name", "untitled")
     filename = re.sub(r'[<>:"/\\|?*]', "_", name) + ".json"
     path = os.path.join(PROJECTS_DIR, filename)
@@ -355,7 +382,8 @@ def save_project(project: dict):
     return {"status": "success", "filename": filename}
 
 @app.get("/api/projects/{filename}")
-def load_project(filename: str):
+@limiter.limit("60/minute")
+def load_project(request: Request, filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     filepath = os.path.join(PROJECTS_DIR, filename)
@@ -365,7 +393,8 @@ def load_project(filename: str):
         return json.load(f)
 
 @app.delete("/api/projects/{filename}")
-def delete_project(filename: str):
+@limiter.limit("60/minute")
+def delete_project(request: Request, filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     filepath = os.path.join(PROJECTS_DIR, filename)
@@ -379,12 +408,14 @@ def delete_project(filename: str):
 # ============================================
 
 @app.get("/api/prompt-templates")
-def get_prompt_templates():
+@limiter.limit("60/minute")
+def get_prompt_templates(request: Request):
     """提示词模板列表（已迁移到新引擎，此端点保留兼容）。"""
     return {"frameworks": {}}
 
 @app.get("/api/agent-catalog")
-def get_agent_catalog():
+@limiter.limit("60/minute")
+def get_agent_catalog(request: Request):
     """角色目录（已迁移到新引擎，此端点保留兼容，返回空列表）。"""
     return {"agents": []}
 
@@ -399,7 +430,8 @@ class OptimizePromptRequest(BaseModel):
 OPTIMIZE_SYSTEM_PROMPT = "You are a task optimizer. Rewrite user input into a clear, structured, executable task description. Preserve all key requirements. Output only the optimized task."
 
 @app.post("/api/optimize-prompt")
-async def optimize_prompt(req: OptimizePromptRequest):
+@limiter.limit("10/minute")
+async def optimize_prompt(request: Request, req: OptimizePromptRequest):
     preset = req.preset
     config = AgentConfig(
         api_key=preset.get("api_key", ""),
@@ -440,7 +472,8 @@ class SkillFindRequest(BaseModel):
     query: str
 
 @app.get("/api/skills")
-def api_list_skills():
+@limiter.limit("60/minute")
+def api_list_skills(request: Request):
     try:
         skills = load_all_skills()
         return {"skills": skills, "status": "success"}
@@ -448,14 +481,16 @@ def api_list_skills():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/skills/{name}")
-def api_get_skill(name: str):
+@limiter.limit("60/minute")
+def api_get_skill(request: Request, name: str):
     skill = load_skill_content(name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
     return {"skill": skill, "status": "success"}
 
 @app.post("/api/skills/create")
-async def api_create_skill(req: SkillCreateRequest):
+@limiter.limit("10/minute")
+async def api_create_skill(request: Request, req: SkillCreateRequest):
     content = req.user_prompt.strip()
     if req.preset and req.preset.get("api_key"):
         config = AgentConfig(
@@ -478,17 +513,20 @@ async def api_create_skill(req: SkillCreateRequest):
     return {"status": "success", "name": req.name}
 
 @app.put("/api/skills/{name}")
-def api_update_skill(name: str, req: SkillUpdateRequest):
+@limiter.limit("60/minute")
+def api_update_skill(request: Request, name: str, req: SkillUpdateRequest):
     save_skill(name, req.content, req.description, req.category, req.tags)
     return {"status": "success", "name": name}
 
 @app.delete("/api/skills/{name}")
-def api_delete_skill(name: str):
+@limiter.limit("60/minute")
+def api_delete_skill(request: Request, name: str):
     delete_skill(name)
     return {"status": "success"}
 
 @app.post("/api/skills/find")
-def api_find_skill(req: SkillFindRequest):
+@limiter.limit("60/minute")
+def api_find_skill(request: Request, req: SkillFindRequest):
     results = search_skills(req.query)
     return {"results": results, "status": "success"}
 
@@ -497,7 +535,8 @@ def api_find_skill(req: SkillFindRequest):
 # ============================================
 
 @app.post("/api/test-connection")
-async def test_connection(config: AgentConfig):
+@limiter.limit("10/minute")
+async def test_connection(request: Request, config: AgentConfig):
     start_time = time.time()
     api_key = config.api_key.strip()
     base_url = config.base_url.strip().strip("`").strip()
@@ -545,13 +584,15 @@ class TestExecRequest(BaseModel):
     workspace_dir: str = ""
 
 @app.post("/api/test/exec")
-async def api_test_exec(req: TestExecRequest):
+@limiter.limit("60/minute")
+async def api_test_exec(request: Request, req: TestExecRequest):
     ws_dir = req.workspace_dir or WORKSPACE_DIR
     result = await execute_test(req.instruction, ws_dir)
     return result.to_dict()
 
 @app.get("/api/test/capabilities")
-def api_test_capabilities():
+@limiter.limit("60/minute")
+def api_test_capabilities(request: Request):
     caps = {"terminal": True, "code_python": True, "code_node": True, "api_test": True, "playwright": False}
     try:
         __import__("playwright")
@@ -565,7 +606,8 @@ class TestConfirmRequest(BaseModel):
     workspace_dir: str = ""
 
 @app.post("/api/test/confirm")
-async def api_test_confirm(req: TestConfirmRequest):
+@limiter.limit("60/minute")
+async def api_test_confirm(request: Request, req: TestConfirmRequest):
     import re as _re
     cmd_match = _re.match(r"\[TEST:CMD:\s*(.+)\]$", req.instruction, re.IGNORECASE)
     if not cmd_match:
@@ -578,7 +620,8 @@ class DepInstallRequest(BaseModel):
     suggestion: str = ""
 
 @app.post("/api/test/dep-install")
-async def api_dep_install(req: DepInstallRequest):
+@limiter.limit("60/minute")
+async def api_dep_install(request: Request, req: DepInstallRequest):
     cmd = req.suggestion or f"pip install {req.module}"
     result_parts = []
     exit_code = -1
@@ -654,7 +697,8 @@ class _AssistantChat(BaseModel):
 
 
 @app.get("/api/v2/projects")
-def v2_list_projects():
+@limiter.limit("60/minute")
+def v2_list_projects(request: Request):
     """新版项目列表（从 SQLite 读）。"""
     try:
         data = list_all_projects()
@@ -664,7 +708,8 @@ def v2_list_projects():
 
 
 @app.post("/api/v2/projects")
-def v2_create_project(p: _ProjectCreate):
+@limiter.limit("60/minute")
+def v2_create_project(request: Request, p: _ProjectCreate):
     """创建新项目。"""
     try:
         result = create_project(
@@ -693,7 +738,8 @@ def v2_create_project(p: _ProjectCreate):
 
 
 @app.delete("/api/v2/projects/{project_name}")
-def v2_delete_project(project_name: str):
+@limiter.limit("60/minute")
+def v2_delete_project(request: Request, project_name: str):
     """删除项目。"""
     try:
         ok = delete_project(project_name)
@@ -714,7 +760,8 @@ class _ProjectPatch(BaseModel):
 
 
 @app.patch("/api/v2/projects/{project_name}")
-def v2_patch_project(project_name: str, body: _ProjectPatch):
+@limiter.limit("60/minute")
+def v2_patch_project(request: Request, project_name: str, body: _ProjectPatch):
     """部分更新项目信息（标题、题材等）。"""
     try:
         db = ProjectDB(project_name)
@@ -745,7 +792,8 @@ def v2_patch_project(project_name: str, body: _ProjectPatch):
 
 
 @app.get("/api/v2/projects/{project_name}")
-def v2_get_project(project_name: str):
+@limiter.limit("60/minute")
+def v2_get_project(request: Request, project_name: str):
     """读取单个项目的完整信息（给前端详情页用）。"""
     try:
         db = ProjectDB(project_name)
@@ -757,7 +805,8 @@ def v2_get_project(project_name: str):
 
 
 @app.get("/api/v2/projects/{project_name}/presets")
-def v2_get_project_presets(project_name: str):
+@limiter.limit("60/minute")
+def v2_get_project_presets(request: Request, project_name: str):
     """读取项目的三角色模型预设。"""
     try:
         db = ProjectDB(project_name)
@@ -769,7 +818,8 @@ def v2_get_project_presets(project_name: str):
 
 
 @app.put("/api/v2/projects/{project_name}/presets")
-def v2_update_project_presets(project_name: str, body: _ProjectPresets):
+@limiter.limit("60/minute")
+def v2_update_project_presets(request: Request, project_name: str, body: _ProjectPresets):
     """保存项目的角色模型预设（部分更新，只传要改的角色）。"""
     try:
         db = ProjectDB(project_name)
@@ -787,7 +837,8 @@ def v2_update_project_presets(project_name: str, body: _ProjectPresets):
 
 
 @app.get("/api/v2/projects/{project_name}/chapters")
-def v2_list_chapters(project_name: str):
+@limiter.limit("60/minute")
+def v2_list_chapters(request: Request, project_name: str):
     """章节列表（侧边栏用）。"""
     try:
         db = ProjectDB(project_name)
@@ -799,7 +850,8 @@ def v2_list_chapters(project_name: str):
 
 
 @app.get("/api/v2/projects/{project_name}/chapters/{chapter_index}")
-def v2_get_chapter(project_name: str, chapter_index: int):
+@limiter.limit("60/minute")
+def v2_get_chapter(request: Request, project_name: str, chapter_index: int):
     """读取单章正文。前端展示时清洗元数据标记，源文件保留。"""
     try:
         db = ProjectDB(project_name)
@@ -820,7 +872,8 @@ def v2_get_chapter(project_name: str, chapter_index: int):
 
 
 @app.patch("/api/v2/projects/{project_name}/chapters/{chapter_index}")
-def v2_update_chapter(project_name: str, chapter_index: int, body: dict):
+@limiter.limit("60/minute")
+def v2_update_chapter(request: Request, project_name: str, chapter_index: int, body: dict):
     """人工编辑章节（标题/摘要/正文）。"""
     try:
         db = ProjectDB(project_name)
@@ -842,7 +895,8 @@ def v2_update_chapter(project_name: str, chapter_index: int, body: dict):
 
 
 @app.get("/api/v2/projects/{project_name}/memory")
-def v2_list_memory(project_name: str):
+@limiter.limit("60/minute")
+def v2_list_memory(request: Request, project_name: str):
     """记忆条目列表。"""
     try:
         db = ProjectDB(project_name)
@@ -854,7 +908,8 @@ def v2_list_memory(project_name: str):
 
 
 @app.post("/api/v2/projects/{project_name}/memory")
-def v2_add_memory(project_name: str, body: dict):
+@limiter.limit("60/minute")
+def v2_add_memory(request: Request, project_name: str, body: dict):
     """添加一条记忆。"""
     try:
         db = ProjectDB(project_name)
@@ -869,7 +924,8 @@ def v2_add_memory(project_name: str, body: dict):
 
 
 @app.post("/api/v2/projects/{project_name}/confirm-outline")
-def v2_confirm_outline(project_name: str):
+@limiter.limit("60/minute")
+def v2_confirm_outline(request: Request, project_name: str):
     """人工审查大纲后，推进到写作阶段。"""
     try:
         db = ProjectDB(project_name)
@@ -882,7 +938,8 @@ def v2_confirm_outline(project_name: str):
 
 
 @app.post("/api/v2/projects/{project_name}/reject-outline")
-def v2_reject_outline(project_name: str):
+@limiter.limit("60/minute")
+def v2_reject_outline(request: Request, project_name: str):
     """审查不通过，停留在 outline 状态。"""
     try:
         db = ProjectDB(project_name)
@@ -895,7 +952,8 @@ def v2_reject_outline(project_name: str):
 
 
 @app.post("/api/v2/projects/{project_name}/confirm-writing")
-def v2_confirm_writing(project_name: str):
+@limiter.limit("60/minute")
+def v2_confirm_writing(request: Request, project_name: str):
     """写作完成后，推进到审校阶段。"""
     try:
         db = ProjectDB(project_name)
@@ -908,7 +966,8 @@ def v2_confirm_writing(project_name: str):
 
 
 @app.post("/api/v2/projects/{project_name}/confirm-review")
-def v2_confirm_review(project_name: str):
+@limiter.limit("60/minute")
+def v2_confirm_review(request: Request, project_name: str):
     """审校完成，标记项目为已完成。"""
     try:
         db = ProjectDB(project_name)
@@ -921,7 +980,8 @@ def v2_confirm_review(project_name: str):
 
 
 @app.post("/api/v2/projects/migrate-old")
-def v2_migrate_old_projects(body: dict = {}):
+@limiter.limit("60/minute")
+def v2_migrate_old_projects(request: Request, body: dict = {}):
     """迁移旧 run_* 目录到新项目系统。支持 dry-run。"""
     import subprocess
     dry = "1" if body.get("dry_run", False) else ""
@@ -948,7 +1008,8 @@ def v2_migrate_old_projects(body: dict = {}):
 # ============================================
 
 @app.post("/api/v2/projects/{project_name}/assistant/chat")
-def v2_assistant_chat(project_name: str, body: _AssistantChat):
+@limiter.limit("10/minute")
+def v2_assistant_chat(request: Request, project_name: str, body: _AssistantChat):
     """项目 AI 助理：结合项目上下文，自然语言问答。"""
     try:
         pa = ProjectAssistant(project_name, body.presets or [])
@@ -1005,7 +1066,8 @@ def _remove_character_from_md(md: str, name: str) -> Tuple[str, bool]:
 
 
 @app.post("/api/v2/projects/{project_name}/delete-character")
-def v2_delete_character(project_name: str, body: _DeleteCharacter):
+@limiter.limit("60/minute")
+def v2_delete_character(request: Request, project_name: str, body: _DeleteCharacter):
     """
     删除指定名称的角色。
     可选：先用 AI 校验要删除的 name 是否与文件中某个角色匹配（模糊匹配）。
@@ -1056,7 +1118,8 @@ def v2_delete_character(project_name: str, body: _DeleteCharacter):
 
 
 @app.post("/api/v2/projects/{project_name}/ai-add-character")
-def v2_ai_add_character(project_name: str, body: _AiAddCharacter):
+@limiter.limit("10/minute")
+def v2_ai_add_character(request: Request, project_name: str, body: _AiAddCharacter):
     """
     使用 AI 把作者的自然语言人物描述，转换为符合 characters.md 格式的 markdown
     并自动追加到文件中。
@@ -1138,7 +1201,8 @@ def v2_ai_add_character(project_name: str, body: _AiAddCharacter):
 
 
 @app.post("/api/v2/projects/{project_name}/assistant/suggest-next")
-def v2_assistant_suggest_next(project_name: str, body: dict = {}):
+@limiter.limit("10/minute")
+def v2_assistant_suggest_next(request: Request, project_name: str, body: dict = {}):
     """建议下一章节怎么写。"""
     try:
         presets = body.get("presets", []) if body else []
@@ -1150,7 +1214,8 @@ def v2_assistant_suggest_next(project_name: str, body: dict = {}):
 
 
 @app.post("/api/v2/projects/{project_name}/assistant/analyze-consistency")
-def v2_assistant_analyze(project_name: str, body: dict = {}):
+@limiter.limit("10/minute")
+def v2_assistant_analyze(request: Request, project_name: str, body: dict = {}):
     """检查全文一致性问题。"""
     try:
         presets = body.get("presets", []) if body else []
@@ -1162,7 +1227,8 @@ def v2_assistant_analyze(project_name: str, body: dict = {}):
 
 
 @app.get("/api/v2/projects/{project_name}/chat")
-def v2_list_chat_history(project_name: str):
+@limiter.limit("60/minute")
+def v2_list_chat_history(request: Request, project_name: str):
     """对话历史记录。"""
     try:
         db = ProjectDB(project_name)
@@ -1178,7 +1244,8 @@ def v2_list_chat_history(project_name: str):
 # ============================================
 
 @app.get("/api/v2/projects/{project_name}/file/{file_path:path}")
-def v2_get_project_file(project_name: str, file_path: str):
+@limiter.limit("60/minute")
+def v2_get_project_file(request: Request, project_name: str, file_path: str):
     """读取项目内任意文件（outline.md, characters.md 等）。
     章节文件（chapters/*.txt）返回时清洗元数据标记，源文件保留。
     """
@@ -1203,7 +1270,8 @@ def v2_get_project_file(project_name: str, file_path: str):
 
 
 @app.put("/api/v2/projects/{project_name}/file/{file_path:path}")
-def v2_put_project_file(project_name: str, file_path: str, body: dict):
+@limiter.limit("60/minute")
+def v2_put_project_file(request: Request, project_name: str, file_path: str, body: dict):
     """写入项目内任意文件。"""
     try:
         project_dir = get_project_dir(project_name)

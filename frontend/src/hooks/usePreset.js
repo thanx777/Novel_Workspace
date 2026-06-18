@@ -15,80 +15,76 @@ export default function usePreset({ showNotification, setNodes }) {
   const [testConnResult, setTestConnResult] = useState(null)
   const [defaultPreset, setDefaultPreset] = useState(null)
 
-  const fetchPresets = useCallback(() => {
-    fetch(`${API_BASE}/presets`)
-      .then(r => r.json())
-      .then(d => {
-        setPresets(d.presets || [])
-        setDefaultPreset(d.default_preset || null)
-      })
-      .catch(err => { console.error('fetchPresets error:', err) })
+  const fetchPresets = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/presets`)
+      const d = await r.json()
+      setPresets(d.presets || [])
+      setDefaultPreset(d.default_preset || null)
+    } catch (err) { console.error('fetchPresets error:', err) }
   }, [])
 
-  const handleSetDefaultPreset = useCallback((name) => {
-    fetch(`${API_BASE}/presets/default?name=${encodeURIComponent(name)}`, { method: 'PUT' })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then(data => {
-        setDefaultPreset(data.default_preset || name)
-        showNotification(language === 'zh' ? `已将「${name}」设为默认预设` : `Set "${name}" as default preset`, 'success')
-      })
-      .catch(err => { showNotification(language === 'zh' ? '设置默认失败: ' : 'Set default failed: ' + err.message, 'error') })
+  const handleSetDefaultPreset = useCallback(async (name) => {
+    try {
+      const r = await fetch(`${API_BASE}/presets/default?name=${encodeURIComponent(name)}`, { method: 'PUT' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      setDefaultPreset(data.default_preset || name)
+      showNotification(language === 'zh' ? `已将「${name}」设为默认预设` : `Set "${name}" as default preset`, 'success')
+    } catch (err) { showNotification(language === 'zh' ? '设置默认失败: ' : 'Set default failed: ' + err.message, 'error') }
   }, [language, showNotification])
 
-  const handleClearDefaultPreset = useCallback(() => {
-    fetch(`${API_BASE}/presets/default`, { method: 'DELETE' })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then(() => {
-        setDefaultPreset(null)
-        showNotification(language === 'zh' ? '已清除默认预设' : 'Default preset cleared', 'success')
-      })
-      .catch(err => { showNotification(language === 'zh' ? '清除默认失败: ' : 'Clear default failed: ' + err.message, 'error') })
+  const handleClearDefaultPreset = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/presets/default`, { method: 'DELETE' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      await r.json()
+      setDefaultPreset(null)
+      showNotification(language === 'zh' ? '已清除默认预设' : 'Default preset cleared', 'success')
+    } catch (err) { showNotification(language === 'zh' ? '清除默认失败: ' : 'Clear default failed: ' + err.message, 'error') }
   }, [language, showNotification])
 
-  const handleAddPreset = useCallback(() => {
+  const handleAddPreset = useCallback(async () => {
     if (!newPresetName.trim()) return
     if (!newPresetConfig.api_key.trim() || !newPresetConfig.model.trim() || !newPresetConfig.base_url.trim()) {
       showNotification(language === 'zh' ? '请填写完整的预设信息' : 'Please fill in all preset fields', 'error')
       return
     }
-    fetch(`${API_BASE}/presets`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: newPresetName.trim(), base_url: newPresetConfig.base_url.trim(),
-        model: newPresetConfig.model.trim(), api_key: newPresetConfig.api_key.trim(),
-        api_format: newPresetConfig.api_format,
-        thinking_mode: newPresetConfig.thinking_mode || 'disabled'
+    try {
+      const r = await fetch(`${API_BASE}/presets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newPresetName.trim(), base_url: newPresetConfig.base_url.trim(),
+          model: newPresetConfig.model.trim(), api_key: newPresetConfig.api_key.trim(),
+          api_format: newPresetConfig.api_format,
+          thinking_mode: newPresetConfig.thinking_mode || 'disabled'
+        })
       })
-    })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then((data) => {
-        if (data.presets) setPresets(data.presets)
-        else fetchPresets()
-        setShowAddPreset(false)
-        setNewPresetName('')
-        setNewPresetConfig({ api_key: '', base_url: '', model: '', api_format: 'openai', thinking_mode: 'disabled' })
-        showNotification(language === 'zh' ? '预设已添加' : 'Preset added', 'success')
-      })
-      .catch(err => { showNotification(language === 'zh' ? '添加预设失败: ' : 'Add preset failed: ' + err.message, 'error') })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      if (data.presets) setPresets(data.presets)
+      else fetchPresets()
+      setShowAddPreset(false)
+      setNewPresetName('')
+      setNewPresetConfig({ api_key: '', base_url: '', model: '', api_format: 'openai', thinking_mode: 'disabled' })
+      showNotification(language === 'zh' ? '预设已添加' : 'Preset added', 'success')
+    } catch (err) { showNotification(language === 'zh' ? '添加预设失败: ' : 'Add preset failed: ' + err.message, 'error') }
   }, [newPresetName, newPresetConfig, language, showNotification, fetchPresets])
 
-  const handleDeletePreset = useCallback((presetName, t) => {
-    return new Promise((resolve) => {
-      fetch(`${API_BASE}/presets?name=${encodeURIComponent(presetName)}`, { method: 'DELETE' })
-        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-        .then((data) => {
-          if (data.presets) setPresets(data.presets)
-          else fetchPresets()
-          safeSetNodes(prev => prev.map(n =>
-            n.config.preset_name === presetName ? { ...n, config: { ...n.config, preset_name: '' } } : n
-          ))
-          if (editingPreset === presetName) setEditingPreset(null)
-          showNotification(language === 'zh' ? `预设「${presetName}」已删除` : `Preset "${presetName}" deleted`, 'success')
-          resolve()
-        })
-        .catch(err => { showNotification(language === 'zh' ? '删除预设失败: ' : 'Delete preset failed: ' + err.message, 'error'); resolve() })
-    })
+  const handleDeletePreset = useCallback(async (presetName, t) => {
+    try {
+      const r = await fetch(`${API_BASE}/presets?name=${encodeURIComponent(presetName)}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      if (data.presets) setPresets(data.presets)
+      else fetchPresets()
+      safeSetNodes(prev => prev.map(n =>
+        n.config.preset_name === presetName ? { ...n, config: { ...n.config, preset_name: '' } } : n
+      ))
+      if (editingPreset === presetName) setEditingPreset(null)
+      showNotification(language === 'zh' ? `预设「${presetName}」已删除` : `Preset "${presetName}" deleted`, 'success')
+    } catch (err) { showNotification(language === 'zh' ? '删除预设失败: ' : 'Delete preset failed: ' + err.message, 'error') }
   }, [language, showNotification, fetchPresets, editingPreset, safeSetNodes])
 
   const openEditPreset = useCallback((presetName) => {
@@ -98,35 +94,35 @@ export default function usePreset({ showNotification, setNodes }) {
     setEditPresetConfig({ name: preset.name, api_key: preset.api_key || '', base_url: preset.base_url || '', model: preset.model || '', api_format: preset.api_format || 'openai', chat_template_kwargs: preset.chat_template_kwargs || null, thinking_mode: preset.thinking_mode || 'disabled' })
   }, [presets])
 
-  const handleUpdatePreset = useCallback((t) => {
+  const handleUpdatePreset = useCallback(async (t) => {
     if (!editPresetConfig.name.trim() || !editPresetConfig.model.trim() || !editPresetConfig.base_url.trim()) {
       showNotification(language === 'zh' ? '请填写完整信息' : 'Please fill in all fields', 'error')
       return
     }
-    fetch(`${API_BASE}/presets`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        original_name: editingPreset, name: editPresetConfig.name.trim(),
-        base_url: editPresetConfig.base_url.trim(), model: editPresetConfig.model.trim(),
-        api_key: editPresetConfig.api_key.trim(), api_format: editPresetConfig.api_format,
-        thinking_mode: editPresetConfig.thinking_mode || null
+    try {
+      const r = await fetch(`${API_BASE}/presets`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          original_name: editingPreset, name: editPresetConfig.name.trim(),
+          base_url: editPresetConfig.base_url.trim(), model: editPresetConfig.model.trim(),
+          api_key: editPresetConfig.api_key.trim(), api_format: editPresetConfig.api_format,
+          thinking_mode: editPresetConfig.thinking_mode || null
+        })
       })
-    })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() })
-      .then((data) => {
-        if (data.presets) setPresets(data.presets)
-        else fetchPresets()
-        const oldName = editingPreset, newName = editPresetConfig.name.trim()
-        if (oldName !== newName) {
-          safeSetNodes(prev => prev.map(n =>
-            n.config.preset_name === oldName ? { ...n, config: { ...n.config, preset_name: newName } } : n
-          ))
-        }
-        setEditingPreset(newName)
-        showNotification(t('presetUpdated'), 'success')
-      })
-      .catch(err => { showNotification(language === 'zh' ? '更新预设失败: ' : 'Update preset failed: ' + err.message, 'error') })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data = await r.json()
+      if (data.presets) setPresets(data.presets)
+      else fetchPresets()
+      const oldName = editingPreset, newName = editPresetConfig.name.trim()
+      if (oldName !== newName) {
+        safeSetNodes(prev => prev.map(n =>
+          n.config.preset_name === oldName ? { ...n, config: { ...n.config, preset_name: newName } } : n
+        ))
+      }
+      setEditingPreset(newName)
+      showNotification(t('presetUpdated'), 'success')
+    } catch (err) { showNotification(language === 'zh' ? '更新预设失败: ' : 'Update preset failed: ' + err.message, 'error') }
   }, [editPresetConfig, editingPreset, language, showNotification, fetchPresets, safeSetNodes, t])
 
   const runTestConnection = useCallback(async (config, t) => {

@@ -2,7 +2,7 @@
 知识图谱核心模块
 - 7 种节点类型：chapter / character / scene / plot_thread / foreshadowing / world_fact / outline_node
 - 6 种边类型：appears_in / happens_in / belongs_to / related_to / foreshadows / derived_from
-- JSON 持久化
+- SQLite 持久化（向后兼容 JSON）
 - 上下文检索
 - bootstrap_from_markdown（迁移旧数据）
 - export_markdown_view（人读视图）
@@ -10,6 +10,7 @@
 import os
 import json
 import re
+import sqlite3
 import time
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -97,23 +98,179 @@ def _new_edge(edge_id: str, type_: str, source: str, target: str, attrs: Optiona
 # ============================================================
 
 class KnowledgeGraph:
-    """知识图谱主类。"""
+    """知识图谱主类。支持 SQLite 和 JSON 双后端，自动检测并迁移。"""
 
     GRAPH_FILENAME = "knowledge_graph.json"
     BACKUP_FILENAME = "knowledge_graph.json.bak"
+    DB_FILENAME = "kg.db"
 
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
         self.memory_dir = os.path.join(project_dir, "memory")
         self.graph_path = os.path.join(self.memory_dir, self.GRAPH_FILENAME)
         self.backup_path = os.path.join(self.memory_dir, self.BACKUP_FILENAME)
+        self.db_path = os.path.join(self.memory_dir, self.DB_FILENAME)
         self.nodes: Dict[str, Dict] = {}
         self.edges: Dict[str, Dict] = {}
         self._loaded = False
+        self._use_sqlite = False
+
+        # 检测后端：如果 kg.db 存在则用 SQLite，否则用 JSON
+        # 新项目也会在 save() 时创建 kg.db
+        if os.path.isfile(self.db_path):
+            self._use_sqlite = True
+
+    # ----- SQLite 内部方法 -----
+
+    def _init_db(self, conn: sqlite3.Connection):
+        """初始化 SQLite 数据库表结构。"""
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS kg_nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                label TEXT NOT NULL,
+                properties TEXT
+            );
+            CREATE TABLE IF NOT EXISTS kg_edges (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                properties TEXT,
+                UNIQUE(source, target, relation)
+            );
+        """)
+        conn.commit()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """获取 SQLite 连接（每次创建新连接，避免文件锁问题）。"""
+        os.makedirs(self.memory_dir, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _row_to_node(self, row) -> Dict:
+        """将 SQLite 行转为节点字典。"""
+        props = json.loads(row["properties"]) if row["properties"] else {}
+        return {
+            "id": row["id"],
+            "type": row["type"],
+            "label": row["label"],
+            "summary": props.pop("summary", ""),
+            "attrs": props.pop("attrs", {}),
+            "created_at": props.pop("created_at", time.time()),
+            "updated_at": props.pop("updated_at", time.time()),
+        }
+
+    def _node_to_props(self, node: Dict) -> str:
+        """将节点字典中除 id/type/label 外的字段序列化为 JSON properties。"""
+        props = {
+            "summary": node.get("summary", ""),
+            "attrs": node.get("attrs", {}),
+            "created_at": node.get("created_at", time.time()),
+            "updated_at": node.get("updated_at", time.time()),
+        }
+        return json.dumps(props, ensure_ascii=False)
+
+    def _row_to_edge(self, row) -> Dict:
+        """将 SQLite 行转为边字典。"""
+        props = json.loads(row["properties"]) if row["properties"] else {}
+        return {
+            "id": row["id"],
+            "type": row["relation"],
+            "source": row["source"],
+            "target": row["target"],
+            "attrs": props.pop("attrs", {}),
+            "created_at": props.pop("created_at", time.time()),
+        }
+
+    def _edge_to_props(self, edge: Dict) -> str:
+        """将边字典中除 id/source/target/relation 外的字段序列化为 JSON properties。"""
+        props = {
+            "attrs": edge.get("attrs", {}),
+            "created_at": edge.get("created_at", time.time()),
+        }
+        return json.dumps(props, ensure_ascii=False)
+
+    # ----- 迁移 -----
+
+    def _migrate_json_to_sqlite(self):
+        """将现有 knowledge_graph.json 数据导入 kg.db。"""
+        if not os.path.isfile(self.graph_path):
+            return
+        try:
+            with open(self.graph_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        conn = self._get_conn()
+        try:
+            self._init_db(conn)
+            # 写入节点
+            for node_id, node in data.get("nodes", {}).items():
+                props = self._node_to_props(node)
+                conn.execute(
+                    "INSERT OR REPLACE INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?)",
+                    (node["id"], node["type"], node["label"], props),
+                )
+            # 写入边
+            for edge_id, edge in data.get("edges", {}).items():
+                props = self._edge_to_props(edge)
+                conn.execute(
+                    "INSERT OR REPLACE INTO kg_edges (id, source, target, relation, properties) VALUES (?, ?, ?, ?, ?)",
+                    (edge["id"], edge["source"], edge["target"], edge["type"], props),
+                )
+            conn.commit()
+            self._use_sqlite = True
+        except Exception:
+            conn.rollback()
+        finally:
+            conn.close()
 
     # ----- 持久化 -----
 
     def save(self) -> bool:
+        if self._use_sqlite:
+            return self._save_sqlite()
+        else:
+            # 首次保存时尝试迁移到 SQLite
+            self._migrate_json_to_sqlite()
+            if self._use_sqlite:
+                return self._save_sqlite()
+            # 无 JSON 可迁移（新项目），直接使用 SQLite
+            self._use_sqlite = True
+            return self._save_sqlite()
+
+    def _save_sqlite(self) -> bool:
+        """将内存中的 nodes/edges 全量写入 SQLite。"""
+        conn = self._get_conn()
+        try:
+            self._init_db(conn)
+            conn.execute("DELETE FROM kg_nodes")
+            conn.execute("DELETE FROM kg_edges")
+            for node_id, node in self.nodes.items():
+                props = self._node_to_props(node)
+                conn.execute(
+                    "INSERT INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?)",
+                    (node["id"], node["type"], node["label"], props),
+                )
+            for edge_id, edge in self.edges.items():
+                props = self._edge_to_props(edge)
+                conn.execute(
+                    "INSERT INTO kg_edges (id, source, target, relation, properties) VALUES (?, ?, ?, ?, ?)",
+                    (edge["id"], edge["source"], edge["target"], edge["type"], props),
+                )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def _save_json(self) -> bool:
+        """JSON 后端保存（向后兼容）。"""
         os.makedirs(self.memory_dir, exist_ok=True)
         data = {
             "version": "1.0",
@@ -146,6 +303,59 @@ class KnowledgeGraph:
             return False
 
     def load(self) -> bool:
+        if self._use_sqlite:
+            return self._load_sqlite()
+        else:
+            # 如果 JSON 不存在但 SQLite 存在（不应发生，但做防御）
+            if not os.path.isfile(self.graph_path) and os.path.isfile(self.db_path):
+                self._use_sqlite = True
+                return self._load_sqlite()
+            # 如果 JSON 存在，先尝试加载 JSON，然后迁移到 SQLite
+            result = self._load_json()
+            if self._loaded and (self.nodes or self.edges):
+                self._migrate_json_to_sqlite()
+            elif not os.path.isfile(self.graph_path):
+                # 新项目：无 JSON 无 SQLite，直接用 SQLite
+                self._use_sqlite = True
+                conn = self._get_conn()
+                try:
+                    self._init_db(conn)
+                finally:
+                    conn.close()
+            return result
+
+    def _load_sqlite(self) -> bool:
+        """从 SQLite 加载。"""
+        if not os.path.isfile(self.db_path):
+            self._loaded = True
+            return False
+        conn = self._get_conn()
+        try:
+            self._init_db(conn)
+            # 加载节点
+            rows = conn.execute("SELECT id, type, label, properties FROM kg_nodes").fetchall()
+            self.nodes = {}
+            for row in rows:
+                node = self._row_to_node(row)
+                self.nodes[node["id"]] = node
+            # 加载边
+            rows = conn.execute("SELECT id, source, target, relation, properties FROM kg_edges").fetchall()
+            self.edges = {}
+            for row in rows:
+                edge = self._row_to_edge(row)
+                self.edges[edge["id"]] = edge
+            self._loaded = True
+            return True
+        except Exception:
+            self.nodes = {}
+            self.edges = {}
+            self._loaded = True
+            return False
+        finally:
+            conn.close()
+
+    def _load_json(self) -> bool:
+        """JSON 后端加载（向后兼容）。"""
         if not os.path.isfile(self.graph_path):
             # 尝试从备份恢复
             if os.path.isfile(self.backup_path):
@@ -156,7 +366,7 @@ class KnowledgeGraph:
                     self.edges = data.get("edges", {})
                     self._loaded = True
                     # 恢复后立即保存为正式文件
-                    self.save()
+                    self._save_json()
                     return True
                 except Exception:
                     pass
@@ -178,7 +388,7 @@ class KnowledgeGraph:
                     self.nodes = data.get("nodes", {})
                     self.edges = data.get("edges", {})
                     self._loaded = True
-                    self.save()
+                    self._save_json()
                     return True
                 except Exception:
                     pass
@@ -268,9 +478,10 @@ class KnowledgeGraph:
             edge_by_type[e["type"]] = edge_by_type.get(e["type"], 0) + 1
         last_ingest = 0
         try:
-            if os.path.isfile(self.graph_path):
-                mtime = os.path.getmtime(self.graph_path)
-                last_ingest = mtime
+            if self._use_sqlite and os.path.isfile(self.db_path):
+                last_ingest = os.path.getmtime(self.db_path)
+            elif os.path.isfile(self.graph_path):
+                last_ingest = os.path.getmtime(self.graph_path)
         except Exception:
             pass
         return {
@@ -413,6 +624,29 @@ class KnowledgeGraph:
         """兼容 memory_manager 接口。"""
         return self.export_markdown_view()
 
+    # ----- JSON 导入/导出 -----
+
+    def to_dict(self) -> Dict:
+        """导出为字典（用于 API 返回和调试）。"""
+        self.ensure_loaded()
+        return {
+            "version": "1.0",
+            "nodes": dict(self.nodes),
+            "edges": dict(self.edges),
+        }
+
+    def from_dict(self, data: Dict):
+        """从字典导入（覆盖当前数据）。"""
+        self.nodes = data.get("nodes", {})
+        self.edges = data.get("edges", {})
+        self._loaded = True
+
+    # ----- 关闭 -----
+
+    def close(self):
+        """关闭资源（SQLite 连接已在每次操作后关闭，此方法保留兼容）。"""
+        pass
+
 
 # ============================================================
 # 单元测试
@@ -421,6 +655,7 @@ class KnowledgeGraph:
 def _self_test():
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
+        # 测试新项目（直接用 SQLite）
         kg = KnowledgeGraph(tmp)
         kg.add_node("char_林轩", "character", "林轩", "主角", {"age": 18})
         kg.add_node("ch_1", "chapter", "第1章 开篇", "林轩出身", {"chapter_num": 1})
@@ -428,9 +663,12 @@ def _self_test():
         kg.add_edge("e1", "appears_in", "char_林轩", "ch_1")
         kg.add_edge("e2", "belongs_to", "fs_1", "ch_1")
         assert kg.save()
-        # 重新加载
+        assert kg._use_sqlite, "新项目应使用 SQLite 后端"
+
+        # 重新加载（SQLite 后端）
         kg2 = KnowledgeGraph(tmp)
         kg2.load()
+        assert kg2._use_sqlite, "已有 kg.db 应使用 SQLite 后端"
         assert len(kg2.nodes) == 3
         assert len(kg2.edges) == 2
         # 统计
@@ -442,6 +680,34 @@ def _self_test():
         # 导出
         md = kg2.export_markdown_view()
         assert "林轩" in md
+        # to_dict / from_dict
+        d = kg2.to_dict()
+        assert len(d["nodes"]) == 3
+        assert len(d["edges"]) == 2
+
+        # 测试 JSON 迁移到 SQLite
+        tmp2 = os.path.join(tmp, "migration_test")
+        os.makedirs(os.path.join(tmp2, "memory"), exist_ok=True)
+        json_path = os.path.join(tmp2, "memory", "knowledge_graph.json")
+        json_data = {
+            "version": "1.0",
+            "nodes": {
+                "char_A": {"id": "char_A", "type": "character", "label": "角色A", "summary": "测试", "attrs": {}, "created_at": 1.0, "updated_at": 1.0},
+            },
+            "edges": {
+                "e1": {"id": "e1", "type": "appears_in", "source": "char_A", "target": "ch_1", "attrs": {}, "created_at": 1.0},
+            },
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(json_data, f)
+
+        kg3 = KnowledgeGraph(tmp2)
+        kg3.load()
+        # 加载后应自动迁移到 SQLite
+        assert kg3._use_sqlite, "加载 JSON 后应迁移到 SQLite"
+        assert len(kg3.nodes) == 1
+        assert len(kg3.edges) == 1
+
         print("Self-test passed!")
 
 

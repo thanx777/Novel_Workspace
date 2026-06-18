@@ -18,6 +18,94 @@ from datetime import datetime
 from typing import List, Dict, Optional, Any, Union
 
 # ============================================================
+# Fernet 加密密钥管理
+# ============================================================
+
+_FERNET_INSTANCE = None
+
+
+def _get_fernet():
+    """获取 Fernet 加密实例（单例）。
+
+    密钥来源优先级：
+    1. 环境变量 OMNI_AGENT_SECRET
+    2. backend/.secret_key 文件
+    3. 自动生成新密钥，保存到 .secret_key 并打印提示
+    """
+    global _FERNET_INSTANCE
+    if _FERNET_INSTANCE is not None:
+        return _FERNET_INSTANCE
+
+    from cryptography.fernet import Fernet
+
+    secret_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret_key")
+
+    # 1. 从环境变量读取
+    secret = os.environ.get("OMNI_AGENT_SECRET", "").strip()
+
+    # 2. 从 .secret_key 文件读取
+    if not secret and os.path.exists(secret_key_path):
+        try:
+            with open(secret_key_path, "r", encoding="utf-8") as f:
+                secret = f.read().strip()
+        except Exception:
+            pass
+
+    # 3. 生成新密钥
+    if not secret:
+        secret = Fernet.generate_key().decode("utf-8")
+        try:
+            with open(secret_key_path, "w", encoding="utf-8") as f:
+                f.write(secret)
+            print(f"[SECURITY] 已生成新的加密密钥，保存到 {secret_key_path}")
+            print(f"[SECURITY] 建议将以下密钥设置到环境变量 OMNI_AGENT_SECRET：")
+            print(f"[SECURITY]   {secret}")
+        except Exception as e:
+            print(f"[SECURITY] 无法保存密钥文件: {e}")
+
+    try:
+        _FERNET_INSTANCE = Fernet(secret.encode("utf-8") if isinstance(secret, str) else secret)
+    except Exception as e:
+        print(f"[SECURITY] Fernet 密钥无效，将重新生成: {e}")
+        secret = Fernet.generate_key().decode("utf-8")
+        try:
+            with open(secret_key_path, "w", encoding="utf-8") as f:
+                f.write(secret)
+        except Exception:
+            pass
+        _FERNET_INSTANCE = Fernet(secret.encode("utf-8"))
+
+    return _FERNET_INSTANCE
+
+
+def _encrypt_api_key(key: str, fernet=None) -> str:
+    """加密 api_key。如果已经是 Fernet 密文（以 gAAAAA 开头），直接返回。"""
+    if not key or not isinstance(key, str):
+        return key
+    # 已经是加密格式，跳过
+    if key.startswith("gAAAAA"):
+        return key
+    try:
+        f = fernet or _get_fernet()
+        return f.encrypt(key.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return key
+
+
+def _decrypt_api_key(key: str, fernet=None) -> str:
+    """解密 api_key。如果解密失败，返回原值（兼容未加密的旧数据）。"""
+    if not key or not isinstance(key, str):
+        return key
+    # 不是加密格式，直接返回
+    if not key.startswith("gAAAAA"):
+        return key
+    try:
+        f = fernet or _get_fernet()
+        return f.decrypt(key.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return key
+
+# ============================================================
 # 基础路径配置
 # ============================================================
 
@@ -259,6 +347,14 @@ class ProjectDB:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1')"
             )
             self.conn.commit()
+            current_version = 1
+
+        if current_version < 2:
+            self._migrate_v1_to_v2()
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '2')"
+            )
+            self.conn.commit()
 
     def _migrate_v0_to_v1(self, conn=None):
         """v0→v1: 添加 chat_preset / outline_mode / outline_layers / word_count / max_rounds 字段"""
@@ -282,6 +378,38 @@ class ProjectDB:
                 c.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
         except Exception:
             pass
+
+    def _migrate_v1_to_v2(self, conn=None):
+        """v1→v2: 加密 preset JSON 中的明文 api_key"""
+        c = conn or self.conn
+        try:
+            fernet = _get_fernet()
+            cur = c.execute("SELECT id, manager_preset, worker_preset, reviewer_preset, chat_preset FROM projects")
+            rows = cur.fetchall()
+            for row in rows:
+                row_id = row[0]
+                updated = False
+                new_values = {}
+                for col_idx, col_name in enumerate(["manager_preset", "worker_preset", "reviewer_preset", "chat_preset"], start=1):
+                    raw = row[col_idx]
+                    if not raw or not isinstance(raw, str) or not raw.strip():
+                        continue
+                    try:
+                        preset = json.loads(raw)
+                        if isinstance(preset, dict) and "api_key" in preset:
+                            api_key = preset["api_key"]
+                            if api_key and isinstance(api_key, str) and not api_key.startswith("gAAAAA"):
+                                preset["api_key"] = _encrypt_api_key(api_key, fernet)
+                                new_values[col_name] = json.dumps(preset, ensure_ascii=False)
+                                updated = True
+                    except (json.JSONDecodeError, Exception):
+                        pass
+                if updated:
+                    set_clause = ", ".join(f"{k}=?" for k in new_values)
+                    values = list(new_values.values()) + [row_id]
+                    c.execute(f"UPDATE projects SET {set_clause} WHERE id=?", values)
+        except Exception as e:
+            print(f"[DB] _migrate_v1_to_v2 error: {e}")
 
     def _migrate_outline_layers(self) -> None:
         """把旧 outline_mode 迁移到 outline_layers。"""
@@ -348,26 +476,35 @@ class ProjectDB:
     # ---------------- 项目 CRUD ----------------
 
     def get_project(self) -> Dict:
-        """获取项目信息（manager/worker/reviewer/chat_preset 自动解析 JSON）"""
+        """获取项目信息（manager/worker/reviewer/chat_preset 自动解析 JSON，api_key 自动解密）"""
         cur = self.conn.execute("SELECT * FROM projects WHERE name=?", (self.project_name,))
         info = self._row_to_dict(cur.fetchone()) or {}
         for k in ("manager_preset", "worker_preset", "reviewer_preset", "chat_preset"):
             v = info.get(k)
             if isinstance(v, str) and v.strip():
-                try: info[k] = json.loads(v)
+                try:
+                    preset = json.loads(v)
+                    # 解密 api_key
+                    if isinstance(preset, dict) and "api_key" in preset:
+                        preset["api_key"] = _decrypt_api_key(preset["api_key"])
+                    info[k] = preset
                 except Exception: info[k] = {}
             else:
                 info[k] = {}
         return info
 
     def update_project(self, **kwargs) -> bool:
-        """更新项目字段（dict 类型字段会自动 JSON 序列化）"""
+        """更新项目字段（dict 类型字段会自动 JSON 序列化，api_key 自动加密）"""
         if not kwargs:
             return False
         kwargs["updated_at"] = self._now()
         for k in ("manager_preset", "worker_preset", "reviewer_preset", "chat_preset"):
             if k in kwargs and isinstance(kwargs[k], (dict, list)):
-                kwargs[k] = json.dumps(kwargs[k], ensure_ascii=False)
+                preset = kwargs[k]
+                # 加密 api_key
+                if isinstance(preset, dict) and "api_key" in preset:
+                    preset["api_key"] = _encrypt_api_key(preset["api_key"])
+                kwargs[k] = json.dumps(preset, ensure_ascii=False)
         fields = ", ".join(f"{k}=?" for k in kwargs)
         values = list(kwargs.values()) + [self.project_name]
         try:

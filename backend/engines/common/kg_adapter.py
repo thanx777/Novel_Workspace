@@ -14,8 +14,14 @@ class KGAdapter:
     def __init__(self, kg=None, project_dir: str = ""):
         self._kg = kg
         self.project_dir = project_dir
-        # 并发锁：保护涉及 kg.save() 的异步方法，防止并发写入丢数据
-        self._lock = asyncio.Lock()
+        # 并发锁：per-project 锁，保护涉及 kg.save() 的异步方法，防止并发写入丢数据
+        self._locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, project_name: str) -> asyncio.Lock:
+        """获取 per-project 锁，不同项目互不阻塞。"""
+        if project_name not in self._locks:
+            self._locks[project_name] = asyncio.Lock()
+        return self._locks[project_name]
 
     @property
     def kg(self):
@@ -414,7 +420,7 @@ class KGAdapter:
             emit({"status": "kg_ingesting", "chapter": chapter_num, "message": f"AI 正在摄取第{chapter_num}章到知识图谱..."})
 
         # 并发锁保护：防止多章并发摄取时 KG 数据丢失
-        async with self._lock:
+        async with self._get_lock(self.project_dir):
             # 先添加章节节点（基础信息）
             title = ""
             title_match = re.search(r"第\d+章[：:\s]*(.+?)[\n\r]", chapter_text)
@@ -471,7 +477,7 @@ class KGAdapter:
             emit({"status": "kg_ingesting_outline", "layer": layer, "message": f"AI 正在摄取{layer}大纲到知识图谱..."})
 
         # 并发锁保护：防止并发摄取时 KG 数据丢失
-        async with self._lock:
+        async with self._get_lock(self.project_dir):
             # 先添加大纲节点
             from .prompts import LAYER_NAMES
             node_id = f"outline_{layer}_root"

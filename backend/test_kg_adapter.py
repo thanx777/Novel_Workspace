@@ -358,16 +358,18 @@ def t16():
 
 # ============ 17. KGAdapter — 并发锁机制 ============
 def t17():
-    """验证 asyncio.Lock 存在且可正常使用。"""
+    """验证 per-project asyncio.Lock 存在且可正常使用。"""
     with tempfile.TemporaryDirectory() as tmp:
         kg = KnowledgeGraph(tmp)
         adapter = KGAdapter(kg=kg, project_dir=tmp)
-        # 验证 _lock 是 asyncio.Lock
-        assert isinstance(adapter._lock, asyncio.Lock)
+        # 验证 _locks 是字典，且 _get_lock 返回 asyncio.Lock
+        assert isinstance(adapter._locks, dict)
+        lock = adapter._get_lock(tmp)
+        assert isinstance(lock, asyncio.Lock)
 
         # 验证锁可正常获取和释放
         async def _test_lock():
-            async with adapter._lock:
+            async with adapter._get_lock(tmp):
                 # 在锁内执行写入
                 adapter.add_chapter_node(1, "测试章节", "摘要")
             return "ok"
