@@ -18,7 +18,7 @@ export default function Modals({
       {/* 新建项目 Modal */}
       {showCreate && (
         <div className="modal-overlay" onClick={() => setShowCreate(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+          <div className="modal-box" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
             <div className="modal-title">{t("newProject")}</div>
             <div className="modal-body">
               <div className="editor-field">
@@ -159,11 +159,11 @@ export default function Modals({
       {/* 项目删除确认弹窗 */}
       {confirmDeleteProject && (
         <div className="modal-overlay" onClick={() => !deleting && setConfirmDeleteProject(null)}>
-          <div className="pc-modal danger-modal" onClick={e => e.stopPropagation()}
+          <div className="pc-modal danger-modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}
             style={{ maxWidth: 440 }}>
             <div className="pc-modal-header danger">
               <span>🗑 {t("deleteProject")}</span>
-              <button className="pc-modal-close" onClick={() => setConfirmDeleteProject(null)} disabled={deleting}>×</button>
+              <button className="pc-modal-close" onClick={() => setConfirmDeleteProject(null)} disabled={deleting} aria-label="关闭">×</button>
             </div>
             <div className="pc-modal-body">
               <div className="delete-warning-icon">⚠️</div>

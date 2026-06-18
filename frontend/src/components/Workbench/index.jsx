@@ -11,6 +11,7 @@ import OutlineEditor from "./OutlineEditor"
 import AssistantPanel from "./AssistantPanel"
 import Modals from "./Modals"
 import { useApp } from "../../context/AppContext"
+import { formatTime } from "@/utils/format"
 
 /** 从章节内容中提取标题（与后端 _extract_chapter_title 逻辑一致） */
 function extractTitleFromContent(content) {
@@ -257,11 +258,6 @@ export default function Workbench({
     const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000)
     return () => clearInterval(timer)
   }, [isRunning])
-
-  const formatTime = (s) => {
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
-    return h > 0 ? `${h}h ${m}m ${sec}s` : `${m}m ${sec}s`
-  }
 
   // ---- Load project presets ----
   useEffect(() => {

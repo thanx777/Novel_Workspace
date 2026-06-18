@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import { useApp } from "../context/AppContext"
+import { formatTime, formatTimestamp } from "@/utils/format"
 
 /**
  * LogPanel — 运行日志面板
@@ -27,11 +28,6 @@ export default function LogPanel({
     const el = e.target
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30
     setAutoScroll(atBottom)
-  }
-
-  const formatTime = (s) => {
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
-    return h > 0 ? `${h}h ${m}m ${sec}s` : `${m}m ${sec}s`
   }
 
   const statusIcon = (status) => {
@@ -103,7 +99,7 @@ export default function LogPanel({
             <div key={i} className={`log-panel-row log-status-${log.status || "info"}`}>
               <span className="log-panel-icon">{statusIcon(log.status)}</span>
               <span className="log-panel-time">
-                {new Date(log.timestamp || Date.now()).toLocaleTimeString("zh-CN", { hour12: false })}
+                {formatTimestamp(log.timestamp)}
               </span>
               {log.role && <span className="log-panel-role">{log.role}</span>}
               <span className="log-panel-msg">{log.message || JSON.stringify(log)}</span>

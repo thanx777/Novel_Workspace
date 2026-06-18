@@ -845,7 +845,7 @@ function NodeDetail({ node, edges, nodes, editing, setEditing,
         <span className="kg-node-icon">{m.icon}</span>
         <span className="kg-node-type">{m.label}</span>
         {layer && <span className="kg-node-layer">{layer}</span>}
-        <button className="kg-close-btn" onClick={onClose} title="关闭">✕</button>
+        <button className="kg-close-btn" onClick={onClose} title="关闭" aria-label="关闭">✕</button>
       </div>
       {editing ? (
         <div className="kg-node-edit">

@@ -236,27 +236,50 @@ class ProjectDB:
     # ---------------- 内部方法 ----------------
 
     def _init_schema(self):
-        """初始化表结构"""
+        """初始化表结构 + 版本化迁移"""
         self.conn.executescript(self.SCHEMA)
-        # 兼容老库：确保 chat_preset 字段存在
+
+        # 确保 schema_meta 表存在
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
+        # 读取当前 schema_version
+        cur = self.conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'")
+        row = cur.fetchone()
+        current_version = int(row[0]) if row else 0
+
+        # 版本化迁移链
+        if current_version < 1:
+            self._migrate_v0_to_v1()
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1')"
+            )
+            self.conn.commit()
+
+    def _migrate_v0_to_v1(self, conn=None):
+        """v0→v1: 添加 chat_preset / outline_mode / outline_layers / word_count / max_rounds 字段"""
+        c = conn or self.conn
         try:
-            cur = self.conn.execute("PRAGMA table_info(projects)")
+            cur = c.execute("PRAGMA table_info(projects)")
             cols = {row[1] for row in cur.fetchall()}
             if "chat_preset" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN chat_preset TEXT DEFAULT ''")
+                c.execute("ALTER TABLE projects ADD COLUMN chat_preset TEXT DEFAULT ''")
             if "outline_mode" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN outline_mode TEXT DEFAULT ''")
+                c.execute("ALTER TABLE projects ADD COLUMN outline_mode TEXT DEFAULT ''")
             if "outline_layers" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN outline_layers TEXT DEFAULT ''")
+                c.execute("ALTER TABLE projects ADD COLUMN outline_layers TEXT DEFAULT ''")
             if "word_count_min" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN word_count_min INTEGER DEFAULT 3000")
+                c.execute("ALTER TABLE projects ADD COLUMN word_count_min INTEGER DEFAULT 3000")
             if "word_count_max" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN word_count_max INTEGER DEFAULT 5000")
+                c.execute("ALTER TABLE projects ADD COLUMN word_count_max INTEGER DEFAULT 5000")
             if "max_rounds_writing" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN max_rounds_writing INTEGER DEFAULT 10")
+                c.execute("ALTER TABLE projects ADD COLUMN max_rounds_writing INTEGER DEFAULT 10")
             if "max_rounds_outline" not in cols:
-                self.conn.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
-            self.conn.commit()
+                c.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
         except Exception:
             pass
 

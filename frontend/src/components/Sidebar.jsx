@@ -88,8 +88,9 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
           )}
           <button className="preset-delete-btn"
             onClick={(e) => { e.stopPropagation(); setConfirmDialog({ message: t('confirmDeletePreset'), onConfirm: async () => { await handleDeletePreset(preset.name); setConfirmDialog(null) }, onCancel: () => setConfirmDialog(null) }) }}
-            title={t('deletePreset')}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            title={t('deletePreset')}
+            aria-label="删除预设">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
           </button>
         </div>
       ))}
@@ -100,8 +101,8 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
           <div className="preset-edit-panel">
             <div className="preset-edit-header">
               <span className="preset-edit-title">{t('editPreset')}</span>
-              <button className="preset-edit-close" onClick={() => setEditingPreset(null)}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+              <button className="preset-edit-close" onClick={() => setEditingPreset(null)} aria-label="关闭">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
             </div>
             <div className="preset-edit-body">
@@ -245,19 +246,19 @@ export function ChatPanel({ conversations, dialogEndRef, memory, setMemory, show
             onClick={isRunning ? handleStop : () => runTask(t)}
             disabled={!isRunning && !taskInput.trim()}
             style={isRunning ? {} : { flex: 1 }}
-          >
+            aria-label={isRunning ? '停止' : '发送'}>
             {isRunning ? (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
             ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
             )}
           </button>
         </div>
         {!isRunning && (
         <div className="optimize-btn-wrapper">
-          <button className="dialog-send-btn optimize-btn" onClick={(e) => { e.stopPropagation(); setShowOptimizeDropdown(!showOptimizeDropdown) }} disabled={!taskInput.trim() || optimizing} title={t('optimizePrompt')}>
+          <button className="dialog-send-btn optimize-btn" onClick={(e) => { e.stopPropagation(); setShowOptimizeDropdown(!showOptimizeDropdown) }} disabled={!taskInput.trim() || optimizing} title={t('optimizePrompt')} aria-label="优化提示词">
             {optimizing ? <span className="spinner" /> : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>
             )}
           </button>
           {showOptimizeDropdown && (

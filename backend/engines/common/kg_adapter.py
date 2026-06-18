@@ -652,185 +652,204 @@ class KGAdapter:
             return result
         return data
 
+    # ---- 单类实体写入方法 ----
+
+    def _write_character(self, ch: Dict, chapter_num: int) -> int:
+        """写入单个角色实体到 KG，返回写入数量（0 或 1）。"""
+        name = ch.get("name", "").strip()
+        if not name:
+            return 0
+        nid = f"char_{name}"
+        summary = f"{ch.get('identity', '')} {ch.get('status', '')}".strip()
+        attrs = {
+            "identity": ch.get("identity", ""),
+            "status": ch.get("status", ""),
+            "relations": ch.get("relations", []),
+        }
+        if chapter_num:
+            attrs["latest_chapter"] = chapter_num
+            existing = self.kg.get_node(nid)
+            if existing:
+                appearances = existing.get("attrs", {}).get("appearances", [])
+                if chapter_num not in appearances:
+                    appearances.append(chapter_num)
+                attrs["appearances"] = appearances
+            else:
+                attrs["appearances"] = [chapter_num]
+
+        self.kg.add_node(nid, "character", name, summary=summary or name, attrs=attrs)
+        if chapter_num:
+            self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "appears_in", nid, f"chapter_{chapter_num}",
+                             attrs={"chapter_num": chapter_num})
+        return 1
+
+    def _write_foreshadowing(self, fs: Dict, chapter_num: int) -> int:
+        """写入单个伏笔实体到 KG，返回写入数量（0 或 1）。"""
+        fs_id = fs.get("id", "").strip()
+        desc = fs.get("description", "").strip()
+        if not fs_id:
+            return 0
+        nid = f"foreshadowing_{fs_id}"
+        status = fs.get("status", "buried")
+        attrs = {"status": status}
+        if chapter_num:
+            if status == "buried":
+                attrs["buried_chapter"] = chapter_num
+            elif status == "resolved":
+                attrs["resolved_chapter"] = chapter_num
+                existing = self.kg.get_node(nid)
+                if existing:
+                    attrs["buried_chapter"] = existing.get("attrs", {}).get("buried_chapter", 0)
+
+        self.kg.add_node(nid, "foreshadowing", fs_id,
+                         summary=desc or f"伏笔 {fs_id}", attrs=attrs)
+        if chapter_num:
+            action = "pay_off" if status == "resolved" else "set"
+            self.kg.add_edge(f"edge_{nid}_{action}_ch{chapter_num}",
+                             "belongs_to", nid, f"chapter_{chapter_num}",
+                             attrs={"action": action, "chapter_num": chapter_num})
+        return 1
+
+    def _write_scene(self, sc: Dict, chapter_num: int) -> int:
+        """写入单个场景实体到 KG，返回写入数量（0 或 1）。"""
+        name = sc.get("name", "").strip()
+        if not name:
+            return 0
+        nid = f"scene_{name}"
+        attrs = {"type": sc.get("type", ""), "description": sc.get("description", "")}
+        if chapter_num:
+            attrs["first_chapter"] = chapter_num
+        self.kg.add_node(nid, "scene", name,
+                         summary=sc.get("description", name), attrs=attrs)
+        if chapter_num:
+            self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "happens_in", nid, f"chapter_{chapter_num}",
+                             attrs={"chapter_num": chapter_num})
+        return 1
+
+    def _write_world_fact(self, wf: Dict, chapter_num: int) -> int:
+        """写入单个世界观实体到 KG，返回写入数量（0 或 1）。"""
+        name = wf.get("name", "").strip()
+        if not name:
+            return 0
+        nid = f"world_{name}"
+        self.kg.add_node(nid, "world_fact", name,
+                         summary=wf.get("description", name),
+                         attrs={"description": wf.get("description", "")})
+        return 1
+
+    def _write_plot_thread(self, pt: Dict, chapter_num: int) -> int:
+        """写入单个剧情线实体到 KG，返回写入数量（0 或 1）。"""
+        name = pt.get("name", "").strip()
+        if not name:
+            return 0
+        nid = f"thread_{name}"
+        attrs = {
+            "progress": pt.get("progress", ""),
+            "characters": pt.get("characters", []),
+        }
+        if chapter_num:
+            attrs["latest_chapter"] = chapter_num
+        self.kg.add_node(nid, "plot_thread", name,
+                         summary=pt.get("progress", name), attrs=attrs)
+        return 1
+
+    def _write_relationship(self, rel: Dict, chapter_num: int) -> int:
+        """写入单个角色关系边到 KG，返回写入数量（0 或 1）。"""
+        source = rel.get("source", "").strip()
+        target = rel.get("target", "").strip()
+        relation = rel.get("relation", "").strip()
+        if not source or not target or not relation:
+            return 0
+        s_nid = f"char_{source}"
+        t_nid = f"char_{target}"
+        # 确保两个角色节点存在
+        if s_nid not in self.kg.nodes:
+            self.kg.add_node(s_nid, "character", source, summary=source)
+        if t_nid not in self.kg.nodes:
+            self.kg.add_node(t_nid, "character", target, summary=target)
+        # 添加关系边
+        edge_id = f"rel_{source}_{target}"
+        self.kg.add_edge(edge_id, "relates_to", s_nid, t_nid,
+                         attrs={"relation": relation, "chapter_num": chapter_num})
+        return 1
+
+    def _write_strand_tag(self, strand: str, chapter_num: int) -> int:
+        """写入单个 Strand 标签到 KG，返回写入数量（0 或 1）。"""
+        if not strand or not chapter_num:
+            return 0
+        nid = f"strand_ch{chapter_num}"
+        self.kg.add_node(nid, "strand_tag", f"第{chapter_num}章·{strand}",
+                         summary=f"第{chapter_num}章节奏类型：{strand}",
+                         attrs={"chapter_num": chapter_num, "strand_type": strand})
+        # 章节被标注为该 Strand 类型
+        self.kg.add_edge(f"edge_strand_ch{chapter_num}", "tagged_as",
+                         f"chapter_{chapter_num}", nid,
+                         attrs={"strand_type": strand})
+        return 1
+
+    def _write_coolpoint(self, cp: Dict, chapter_num: int, entities: Dict) -> int:
+        """写入单个爽点事件到 KG，返回写入数量（0 或 1）。"""
+        cp_type = cp.get("type", "").strip()
+        cp_desc = cp.get("description", "").strip()
+        if not cp_type:
+            return 0
+        nid = f"coolpoint_ch{chapter_num}_{cp_type}"
+        self.kg.add_node(nid, "coolpoint", f"第{chapter_num}章·{cp_type}",
+                         summary=cp_desc or cp_type,
+                         attrs={"chapter_num": chapter_num, "coolpoint_type": cp_type})
+        # 爽点属于某章节
+        if chapter_num:
+            self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "belongs_to",
+                             nid, f"chapter_{chapter_num}",
+                             attrs={"chapter_num": chapter_num})
+        # 爽点可能兑现伏笔
+        for fs in entities.get("foreshadowings", []):
+            if fs.get("status") == "resolved":
+                fs_id = fs.get("id", "")
+                if fs_id:
+                    self.kg.add_edge(f"edge_{nid}_payoff_{fs_id}", "pays_off",
+                                     nid, f"foreshadowing_{fs_id}")
+        return 1
+
+    def _write_hook(self, hk: Dict, chapter_num: int) -> int:
+        """写入单个钩子事件到 KG，返回写入数量（0 或 1）。"""
+        hk_type = hk.get("type", "").strip()
+        hk_desc = hk.get("description", "").strip()
+        if not hk_type:
+            return 0
+        nid = f"hook_ch{chapter_num}_{hk_type}"
+        self.kg.add_node(nid, "hook", f"第{chapter_num}章·{hk_type}",
+                         summary=hk_desc or hk_type,
+                         attrs={"chapter_num": chapter_num, "hook_type": hk_type, "resolved": False})
+        # 钩子属于某章节
+        if chapter_num:
+            self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "belongs_to",
+                             nid, f"chapter_{chapter_num}",
+                             attrs={"chapter_num": chapter_num})
+        return 1
+
+    # ---- 实体写入 dispatch 表 ----
+
+    _ENTITY_WRITERS = {
+        "characters": lambda self, entities, cn: sum(self._write_character(ch, cn) for ch in entities.get("characters", [])),
+        "foreshadowings": lambda self, entities, cn: sum(self._write_foreshadowing(fs, cn) for fs in entities.get("foreshadowings", [])),
+        "scenes": lambda self, entities, cn: sum(self._write_scene(sc, cn) for sc in entities.get("scenes", [])),
+        "world_facts": lambda self, entities, cn: sum(self._write_world_fact(wf, cn) for wf in entities.get("world_facts", [])),
+        "plot_threads": lambda self, entities, cn: sum(self._write_plot_thread(pt, cn) for pt in entities.get("plot_threads", [])),
+        "relationships": lambda self, entities, cn: sum(self._write_relationship(rel, cn) for rel in entities.get("relationships", [])),
+        "strand_tags": lambda self, entities, cn: self._write_strand_tag(entities.get("strand", ""), cn),
+        "coolpoints": lambda self, entities, cn: sum(self._write_coolpoint(cp, cn, entities) for cp in entities.get("coolpoints", [])),
+        "hooks": lambda self, entities, cn: sum(self._write_hook(hk, cn) for hk in entities.get("hooks", [])),
+    }
+
     def _write_entities_to_kg(self, entities: Dict, chapter_num: int = 0) -> Dict:
         """将解析出的实体写入知识图谱。"""
         if not self.kg:
             return {}
-        stats = {"characters": 0, "foreshadowings": 0, "scenes": 0, "world_facts": 0, "plot_threads": 0,
-                 "relationships": 0, "strand_tags": 0, "coolpoints": 0, "hooks": 0}
+        stats = {key: 0 for key in self._ENTITY_WRITERS}
 
-        # 角色
-        for ch in entities.get("characters", []):
-            name = ch.get("name", "").strip()
-            if not name:
-                continue
-            nid = f"char_{name}"
-            summary = f"{ch.get('identity', '')} {ch.get('status', '')}".strip()
-            attrs = {
-                "identity": ch.get("identity", ""),
-                "status": ch.get("status", ""),
-                "relations": ch.get("relations", []),
-            }
-            if chapter_num:
-                attrs["latest_chapter"] = chapter_num
-                existing = self.kg.get_node(nid)
-                if existing:
-                    appearances = existing.get("attrs", {}).get("appearances", [])
-                    if chapter_num not in appearances:
-                        appearances.append(chapter_num)
-                    attrs["appearances"] = appearances
-                else:
-                    attrs["appearances"] = [chapter_num]
-
-            self.kg.add_node(nid, "character", name, summary=summary or name, attrs=attrs)
-            if chapter_num:
-                self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "appears_in", nid, f"chapter_{chapter_num}",
-                                 attrs={"chapter_num": chapter_num})
-            stats["characters"] += 1
-
-        # 伏笔
-        for fs in entities.get("foreshadowings", []):
-            fs_id = fs.get("id", "").strip()
-            desc = fs.get("description", "").strip()
-            if not fs_id:
-                continue
-            nid = f"foreshadowing_{fs_id}"
-            status = fs.get("status", "buried")
-            attrs = {"status": status}
-            if chapter_num:
-                if status == "buried":
-                    attrs["buried_chapter"] = chapter_num
-                elif status == "resolved":
-                    attrs["resolved_chapter"] = chapter_num
-                    existing = self.kg.get_node(nid)
-                    if existing:
-                        attrs["buried_chapter"] = existing.get("attrs", {}).get("buried_chapter", 0)
-
-            self.kg.add_node(nid, "foreshadowing", fs_id,
-                             summary=desc or f"伏笔 {fs_id}", attrs=attrs)
-            if chapter_num:
-                action = "pay_off" if status == "resolved" else "set"
-                self.kg.add_edge(f"edge_{nid}_{action}_ch{chapter_num}",
-                                 "belongs_to", nid, f"chapter_{chapter_num}",
-                                 attrs={"action": action, "chapter_num": chapter_num})
-            stats["foreshadowings"] += 1
-
-        # 场景
-        for sc in entities.get("scenes", []):
-            name = sc.get("name", "").strip()
-            if not name:
-                continue
-            nid = f"scene_{name}"
-            attrs = {"type": sc.get("type", ""), "description": sc.get("description", "")}
-            if chapter_num:
-                attrs["first_chapter"] = chapter_num
-            self.kg.add_node(nid, "scene", name,
-                             summary=sc.get("description", name), attrs=attrs)
-            if chapter_num:
-                self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "happens_in", nid, f"chapter_{chapter_num}",
-                                 attrs={"chapter_num": chapter_num})
-            stats["scenes"] += 1
-
-        # 世界观
-        for wf in entities.get("world_facts", []):
-            name = wf.get("name", "").strip()
-            if not name:
-                continue
-            nid = f"world_{name}"
-            self.kg.add_node(nid, "world_fact", name,
-                             summary=wf.get("description", name),
-                             attrs={"description": wf.get("description", "")})
-            stats["world_facts"] += 1
-
-        # 剧情线
-        for pt in entities.get("plot_threads", []):
-            name = pt.get("name", "").strip()
-            if not name:
-                continue
-            nid = f"thread_{name}"
-            attrs = {
-                "progress": pt.get("progress", ""),
-                "characters": pt.get("characters", []),
-            }
-            if chapter_num:
-                attrs["latest_chapter"] = chapter_num
-            self.kg.add_node(nid, "plot_thread", name,
-                             summary=pt.get("progress", name), attrs=attrs)
-            stats["plot_threads"] += 1
-
-        # 角色关系（新增）
-        for rel in entities.get("relationships", []):
-            source = rel.get("source", "").strip()
-            target = rel.get("target", "").strip()
-            relation = rel.get("relation", "").strip()
-            if not source or not target or not relation:
-                continue
-            s_nid = f"char_{source}"
-            t_nid = f"char_{target}"
-            # 确保两个角色节点存在
-            if s_nid not in self.kg.nodes:
-                self.kg.add_node(s_nid, "character", source, summary=source)
-            if t_nid not in self.kg.nodes:
-                self.kg.add_node(t_nid, "character", target, summary=target)
-            # 添加关系边
-            edge_id = f"rel_{source}_{target}"
-            self.kg.add_edge(edge_id, "relates_to", s_nid, t_nid,
-                             attrs={"relation": relation, "chapter_num": chapter_num})
-            stats["relationships"] += 1
-
-        # Strand 标签（新增）
-        strand = entities.get("strand", "").strip()
-        if strand and chapter_num:
-            nid = f"strand_ch{chapter_num}"
-            self.kg.add_node(nid, "strand_tag", f"第{chapter_num}章·{strand}",
-                             summary=f"第{chapter_num}章节奏类型：{strand}",
-                             attrs={"chapter_num": chapter_num, "strand_type": strand})
-            # 章节被标注为该 Strand 类型
-            self.kg.add_edge(f"edge_strand_ch{chapter_num}", "tagged_as",
-                             f"chapter_{chapter_num}", nid,
-                             attrs={"strand_type": strand})
-            stats["strand_tags"] += 1
-
-        # 爽点事件（新增）
-        for cp in entities.get("coolpoints", []):
-            cp_type = cp.get("type", "").strip()
-            cp_desc = cp.get("description", "").strip()
-            if not cp_type:
-                continue
-            nid = f"coolpoint_ch{chapter_num}_{cp_type}"
-            self.kg.add_node(nid, "coolpoint", f"第{chapter_num}章·{cp_type}",
-                             summary=cp_desc or cp_type,
-                             attrs={"chapter_num": chapter_num, "coolpoint_type": cp_type})
-            # 爽点属于某章节
-            if chapter_num:
-                self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "belongs_to",
-                                 nid, f"chapter_{chapter_num}",
-                                 attrs={"chapter_num": chapter_num})
-            # 爽点可能兑现伏笔
-            for fs in entities.get("foreshadowings", []):
-                if fs.get("status") == "resolved":
-                    fs_id = fs.get("id", "")
-                    if fs_id:
-                        self.kg.add_edge(f"edge_{nid}_payoff_{fs_id}", "pays_off",
-                                         nid, f"foreshadowing_{fs_id}")
-            stats["coolpoints"] += 1
-
-        # 钩子事件（新增）
-        for hk in entities.get("hooks", []):
-            hk_type = hk.get("type", "").strip()
-            hk_desc = hk.get("description", "").strip()
-            if not hk_type:
-                continue
-            nid = f"hook_ch{chapter_num}_{hk_type}"
-            self.kg.add_node(nid, "hook", f"第{chapter_num}章·{hk_type}",
-                             summary=hk_desc or hk_type,
-                             attrs={"chapter_num": chapter_num, "hook_type": hk_type, "resolved": False})
-            # 钩子属于某章节
-            if chapter_num:
-                self.kg.add_edge(f"edge_{nid}_ch{chapter_num}", "belongs_to",
-                                 nid, f"chapter_{chapter_num}",
-                                 attrs={"chapter_num": chapter_num})
-            stats["hooks"] += 1
+        for key, writer in self._ENTITY_WRITERS.items():
+            stats[key] = writer(self, entities, chapter_num)
 
         self.kg.save()
         return stats

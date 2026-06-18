@@ -221,11 +221,8 @@ class WritingEngine(BaseEngine):
         else:
             return await self._write_chapter(ch, task)
 
-    async def _write_chapter(self, ch: int, task: MWRTask) -> Draft:
-        """写新章节。"""
-        self._emit({"status": "chapter_writing", "chapter": ch})
-
-        # 构建上下文 — KG 为主，memory 为辅，体裁+反幻觉为增强
+    def _build_write_context(self, ch: int, outline: str, task: MWRTask) -> str:
+        """构建写作上下文（体裁声明 + 大纲 + 细纲 + 记忆 + 前文 + 体裁注入 + 反馈）。"""
         context_parts = []
 
         # ★ 体裁声明放在最前面，确保 LLM 优先遵守
@@ -250,7 +247,6 @@ class WritingEngine(BaseEngine):
             context_parts.append(genre_header)
 
         # 大纲
-        outline = self._read_outline_summary()
         if outline:
             context_parts.append(f"【小说大纲 — 必须严格围绕大纲写作，禁止偏离】\n{outline}")
 
@@ -278,7 +274,56 @@ class WritingEngine(BaseEngine):
         if task.context:
             context_parts.append(f"【上一轮审查反馈 — 重写时必须解决这些问题】\n{task.context}")
 
-        system_prompt = self.prompts["writer_writing"] + "\n\n" + "\n\n".join(context_parts)
+        return "\n\n".join(context_parts)
+
+    def _build_polish_context(self, ch: int, outline: str, task: MWRTask) -> str:
+        """构建润色上下文（体裁声明 + 大纲 + 记忆 + 体裁注入 + 前文 + 审查反馈）。"""
+        context_parts = []
+
+        # ★ 体裁声明放在最前面
+        genre_name = self.genre_adapter.genre_name
+        if genre_name and genre_name != "通用":
+            context_parts.append(f"【体裁要求 — 最高优先级，必须遵守】\n本作品体裁为「{genre_name}」。润色时必须确保内容符合{genre_name}体裁，禁止出现科幻、赛博朋克等不符元素。")
+
+        # 大纲
+        if outline:
+            context_parts.append(f"【小说大纲】\n{outline}")
+
+        # 融合记忆
+        memory_block = self._read_fused_memory(ch)
+        if memory_block:
+            context_parts.append(memory_block)
+
+        # 体裁注入（润色也需要遵守 InkOS 规范和 Anti-AI 规范）
+        genre_injection = self.genre_adapter.get_writer_injection(stage="writing")
+        if genre_injection:
+            context_parts.append(genre_injection)
+
+        # 前章上下文（润色也需要知道前文以保证衔接）
+        recent = self._read_recent_chapters(3)
+        if recent:
+            context_parts.append(f"【最近章节 — 润色时必须保持衔接】\n{recent}")
+
+        # 审查反馈（issues + suggestions 都要传递给 Writer）
+        feedback_parts = []
+        if task.focus_issues:
+            feedback_parts.append("问题：\n" + "\n".join(f"- {iss}" for iss in task.focus_issues))
+        if task.context:
+            feedback_parts.append(task.context)
+        if feedback_parts:
+            context_parts.append(f"【审查反馈 — 请针对这些问题修改】\n" + "\n\n".join(feedback_parts))
+
+        return "\n\n".join(context_parts)
+
+    async def _write_chapter(self, ch: int, task: MWRTask) -> Draft:
+        """写新章节。"""
+        self._emit({"status": "chapter_writing", "chapter": ch})
+
+        # 构建上下文 — KG 为主，memory 为辅，体裁+反幻觉为增强
+        outline = self._read_outline_summary()
+        context_str = self._build_write_context(ch, outline, task)
+
+        system_prompt = self.prompts["writer_writing"] + "\n\n" + context_str
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
         user_prompt = (
@@ -347,43 +392,11 @@ class WritingEngine(BaseEngine):
         if not task.focus_issues:
             return Draft(content=original, chapter_num=ch, metadata={"action": "polish", "no_changes": True})
 
-        context_parts = []
-
-        # ★ 体裁声明放在最前面
-        genre_name = self.genre_adapter.genre_name
-        if genre_name and genre_name != "通用":
-            context_parts.append(f"【体裁要求 — 最高优先级，必须遵守】\n本作品体裁为「{genre_name}」。润色时必须确保内容符合{genre_name}体裁，禁止出现科幻、赛博朋克等不符元素。")
-
-        # 大纲
+        # 构建润色上下文
         outline = self._read_outline_summary()
-        if outline:
-            context_parts.append(f"【小说大纲】\n{outline}")
+        context_str = self._build_polish_context(ch, outline, task)
 
-        # 融合记忆
-        memory_block = self._read_fused_memory(ch)
-        if memory_block:
-            context_parts.append(memory_block)
-
-        # 体裁注入（润色也需要遵守 InkOS 规范和 Anti-AI 规范）
-        genre_injection = self.genre_adapter.get_writer_injection(stage="writing")
-        if genre_injection:
-            context_parts.append(genre_injection)
-
-        # 前章上下文（润色也需要知道前文以保证衔接）
-        recent = self._read_recent_chapters(3)
-        if recent:
-            context_parts.append(f"【最近章节 — 润色时必须保持衔接】\n{recent}")
-
-        # 审查反馈（issues + suggestions 都要传递给 Writer）
-        feedback_parts = []
-        if task.focus_issues:
-            feedback_parts.append("问题：\n" + "\n".join(f"- {iss}" for iss in task.focus_issues))
-        if task.context:
-            feedback_parts.append(task.context)
-        if feedback_parts:
-            context_parts.append(f"【审查反馈 — 请针对这些问题修改】\n" + "\n\n".join(feedback_parts))
-
-        system_prompt = self.prompts["writer_polish"] + "\n\n" + "\n\n".join(context_parts)
+        system_prompt = self.prompts["writer_polish"] + "\n\n" + context_str
 
         # 将原文按段落分割，标注段落编号
         paragraphs = [p for p in original.split("\n\n") if p.strip()]

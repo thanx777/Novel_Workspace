@@ -446,28 +446,92 @@ class OutlineEngine(BaseEngine):
         except Exception as e:
             self._emit({"status": "warning", "message": f"大纲 AI 摄取失败（不阻塞流程）: {e}"})
 
+    def _extract_titles_from_l2(self, l2_md: str) -> Dict[int, str]:
+        """从 L2 markdown 提取章节标题列表。"""
+        chapters_found: Dict[int, str] = {}
+        if not l2_md:
+            return chapters_found
+        for m in re.finditer(r"###\s*第\s*(\d+)\s*章\s*(.+?)(?:\n|$)", l2_md):
+            idx = int(m.group(1))
+            title = m.group(2).strip().rstrip("，。、！？；：")
+            if title:
+                chapters_found[idx] = title
+        for m in re.finditer(r"第\s*(\d+)\s*章\s*[：:\s]*\s*(.+?)(?:\n|$)", l2_md):
+            idx = int(m.group(1))
+            if idx not in chapters_found:
+                title = m.group(2).strip().rstrip("，。、！？；：")
+                if title:
+                    chapters_found[idx] = title
+        return chapters_found
+
+    def _infer_total_from_l1(self, l1_md: str, l2_md: str) -> int:
+        """从 L1 markdown 推断总章节数。"""
+        total = 0
+        # 1. 优先从 L1 JSON 的 basic.总章节数 提取（支持范围格式如"120-150"取最大值）
+        try:
+            l1_json_path = os.path.join(self.project_dir, "outline_L1.json")
+            if os.path.isfile(l1_json_path):
+                import json as _json
+                with open(l1_json_path, "r", encoding="utf-8") as jf:
+                    l1_json = _json.load(jf)
+                tc = l1_json.get("basic", {}).get("总章节数", "")
+                if tc:
+                    tc_str = str(tc).strip()
+                    range_m = re.match(r"(\d+)\s*[-–—]\s*(\d+)", tc_str)
+                    if range_m:
+                        total = int(range_m.group(2))
+                    elif tc_str.isdigit():
+                        total = int(tc_str)
+        except Exception:
+            pass
+        # 2. 从 L2 阶段范围推断
+        if total == 0 and l2_md:
+            max_ch = 0
+            for m in re.finditer(r"第\s*(\d+)\s*[-–—]\s*(\d+)\s*章", l2_md):
+                end_ch = int(m.group(2))
+                if end_ch > max_ch:
+                    max_ch = end_ch
+            if max_ch > 0:
+                total = max_ch
+        # 3. 从 L1 Markdown 推断
+        if total == 0 and l1_md:
+            for m in re.finditer(r"总章节数\s*[：:]*\s*(\d+)\s*[-–—]\s*(\d+)\s*章", l1_md):
+                total = max(total, int(m.group(2)))
+            for m in re.finditer(r"总章节数\s*[：:]*\s*(\d+)\s*章?", l1_md):
+                total = max(total, int(m.group(1)))
+            for m in re.finditer(r"/\s*约?\s*(\d+)\s*章", l1_md):
+                total = max(total, int(m.group(1)))
+            for m in re.finditer(r"(\d+)\s*[-–—]\s*(\d+)\s*章", l1_md):
+                total = max(total, int(m.group(2)))
+            for m in re.finditer(r"约\s*(\d+)\s*章", l1_md):
+                total = max(total, int(m.group(1)))
+        return total
+
+    def _persist_titles(self, titles: Dict[int, str], total: int):
+        """将标题持久化到数据库。"""
+        try:
+            db = ProjectDB(self.project_name)
+            if total > 0:
+                db.update_project(total_chapters=total)
+            if titles:
+                import json as _json
+                titles_path = os.path.join(self.project_dir, "chapter_titles.json")
+                with open(titles_path, "w", encoding="utf-8") as f:
+                    _json.dump({str(k): v for k, v in titles.items()}, f, ensure_ascii=False, indent=2)
+            db.close()
+            self._emit({"status": "info", "message": f"📋 大纲确定共 {total} 章"})
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"持久化章节标题失败: {e}"})
+
     def _sync_chapters_to_db(self):
         """大纲生成完成后，更新 total_chapters 和章节标题映射（不创建章节条目）。
         章节条目在写作引擎实际写完一章后才创建，避免侧边栏显示空章节。
         """
         try:
-            db = ProjectDB(self.project_name)
-            chapters_found = {}  # chapter_index -> title
+            l2_md = self._read_outline_md("L2")
 
             # 1. 从 L2 章节细纲中提取章节标题
-            l2_md = self._read_outline_md("L2")
-            if l2_md:
-                for m in re.finditer(r"###\s*第\s*(\d+)\s*章\s*(.+?)(?:\n|$)", l2_md):
-                    idx = int(m.group(1))
-                    title = m.group(2).strip().rstrip("，。、！？；：")
-                    if title:
-                        chapters_found[idx] = title
-                for m in re.finditer(r"第\s*(\d+)\s*章\s*[：:\s]*\s*(.+?)(?:\n|$)", l2_md):
-                    idx = int(m.group(1))
-                    if idx not in chapters_found:
-                        title = m.group(2).strip().rstrip("，。、！？；：")
-                        if title:
-                            chapters_found[idx] = title
+            chapters_found = self._extract_titles_from_l2(l2_md)
 
             # 2. 如果 L2 没找到章节，尝试从 L1 或项目配置推断
             if not chapters_found:
@@ -499,7 +563,6 @@ class OutlineEngine(BaseEngine):
                 if max_ch == 0:
                     l1_md = self._read_outline_md("L1")
                     if l1_md:
-                        # 先尝试匹配 "总章节数：N"
                         for m in re.finditer(r"总章节数\s*[：:]*\s*(\d+)\s*章?", l1_md):
                             ch = int(m.group(1))
                             if ch > max_ch:
@@ -516,68 +579,15 @@ class OutlineEngine(BaseEngine):
                     for i in range(1, max_ch + 1):
                         chapters_found[i] = f"第{i}章"
 
-            # 3. 确定 total_chapters：优先从 L1 JSON，其次从 L2 阶段范围，最后用实际章节数
-            total = 0
-            # 3a. 优先从 L1 JSON 的 basic.总章节数 提取（支持范围格式如"120-150"取最大值）
-            try:
-                l1_json_path = os.path.join(self.project_dir, "outline_L1.json")
-                if os.path.isfile(l1_json_path):
-                    import json as _json
-                    with open(l1_json_path, "r", encoding="utf-8") as jf:
-                        l1_json = _json.load(jf)
-                    tc = l1_json.get("basic", {}).get("总章节数", "")
-                    if tc:
-                        tc_str = str(tc).strip()
-                        # 范围格式 "120-150" → 取最大值 150
-                        range_m = re.match(r"(\d+)\s*[-–—]\s*(\d+)", tc_str)
-                        if range_m:
-                            total = int(range_m.group(2))
-                        elif tc_str.isdigit():
-                            total = int(tc_str)
-            except Exception:
-                pass
-            # 3b. 从 L2 阶段范围推断
-            if total == 0 and l2_md:
-                max_ch = 0
-                for m in re.finditer(r"第\s*(\d+)\s*[-–—]\s*(\d+)\s*章", l2_md):
-                    end_ch = int(m.group(2))
-                    if end_ch > max_ch:
-                        max_ch = end_ch
-                if max_ch > 0:
-                    total = max_ch
-            # 3c. 从 L1 Markdown 推断
-            if total == 0:
-                l1_md = self._read_outline_md("L1")
-                if l1_md:
-                    # 匹配 "总章节数：N" 或 "总章节数：N-M章"
-                    for m in re.finditer(r"总章节数\s*[：:]*\s*(\d+)\s*[-–—]\s*(\d+)\s*章", l1_md):
-                        total = max(total, int(m.group(2)))
-                    for m in re.finditer(r"总章节数\s*[：:]*\s*(\d+)\s*章?", l1_md):
-                        total = max(total, int(m.group(1)))
-                    # 匹配 "N卷 / 约M章" 或 "/ M章" 格式
-                    for m in re.finditer(r"/\s*约?\s*(\d+)\s*章", l1_md):
-                        total = max(total, int(m.group(1)))
-                    # 匹配范围格式 "N-M章"
-                    for m in re.finditer(r"(\d+)\s*[-–—]\s*(\d+)\s*章", l1_md):
-                        total = max(total, int(m.group(2)))
-                    # 匹配 "约N章" 格式
-                    for m in re.finditer(r"约\s*(\d+)\s*章", l1_md):
-                        total = max(total, int(m.group(1)))
-            # 3d. 兜底：用实际找到的章节数
+            # 3. 确定 total_chapters
+            l1_md = self._read_outline_md("L1")
+            total = self._infer_total_from_l1(l1_md, l2_md)
+            # 兜底：用实际找到的章节数
             if total == 0 and chapters_found:
                 total = max(chapters_found.keys())
-            if total > 0:
-                db.update_project(total_chapters=total)
 
-            # 4. 保存章节标题映射到文件（写作引擎写完一章后用来查找标题）
-            if chapters_found:
-                import json as _json
-                titles_path = os.path.join(self.project_dir, "chapter_titles.json")
-                with open(titles_path, "w", encoding="utf-8") as f:
-                    _json.dump({str(k): v for k, v in chapters_found.items()}, f, ensure_ascii=False, indent=2)
-
-            db.close()
-            self._emit({"status": "info", "message": f"📋 大纲确定共 {total} 章"})
+            # 4. 持久化
+            self._persist_titles(chapters_found, total)
         except Exception as e:
             self._emit({"status": "warning", "message": f"同步章节数到数据库失败: {e}"})
 
@@ -613,6 +623,99 @@ class OutlineEngine(BaseEngine):
             "all_required_passed": result.all_required_passed,
         }
 
+    async def _generate_volume(self, vol: Dict, vol_index: int, volumes: List[Dict],
+                                l1_summary: str, prev_tail: str) -> Optional[str]:
+        """生成单卷 L2 章节细纲，返回该卷的 markdown 文本（失败返回 None）。"""
+        vol_num = vol.get("卷号", vol_index + 1)
+        vol_name = vol.get("卷名", f"第{vol_num}卷")
+        vol_chapters = vol.get("卷总章节", "")
+        vol_theme = vol.get("卷核心主题", "")
+        vol_conflict = vol.get("卷内核心冲突", "")
+        vol_position = vol.get("卷定位", "")
+
+        # 解析卷的章节范围
+        start_ch, end_ch = self._calc_volume_chapter_range(volumes, vol_index)
+        if start_ch == 0 or end_ch == 0:
+            return None
+
+        self._emit({
+            "status": "info", "layer": "L2",
+            "message": f"📝 L2：生成第{vol_num}卷「{vol_name}」（第{start_ch}-{end_ch}章）[{vol_index+1}/{len(volumes)}]..."
+        })
+
+        # 构建分批 prompt
+        context = {
+            "L1_summary": l1_summary,
+            "phase_name": f"第{vol_num}卷 {vol_name}",
+            "start_ch": start_ch,
+            "end_ch": end_ch,
+            "phase_goal": f"{vol_theme}；{vol_conflict}" if vol_conflict else vol_theme,
+            "prev_tail": prev_tail,
+        }
+        prompt = get_prompt("L2_batch", context)
+
+        # 构建系统 prompt
+        system_prompt = self.prompts["writer_outline"] + "\n\n" + prompt
+        genre_name = self.genre_adapter.genre_name
+        if genre_name and genre_name != "通用":
+            genre_header = f"【体裁要求 — 最高优先级，必须遵守】\n本作品体裁为「{genre_name}」。"
+            system_prompt = genre_header + "\n\n" + system_prompt
+
+        # 注入 KG 上下文（角色、伏笔、场景等，确保一致性）
+        kg_ctx = self.kg_adapter.get_outline_layer_context("L2")
+        if kg_ctx:
+            system_prompt = kg_ctx + "\n\n" + system_prompt
+
+        system_prompt += OUTPUT_FORMAT_CONSTRAINT
+
+        user_prompt = f"请为第{vol_num}卷「{vol_name}」的第{start_ch}章到第{end_ch}章生成详细细纲。本卷定位：{vol_position}；核心冲突：{vol_conflict}。"
+
+        # 调用 LLM
+        if not self.llm.has_valid_config("writer"):
+            self._emit({"status": "warning", "message": "未配置 LLM，跳过章节细纲生成"})
+            return None
+
+        try:
+            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
+        except LLMError as e:
+            self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，跳过本批次章节细纲生成"})
+            return None
+
+        # 提取章节部分
+        chapters_part = self._extract_chapters_from_batch(batch_md, start_ch, end_ch)
+        return chapters_part or batch_md
+
+    def _validate_chapter_count(self, generated_md: str, expected_count: int) -> int:
+        """验证章节数，返回缺失的章节数（0 表示完整）。"""
+        actual_count = self._count_chapters_in_md(generated_md)
+        return max(0, expected_count - actual_count)
+
+    async def _fill_missing_chapters(self, vol: Dict, vol_index: int, volumes: List[Dict],
+                                      generated_md: str, missing_count: int) -> Optional[str]:
+        """填补缺失章节，返回补充的 markdown 文本（无缺失或失败返回 None）。"""
+        if missing_count <= 0:
+            return None
+
+        vol_num = vol.get("卷号", vol_index + 1)
+        vol_name = vol.get("卷名", f"第{vol_num}卷")
+        vol_theme = vol.get("卷核心主题", "")
+        vol_conflict = vol.get("卷内核心冲突", "")
+
+        start_ch, end_ch = self._calc_volume_chapter_range(volumes, vol_index)
+        actual_count = self._count_chapters_in_md(generated_md)
+        last_actual_ch = start_ch + actual_count - 1
+
+        self._emit({
+            "status": "warning", "layer": "L2",
+            "message": f"⚠ 第{vol_num}卷预期{end_ch - start_ch + 1}章，实际生成{actual_count}章，缺少{missing_count}章，正在补齐..."
+        })
+
+        supplement_md = await self._supplement_chapters(
+            vol_num, vol_name, last_actual_ch + 1, end_ch,
+            vol_theme, vol_conflict, generated_md
+        )
+        return supplement_md
+
     async def _generate_l2_batched(self) -> Dict:
         """L2 分批生成：直接按 L1 分卷逐卷生成章节细纲，无需额外"阶段划分"。"""
         # ---- 第1步：从 L1 提取分卷信息（JSON 优先，md 兜底） ----
@@ -641,92 +744,28 @@ class OutlineEngine(BaseEngine):
                 self._emit({"status": "cancelled", "layer": "L2", "message": "⏹ 用户取消，L2 生成已停止"})
                 break
 
-            vol_num = vol.get("卷号", i + 1)
-            vol_name = vol.get("卷名", f"第{vol_num}卷")
-            vol_chapters = vol.get("卷总章节", "")
-            vol_theme = vol.get("卷核心主题", "")
-            vol_conflict = vol.get("卷内核心冲突", "")
-            vol_position = vol.get("卷定位", "")
-
-            # 解析卷的章节范围
-            start_ch, end_ch = self._calc_volume_chapter_range(volumes, i)
-            if start_ch == 0 or end_ch == 0:
-                continue
-
-            self._emit({
-                "status": "info", "layer": "L2",
-                "message": f"📝 L2：生成第{vol_num}卷「{vol_name}」（第{start_ch}-{end_ch}章）[{i+1}/{len(volumes)}]..."
-            })
-
-            # 构建分批 prompt
-            context = {
-                "L1_summary": l1_summary,
-                "phase_name": f"第{vol_num}卷 {vol_name}",
-                "start_ch": start_ch,
-                "end_ch": end_ch,
-                "phase_goal": f"{vol_theme}；{vol_conflict}" if vol_conflict else vol_theme,
-                "prev_tail": prev_tail,
-            }
-            prompt = get_prompt("L2_batch", context)
-
-            # 构建系统 prompt
-            system_prompt = self.prompts["writer_outline"] + "\n\n" + prompt
-            genre_name = self.genre_adapter.genre_name
-            if genre_name and genre_name != "通用":
-                genre_header = f"【体裁要求 — 最高优先级，必须遵守】\n本作品体裁为「{genre_name}」。"
-                system_prompt = genre_header + "\n\n" + system_prompt
-
-            # 注入 KG 上下文（角色、伏笔、场景等，确保一致性）
-            kg_ctx = self.kg_adapter.get_outline_layer_context("L2")
-            if kg_ctx:
-                system_prompt = kg_ctx + "\n\n" + system_prompt
-
-            system_prompt += OUTPUT_FORMAT_CONSTRAINT
-
-            user_prompt = f"请为第{vol_num}卷「{vol_name}」的第{start_ch}章到第{end_ch}章生成详细细纲。本卷定位：{vol_position}；核心冲突：{vol_conflict}。"
-
-            # 调用 LLM
-            if not self.llm.has_valid_config("writer"):
-                self._emit({"status": "warning", "message": "未配置 LLM，跳过章节细纲生成"})
+            # 生成单卷
+            vol_md = await self._generate_volume(vol, i, volumes, l1_summary, prev_tail)
+            if vol_md is None:
                 break
 
-            try:
-                batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
-            except LLMError as e:
-                self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，跳过本批次章节细纲生成"})
-                break
-
-            # 提取章节部分
-            chapters_part = self._extract_chapters_from_batch(batch_md, start_ch, end_ch)
-            if chapters_part:
-                all_chapters_md.append(chapters_part)
-                prev_tail = self._extract_last_chapter_tail(chapters_part)
-            else:
-                all_chapters_md.append(batch_md)
+            all_chapters_md.append(vol_md)
+            prev_tail = self._extract_last_chapter_tail(vol_md)
 
             # 校验本卷实际生成的章数 vs 预期章数
-            actual_count = self._count_chapters_in_md(chapters_part or batch_md)
+            start_ch, end_ch = self._calc_volume_chapter_range(volumes, i)
             expected_count = end_ch - start_ch + 1
-            if actual_count < expected_count:
-                missing = expected_count - actual_count
-                self._emit({
-                    "status": "warning", "layer": "L2",
-                    "message": f"⚠ 第{vol_num}卷预期{expected_count}章，实际生成{actual_count}章，缺少{missing}章，正在补齐..."
-                })
-                # 补齐缺失章节
-                last_actual_ch = start_ch + actual_count - 1
-                supplement_md = await self._supplement_chapters(
-                    vol_num, vol_name, last_actual_ch + 1, end_ch,
-                    vol_theme, vol_conflict, chapters_part or batch_md
-                )
+            missing = self._validate_chapter_count(vol_md, expected_count)
+            if missing > 0:
+                supplement_md = await self._fill_missing_chapters(vol, i, volumes, vol_md, missing)
                 if supplement_md:
-                    all_chapters_md[-1] = (chapters_part or batch_md) + "\n\n" + supplement_md
+                    all_chapters_md[-1] = vol_md + "\n\n" + supplement_md
                     prev_tail = self._extract_last_chapter_tail(supplement_md)
                     # 二次校验补齐后的章节数
                     combined_md = all_chapters_md[-1]
-                    new_count = self._count_chapters_in_md(combined_md)
-                    if new_count < expected_count:
-                        still_missing = expected_count - new_count
+                    still_missing = self._validate_chapter_count(combined_md, expected_count)
+                    vol_num = vol.get("卷号", i + 1)
+                    if still_missing > 0:
                         self._emit({
                             "status": "warning", "layer": "L2",
                             "message": f"⚠ 补齐后第{vol_num}卷仍缺{still_missing}章，将在后续流程中处理"
@@ -734,11 +773,10 @@ class OutlineEngine(BaseEngine):
                     else:
                         self._emit({
                             "status": "info", "layer": "L2",
-                            "message": f"✅ 第{vol_num}卷补齐成功，共{new_count}章"
+                            "message": f"✅ 第{vol_num}卷补齐成功，共{expected_count}章"
                         })
 
             # 每卷生成后立即摄取到 KG，下一卷能看到本卷新增的实体
-            vol_md = chapters_part or batch_md
             if vol_md:
                 await self._ai_ingest_outline("L2", vol_md)
 

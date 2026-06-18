@@ -1,6 +1,7 @@
 import { useApp } from "../../context/AppContext"
 import OutlinePanel from "../OutlinePanel"
 import ChapterTree from "./ChapterTree"
+import { formatTimestamp } from "@/utils/format"
 
 export default function SidebarTabs({
   SIDE_TABS, activeSidePanel, setActiveSidePanel,
@@ -328,7 +329,7 @@ export default function SidebarTabs({
                   {runLogs.slice(-15).reverse().map((log, i) => (
                     <div key={i} className={`wb-log-row log-${log.status || "info"}`}>
                       <span className="wb-log-time">
-                        {new Date(log.timestamp || Date.now()).toLocaleTimeString("zh-CN", { hour12: false }).slice(0, 8)}
+                        {formatTimestamp(log.timestamp, { short: true })}
                       </span>
                       <span className="wb-log-msg">{log.message || log.status}</span>
                     </div>

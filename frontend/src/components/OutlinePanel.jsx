@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react"
 import { useApp } from "../context/AppContext"
+import ReactMarkdown from "react-markdown"
 
 const LAYER_META = {
   L1: { icon: "📚", label: "L1 全书大纲", color: "#1c1917" },
@@ -405,15 +406,7 @@ function MarkdownView({ text }) {
   if (!text) return <div className="outline-empty">暂无内容</div>
   return (
     <div className="outline-markdown">
-      {text.split("\n").map((line, i) => {
-        if (line.startsWith("# ")) return <h1 key={i}>{line.slice(2)}</h1>
-        if (line.startsWith("## ")) return <h2 key={i}>{line.slice(3)}</h2>
-        if (line.startsWith("### ")) return <h3 key={i}>{line.slice(4)}</h3>
-        if (line.match(/^[\-\*]\s/)) return <li key={i}>{line.slice(2)}</li>
-        if (line.match(/^\d+\.\s/)) return <li key={i}>{line.replace(/^\d+\.\s/, "")}</li>
-        if (!line.trim()) return <br key={i} />
-        return <p key={i}>{line}</p>
-      })}
+      <ReactMarkdown>{text}</ReactMarkdown>
     </div>
   )
 }
