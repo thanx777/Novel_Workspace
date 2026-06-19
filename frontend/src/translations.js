@@ -326,6 +326,26 @@ const translations = {
     extraReqsPlaceholder: '例如：节奏要快，要有爽点',
     projectNameExample: '例如：my_novel',
     projectRequirementsPlaceholder: '描述你想写的小说类型、风格、核心设定等，AI 会据此生成大纲。\n例如：修仙题材，主角从凡人开始，节奏要快，要有爽点',
+    // Stage labels
+    stageOutline: '大纲制作',
+    stageWriting: '正文写作',
+    stageReview: '全书审校',
+    stagePolish: '润色打磨',
+    stageComplete: '完成',
+    // ErrorBoundary
+    errorBoundaryTitle: '组件渲染出错',
+    errorBoundaryRetry: '重试',
+    errorBoundaryRefresh: '刷新页面',
+    // KG common
+    kgNodes: '节点',
+    kgEdges: '边',
+    kgEmpty: '图谱为空',
+    kgLoading: '加载中...',
+    kgClickToExpand: '点击类型泡泡展开...',
+    // aria-labels
+    ariaClose: '关闭',
+    ariaDelete: '删除',
+    ariaProjectConfig: '项目配置',
   },
   en: {
     createTask: 'New Task',
@@ -654,6 +674,26 @@ const translations = {
     extraReqsPlaceholder: 'e.g., Fast pacing, exciting moments',
     projectNameExample: 'e.g. my_novel',
     projectRequirementsPlaceholder: 'Describe the novel type, style, core settings, etc. AI will generate outline accordingly.\ne.g., Cultivation theme, MC starts as mortal, fast pacing, exciting moments',
+    // Stage labels
+    stageOutline: 'Outline',
+    stageWriting: 'Writing',
+    stageReview: 'Review',
+    stagePolish: 'Polish',
+    stageComplete: 'Complete',
+    // ErrorBoundary
+    errorBoundaryTitle: 'Render Error',
+    errorBoundaryRetry: 'Retry',
+    errorBoundaryRefresh: 'Refresh Page',
+    // KG common
+    kgNodes: 'Nodes',
+    kgEdges: 'Edges',
+    kgEmpty: 'Graph is empty',
+    kgLoading: 'Loading...',
+    kgClickToExpand: 'Click type bubble to expand...',
+    // aria-labels
+    ariaClose: 'Close',
+    ariaDelete: 'Delete',
+    ariaProjectConfig: 'Project Config',
   }
 }
 

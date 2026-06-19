@@ -17,9 +17,16 @@ export function AppProvider({ children }) {
   }, [isDark])
 
   // Translation function — falls back to the key itself if missing
-  const t = useCallback((key) => {
+  // Supports parameter interpolation: t('key', { name: 'value' }) replaces {{name}} in the string
+  const t = useCallback((key, params) => {
     const lang = translations[language]
-    return (lang && lang[key]) || key
+    let text = (lang && lang[key]) || key
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        text = text.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), v)
+      })
+    }
+    return text
   }, [language])
 
   const value = { language, setLanguage, isDark, setIsDark, t }
