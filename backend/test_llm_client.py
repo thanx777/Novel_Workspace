@@ -42,8 +42,8 @@ def t01():
 def t02():
     cfg = AgentConfig(api_key="sk-test")
     assert cfg.api_key == "sk-test"
-    assert cfg.base_url == "https://open.bigmodel.cn/api/paas/v4"
-    assert cfg.model == "glm-4-flash"
+    assert cfg.base_url == ""
+    assert cfg.model == ""
     assert cfg.api_format == "openai"
     assert cfg.chat_template_kwargs is None
     assert cfg.thinking_mode is None
@@ -126,16 +126,18 @@ def t07():
     return "chat 兜底 OK"
 
 
-# ============ 8. LLMClient.call — 未配置返回 LLM_ERROR ============
+# ============ 8. LLMClient.call_strict — 未配置抛出 LLMConfigError ============
 def t08():
     client = LLMClient(project_presets={}, global_presets=[])
-    result = asyncio.run(client.call("writer", "system", "user"))
-    assert is_llm_error(result), f"未配置应返回 LLM_ERROR，实际 {result!r}"
-    assert "API Key" in result or "未配置" in result
-    return f"返回 {result[:50]}"
+    try:
+        asyncio.run(client.call_strict("writer", "system", "user"))
+        raise AssertionError("未配置应抛出 LLMConfigError")
+    except LLMConfigError as e:
+        assert "API Key" in e.message or "未配置" in e.message, f"异常消息应说明未配置，实际 {e.message!r}"
+        return f"call_strict 抛出 LLMConfigError: {e}"
 
 
-# ============ 9. LLMClient.call — mock call_llm 返回正常内容 ============
+# ============ 9. LLMClient.call_strict — mock call_llm 返回正常内容 ============
 def t09():
     presets = {
         "writer_preset": {
@@ -160,7 +162,7 @@ def t09():
 
     llm_mod.call_llm = _mock_call_llm
     try:
-        result = asyncio.run(client.call("writer", "sys", "usr"))
+        result = asyncio.run(client.call_strict("writer", "sys", "usr"))
     finally:
         llm_mod.call_llm = original
     assert result == "这是 LLM 返回的内容"
@@ -379,7 +381,7 @@ def t17():
         llm_mod.AsyncOpenAI = original
 
 
-# ============ 18. LLMClient.call — max_tokens 使用角色默认值 ============
+# ============ 18. LLMClient.call_strict — max_tokens 使用角色默认值 ============
 def t18():
     presets = {
         "reviewer_preset": {
@@ -398,18 +400,18 @@ def t18():
         captured["max_tokens"] = max_tokens
         return "ok"
 
+    original = llm_mod.call_llm
     llm_mod.call_llm = _mock_call_llm
     try:
-        asyncio.run(client.call("reviewer", "sys", "usr"))
+        asyncio.run(client.call_strict("reviewer", "sys", "usr"))
     finally:
-        if hasattr(llm_mod, "_original_call_llm"):
-            llm_mod.call_llm = llm_mod._original_call_llm
+        llm_mod.call_llm = original
     # reviewer 默认 max_tokens=2000
     assert captured.get("max_tokens") == 2000, f"reviewer 默认 max_tokens 应为 2000，实际 {captured.get('max_tokens')}"
     return "max_tokens 默认值 OK"
 
 
-# ============ 19. LLMClient.call — LLM_ERROR 透传 ============
+# ============ 19. LLMClient.call_strict — LLMError 异常透传 ============
 def t19():
     presets = {
         "writer_preset": {
@@ -423,16 +425,19 @@ def t19():
     import engines.common.llm_client as llm_mod
 
     async def _mock_call_llm(config, system_prompt, user_prompt, max_tokens, request_timeout_seconds):
-        return "[LLM_ERROR: 请求超时]"
+        raise LLMTimeoutError("请求超时")
 
+    original = llm_mod.call_llm
     llm_mod.call_llm = _mock_call_llm
     try:
-        result = asyncio.run(client.call("writer", "sys", "usr"))
+        try:
+            asyncio.run(client.call_strict("writer", "sys", "usr"))
+            raise AssertionError("call_strict 应抛出 LLMError")
+        except LLMTimeoutError as e:
+            assert "超时" in e.message
+            return "LLMError 异常透传 OK"
     finally:
-        if hasattr(llm_mod, "_original_call_llm"):
-            llm_mod.call_llm = llm_mod._original_call_llm
-    assert is_llm_error(result)
-    return "LLM_ERROR 透传 OK"
+        llm_mod.call_llm = original
 
 
 # ============ 20. LLMClient 别名映射 worker ↔ writer ============
@@ -453,48 +458,8 @@ def t20():
     return "worker ↔ writer 别名 OK"
 
 
-# ============ 21. LLMClient.call_strict — 未配置抛出 LLMConfigError ============
+# ============ 21. 异常类 retryable 属性 ============
 def t21():
-    client = LLMClient(project_presets={}, global_presets=[])
-    try:
-        asyncio.run(client.call_strict("writer", "system", "user"))
-        raise AssertionError("未配置应抛出 LLMConfigError")
-    except LLMConfigError as e:
-        assert "API Key" in e.message or "未配置" in e.message, f"异常消息应说明未配置，实际 {e.message!r}"
-        return f"call_strict 抛出 LLMConfigError: {e}"
-
-
-# ============ 22. LLMClient.call_strict — 成功路径返回文本 ============
-def t22():
-    presets = {
-        "writer_preset": {
-            "api_key": "sk-test",
-            "base_url": "https://api.example.com",
-            "model": "gpt-4",
-        }
-    }
-    client = LLMClient(project_presets=presets, global_presets=[])
-
-    import engines.common.llm_client as llm_mod
-
-    async def _mock_call_llm(config, system_prompt, user_prompt, max_tokens, request_timeout_seconds):
-        assert config.api_key == "sk-test"
-        assert system_prompt == "sys"
-        assert user_prompt == "usr"
-        return "strict 模式返回内容"
-
-    original = llm_mod.call_llm
-    llm_mod.call_llm = _mock_call_llm
-    try:
-        result = asyncio.run(client.call_strict("writer", "sys", "usr"))
-    finally:
-        llm_mod.call_llm = original
-    assert result == "strict 模式返回内容", f"call_strict 应返回 LLM 文本，实际 {result!r}"
-    return "call_strict 成功路径 OK"
-
-
-# ============ 23. 异常类 retryable 属性 ============
-def t23():
     # 可重试异常
     assert LLMRateLimitError("429").retryable is True, "LLMRateLimitError 应可重试"
     assert LLMTimeoutError("timeout").retryable is True, "LLMTimeoutError 应可重试"
@@ -510,8 +475,8 @@ def t23():
     return "retryable 属性 OK"
 
 
-# ============ 24. LLMError.__str__ 返回 [LLM_ERROR: ...] 格式 ============
-def t24():
+# ============ 22. LLMError.__str__ 返回 [LLM_ERROR: ...] 格式 ============
+def t22():
     e = LLMConfigError("API Key 未配置")
     s = str(e)
     assert s.startswith("[LLM_ERROR: "), f"__str__ 应以 [LLM_ERROR: 开头，实际 {s!r}"
@@ -536,7 +501,7 @@ def t24():
 
 if __name__ == '__main__':
     print("=" * 70)
-    print("  LLM 客户端测试 (24 用例)")
+    print("  LLM 客户端测试 (22 用例)")
     print("=" * 70)
     print()
     run("01. is_llm_error 检测前缀", t01)
@@ -546,8 +511,8 @@ if __name__ == '__main__':
     run("05. has_valid_config 已配置返回 True", t05)
     run("06. resolve_config 优先级", t06)
     run("07. resolve_config chat 兜底", t07)
-    run("08. call 未配置返回 LLM_ERROR", t08)
-    run("09. call mock call_llm 正常返回", t09)
+    run("08. call_strict 未配置抛 LLMConfigError", t08)
+    run("09. call_strict mock call_llm 正常返回", t09)
     run("10. call_llm 空 API Key 抛 LLMConfigError", t10)
     run("11. call_llm 空 base_url 抛 LLMConfigError", t11)
     run("12. _is_retryable_error 判定", t12)
@@ -556,13 +521,11 @@ if __name__ == '__main__':
     run("15. call_llm 空内容抛 LLMEmptyResponseError", t15)
     run("16. call_llm 401 抛 LLMAuthError", t16)
     run("17. call_llm 404 抛 LLMNotFoundError", t17)
-    run("18. call 使用角色默认 max_tokens", t18)
-    run("19. call LLM_ERROR 透传", t19)
+    run("18. call_strict 使用角色默认 max_tokens", t18)
+    run("19. call_strict LLMError 异常透传", t19)
     run("20. worker ↔ writer 别名映射", t20)
-    run("21. call_strict 未配置抛 LLMConfigError", t21)
-    run("22. call_strict 成功路径返回文本", t22)
-    run("23. 异常类 retryable 属性", t23)
-    run("24. LLMError.__str__ 格式一致性", t24)
+    run("21. 异常类 retryable 属性", t21)
+    run("22. LLMError.__str__ 格式一致性", t22)
     print()
     print("=" * 70)
     print(f"  结果:  {len(PASSED)} 通过 / {len(FAILED)} 失败")

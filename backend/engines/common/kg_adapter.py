@@ -504,7 +504,7 @@ class KGAdapter:
             user_prompt += f"--- {layer}大纲 ---\n{outline_text[:8000]}\n--- 大纲结束 ---"
 
             try:
-                response = await llm_client.call("reviewer", KG_INGEST_OUTLINE_SYSTEM, user_prompt)
+                response = await llm_client.call_strict("reviewer", KG_INGEST_OUTLINE_SYSTEM, user_prompt)
                 entities = self._parse_ingest_response(response)
                 stats = self._write_entities_to_kg(entities, chapter_num=0)
                 if emit:

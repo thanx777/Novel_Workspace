@@ -1,7 +1,7 @@
 """
 知识图谱核心模块
-- 7 种节点类型：chapter / character / scene / plot_thread / foreshadowing / world_fact / outline_node
-- 6 种边类型：appears_in / happens_in / belongs_to / related_to / foreshadows / derived_from
+- 11 种节点类型：chapter / character / scene / plot_thread / foreshadowing / world_fact / outline_node / genre_rule / strand_tag / coolpoint / hook
+- 11 种边类型：appears_in / happens_in / belongs_to / related_to / foreshadows / derived_from / relates_to / tagged_as / triggers / pays_off / governed_by
 - SQLite 持久化（向后兼容 JSON）
 - 上下文检索
 - bootstrap_from_markdown（迁移旧数据）
@@ -243,24 +243,33 @@ class KnowledgeGraph:
             return self._save_sqlite()
 
     def _save_sqlite(self) -> bool:
-        """将内存中的 nodes/edges 全量写入 SQLite。"""
+        """将内存中的 nodes/edges 增量 upsert 写入 SQLite（by node_id / edge_id）。"""
         conn = self._get_conn()
         try:
             self._init_db(conn)
-            conn.execute("DELETE FROM kg_nodes")
-            conn.execute("DELETE FROM kg_edges")
             for node_id, node in self.nodes.items():
                 props = self._node_to_props(node)
                 conn.execute(
-                    "INSERT INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO kg_nodes (id, type, label, properties) VALUES (?, ?, ?, ?)",
                     (node["id"], node["type"], node["label"], props),
                 )
             for edge_id, edge in self.edges.items():
                 props = self._edge_to_props(edge)
                 conn.execute(
-                    "INSERT INTO kg_edges (id, source, target, relation, properties) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO kg_edges (id, source, target, relation, properties) VALUES (?, ?, ?, ?, ?)",
                     (edge["id"], edge["source"], edge["target"], edge["type"], props),
                 )
+            # 删除内存中已不存在的节点和边
+            if self.nodes:
+                placeholders = ",".join("?" for _ in self.nodes)
+                conn.execute(f"DELETE FROM kg_nodes WHERE id NOT IN ({placeholders})", list(self.nodes.keys()))
+            else:
+                conn.execute("DELETE FROM kg_nodes")
+            if self.edges:
+                placeholders = ",".join("?" for _ in self.edges)
+                conn.execute(f"DELETE FROM kg_edges WHERE id NOT IN ({placeholders})", list(self.edges.keys()))
+            else:
+                conn.execute("DELETE FROM kg_edges")
             conn.commit()
             return True
         except Exception:

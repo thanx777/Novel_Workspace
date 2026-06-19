@@ -69,8 +69,8 @@ class LLMEmptyResponseError(LLMError):
 
 class AgentConfig(BaseModel):
     api_key: str
-    base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    model: str = "glm-4-flash"
+    base_url: str = ""
+    model: str = ""
     api_format: str = "openai"
     chat_template_kwargs: Optional[dict] = None
     thinking_mode: Optional[str] = None  # "enabled" | "disabled" | None (仅 DeepSeek 等支持思考模式的模型)
@@ -224,7 +224,6 @@ def is_llm_error(text: str) -> bool:
     """[Deprecated] 检查字符串是否为 LLM 错误标记。
 
     新代码应使用 try/except LLMError 替代。
-    此函数保留用于向后兼容（LLMClient.call() 仍返回错误字符串）。
     """
     import warnings
     warnings.warn("is_llm_error() is deprecated, use try/except LLMError instead", DeprecationWarning, stacklevel=2)
@@ -260,14 +259,14 @@ class LLMClient:
         if preset is None:
             return AgentConfig(
                 api_key="",
-                base_url="https://integrate.api.nvidia.com/v1",
-                model="meta/llama-4-maverick-17b-128e-instruct",
+                base_url="",
+                model="",
                 api_format="openai",
             )
 
         cfg = AgentConfig(
             api_key=preset.get("api_key", ""),
-            base_url=preset.get("base_url", "https://integrate.api.nvidia.com/v1"),
+            base_url=preset.get("base_url", ""),
             model=preset.get("model", ""),
             api_format=preset.get("api_format", "openai"),
             chat_template_kwargs=preset.get("chat_template_kwargs"),
@@ -312,33 +311,6 @@ class LLMClient:
                 if isinstance(gp, dict) and gp.get("api_key"):
                     return gp
         return None
-
-    async def call(self, role: str, system_prompt: str, user_prompt: str,
-                   max_tokens: Optional[int] = None,
-                   request_timeout_seconds: int = 300) -> str:
-        """[Deprecated] 调用 LLM，自动按角色解析配置。
-
-        失败时返回 [LLM_ERROR: ...] 字符串（向后兼容）。
-        新代码应使用 call_strict() 获取异常。
-        """
-        import warnings
-        warnings.warn("LLMClient.call() is deprecated, use call_strict() instead", DeprecationWarning, stacklevel=2)
-        cfg = self.resolve_config(role)
-        if not cfg.api_key:
-            return "[LLM_ERROR: 未配置 API Key]"
-
-        defaults = ROLE_DEFAULTS.get(role, {})
-        mt = max_tokens or defaults.get("max_tokens", 4000)
-
-        try:
-            text = await call_llm(cfg, system_prompt, user_prompt,
-                                  max_tokens=mt,
-                                  request_timeout_seconds=request_timeout_seconds)
-            if not text:
-                return "[LLM_ERROR: 空响应]"
-            return text
-        except LLMError as e:
-            return str(e)
 
     async def call_strict(self, role: str, system_prompt: str, user_prompt: str,
                           max_tokens: Optional[int] = None,
