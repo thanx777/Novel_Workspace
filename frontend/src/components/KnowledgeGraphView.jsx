@@ -231,7 +231,7 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
           ) : view === "time" ? (
             <TimelineView nodes={filtered.nodes} edges={filtered.edges} onSelect={onSelect} />
           ) : view === "table" ? (
-            <TableView nodes={filtered.nodes} edges={filtered.edges} onSelect={onSelect} />
+            <TableView nodes={filtered.nodes} edges={filtered.edges} onSelect={onSelect} projectName={projectName} />
           ) : null}
         </div>
 
@@ -742,7 +742,7 @@ function TimelineView({ nodes, edges, onSelect }) {
 // ============================================================
 // 表格视图
 // ============================================================
-function TableView({ nodes, edges, onSelect }) {
+function TableView({ nodes, edges, onSelect, projectName }) {
   const [sortKey, setSortKey] = useState("type")
   const [sortDir, setSortDir] = useState("asc")
   const [expanded, setExpanded] = useState(null)

@@ -94,7 +94,11 @@ function AppInner() {
     } catch (e) { showNotification("Install failed: " + e.message, "error") }
   }, [showNotification])
 
-  const handleDepSkip = useCallback(() => setDepMissing(null), [])
+  const handleDepSkip = useCallback((e) => {
+    if (e.type === "click" || e.key === "Enter" || e.key === " " || e.key === "Escape") {
+      setDepMissing(null)
+    }
+  }, [])
 
   return (
     <div className="app">
