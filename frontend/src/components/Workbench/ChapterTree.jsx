@@ -1,4 +1,5 @@
 import { useApp } from "../../context/AppContext"
+import { AccessibleButton } from "../common/AccessibleButton"
 
 export default function ChapterTree({
   activeProject, volumes, expandedVolumes, setExpandedVolumes,
@@ -16,25 +17,21 @@ export default function ChapterTree({
           const doneCount = volChapters.filter(c => c.status === "completed" || c.word_count > 0).length
           return (
             <div key={vol.num} className="volume-group">
-              <div
+              <AccessibleButton
                 className="volume-header"
                 onClick={() => setExpandedVolumes(prev => ({ ...prev, [vol.num]: !prev[vol.num] }))}
                 style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "6px 10px", cursor: "pointer",
                   background: isExpanded ? "var(--bg-active, rgba(99,102,241,0.1))" : "transparent",
-                  borderBottom: "1px solid var(--border)",
-                  fontSize: 12, fontWeight: 600, userSelect: "none",
                 }}
               >
                 <span>
                   <span style={{ display: "inline-block", width: 12, transition: "transform 0.15s", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
                   {" "}{language === "zh" ? `第${vol.num}卷` : `Vol ${vol.num}`} · {vol.name}
                 </span>
-                <span style={{ fontSize: 10, opacity: 0.6 }}>
+                <span className="preset-hint">
                   {doneCount}/{volChapters.length || (vol.endChapter - vol.startChapter + 1)} {t("ch")}
                 </span>
-              </div>
+              </AccessibleButton>
               {isExpanded && (
                 <div className="volume-chapters">
                   {volChapters.length > 0 ? volChapters.map(c => (
