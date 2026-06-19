@@ -36,7 +36,7 @@ export function formatSSEEvent(data) {
   let logStatus = "info"
   if (["error", "cycle_cancelled"].includes(status)) logStatus = "error"
   else if (["cycle_stuck", "cycle_ended"].includes(status) && !data.accepted) logStatus = "warning"
-  else if (["done", "cycle_completed", "cycle_ended", "outline_done", "writing_done", "review_done", "review_dim_done", "chapter_written", "chapter_polished", "outline_layer_done"].includes(status)) logStatus = "done"
+  else if (["done", "cycle_completed", "cycle_ended", "outline_done", "writing_done", "review_done", "review_dim_done", "chapter_written", "chapter_polished", "outline_layer_done", "reviewer_done", "writer_done"].includes(status)) logStatus = "done"
   else if (["chapter_writing", "chapter_polishing", "mwr_round", "reviewing"].includes(status)) logStatus = "start"
 
   return { status: logStatus, role, message, timestamp: ts }
