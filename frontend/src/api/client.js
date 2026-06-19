@@ -37,12 +37,14 @@ function buildHeaders(options = {}) {
 
 /**
  * 基础 fetch 封装
- * @param {string} path — API 路径，如 /api/v2/projects
+ * @param {string} path — API 路径，如 /v2/projects 或 /presets（自动补 /api 前缀）
  * @param {object} options — fetch options
  * @returns {Promise<Response>}
  */
 export async function apiFetch(path, options = {}) {
-  const url = getBaseUrl() + path
+  // 自动补 /api 前缀：/presets → /api/presets, /v2/projects → /api/v2/projects
+  const apiPath = path.startsWith('/api/') ? path : '/api' + path
+  const url = getBaseUrl() + apiPath
   const headers = buildHeaders(options)
   const { headers: _, ...rest } = options
   const response = await fetch(url, { ...rest, headers })
