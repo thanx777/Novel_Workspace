@@ -113,6 +113,85 @@ WORKSPACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worksp
 PROJECTS_DIR = os.path.join(WORKSPACE_DIR, "projects")
 os.makedirs(PROJECTS_DIR, exist_ok=True)
 
+# ============================================================
+# 全局认证数据库（auth.db）
+# ============================================================
+
+AUTH_DB_PATH = os.path.join(WORKSPACE_DIR, "auth.db")
+
+
+def _get_auth_conn():
+    """获取全局认证数据库连接"""
+    os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(AUTH_DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT DEFAULT 'user',
+            created_at TEXT DEFAULT ''
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def get_user_by_username(username: str) -> Optional[Dict]:
+    """根据用户名查询用户"""
+    conn = _get_auth_conn()
+    try:
+        cur = conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        if row:
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        return None
+    finally:
+        conn.close()
+
+
+def create_user(username: str, password_hash: str, role: str = "user") -> int:
+    """创建用户"""
+    conn = _get_auth_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+            (username, password_hash, role, datetime.now().isoformat())
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def count_users() -> int:
+    """统计用户数"""
+    conn = _get_auth_conn()
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM users")
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def init_default_admin():
+    """初始化默认 admin 用户（仅在 users 表为空时）"""
+    if count_users() > 0:
+        return
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not admin_password:
+        import secrets
+        admin_password = secrets.token_urlsafe(16)
+    password_hash = pwd_context.hash(admin_password)
+    create_user("admin", password_hash, "admin")
+    print(f"[AUTH] 已创建默认管理员账户: admin")
+    print(f"[AUTH] 密码: {admin_password}")
+    print(f"[AUTH] 请通过环境变量 ADMIN_PASSWORD 设置自定义密码")
+
 
 # ============================================================
 # 路径安全

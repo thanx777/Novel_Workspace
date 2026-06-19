@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -52,6 +52,11 @@ class FileContent(BaseModel):
 class WorkspaceConfig(BaseModel):
     path: str
 from test_runner import parse_test_instructions, execute_test, terminal_executor_stream, is_dangerous, execute_terminal_force
+
+# Auth
+from api.auth import require_auth, require_admin, create_access_token, verify_password, is_auth_disabled
+from api.auth_models import LoginRequest, Token
+from project_db import get_user_by_username, init_default_admin
 
 # V2 API Router（分层大纲 + 知识图谱）
 v2_router = None
@@ -100,6 +105,29 @@ app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.on_event("startup")
+async def _startup_init():
+    """应用启动时初始化默认管理员账户"""
+    init_default_admin()
+
+
+# ============================================
+# Auth — Login
+# ============================================
+
+@app.post("/api/auth/login", response_model=Token)
+async def login(req: LoginRequest):
+    """用户登录，返回 JWT token"""
+    if is_auth_disabled():
+        token = create_access_token(data={"sub": "dev", "role": "admin"})
+        return Token(access_token=token)
+    user = get_user_by_username(req.username)
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token(data={"sub": user["username"], "role": user["role"]})
+    return Token(access_token=token)
 
 # CORS 白名单：仅允许本地开发前端访问，避免任意源跨域
 _ALLOWED_ORIGINS = [
@@ -621,7 +649,7 @@ class DepInstallRequest(BaseModel):
 
 @app.post("/api/test/dep-install")
 @limiter.limit("60/minute")
-async def api_dep_install(request: Request, req: DepInstallRequest):
+async def api_dep_install(request: Request, req: DepInstallRequest, user=Depends(require_admin)):
     cmd = req.suggestion or f"pip install {req.module}"
     result_parts = []
     exit_code = -1
@@ -635,6 +663,23 @@ async def api_dep_install(request: Request, req: DepInstallRequest):
 
 @app.websocket("/api/test/terminal/ws")
 async def terminal_websocket(websocket: WebSocket):
+    # WebSocket 认证：从 query 参数读取 token
+    if not is_auth_disabled():
+        token = websocket.query_params.get("token", "")
+        if not token:
+            await websocket.close(code=4001, reason="Not authenticated")
+            return
+        try:
+            from jose import jwt as _jwt
+            from api.auth import get_auth_secret, ALGORITHM
+            payload = _jwt.decode(token, get_auth_secret(), algorithms=[ALGORITHM])
+            role = payload.get("role", "user")
+            if role != "admin":
+                await websocket.close(code=4003, reason="Admin access required")
+                return
+        except Exception:
+            await websocket.close(code=4001, reason="Invalid token")
+            return
     await websocket.accept()
     TerminalManager.connect(websocket)
     try:
@@ -709,7 +754,7 @@ def v2_list_projects(request: Request):
 
 @app.post("/api/v2/projects")
 @limiter.limit("60/minute")
-def v2_create_project(request: Request, p: _ProjectCreate):
+def v2_create_project(request: Request, p: _ProjectCreate, user=Depends(require_auth)):
     """创建新项目。"""
     try:
         result = create_project(
@@ -739,7 +784,7 @@ def v2_create_project(request: Request, p: _ProjectCreate):
 
 @app.delete("/api/v2/projects/{project_name}")
 @limiter.limit("60/minute")
-def v2_delete_project(request: Request, project_name: str):
+def v2_delete_project(request: Request, project_name: str, user=Depends(require_auth)):
     """删除项目。"""
     try:
         ok = delete_project(project_name)
@@ -925,7 +970,7 @@ def v2_add_memory(request: Request, project_name: str, body: dict):
 
 @app.post("/api/v2/projects/{project_name}/confirm-outline")
 @limiter.limit("60/minute")
-def v2_confirm_outline(request: Request, project_name: str):
+def v2_confirm_outline(request: Request, project_name: str, user=Depends(require_auth)):
     """人工审查大纲后，推进到写作阶段。"""
     try:
         db = ProjectDB(project_name)
@@ -953,7 +998,7 @@ def v2_reject_outline(request: Request, project_name: str):
 
 @app.post("/api/v2/projects/{project_name}/confirm-writing")
 @limiter.limit("60/minute")
-def v2_confirm_writing(request: Request, project_name: str):
+def v2_confirm_writing(request: Request, project_name: str, user=Depends(require_auth)):
     """写作完成后，推进到审校阶段。"""
     try:
         db = ProjectDB(project_name)
@@ -967,7 +1012,7 @@ def v2_confirm_writing(request: Request, project_name: str):
 
 @app.post("/api/v2/projects/{project_name}/confirm-review")
 @limiter.limit("60/minute")
-def v2_confirm_review(request: Request, project_name: str):
+def v2_confirm_review(request: Request, project_name: str, user=Depends(require_auth)):
     """审校完成，标记项目为已完成。"""
     try:
         db = ProjectDB(project_name)

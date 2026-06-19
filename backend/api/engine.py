@@ -1,11 +1,12 @@
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from project_db import get_project_dir
 from engines.common.state import EngineState
 from .engine_registry import _running_engines
 from .logs import _read_run_log
+from .auth import require_auth
 
 router = APIRouter()
 
@@ -44,7 +45,7 @@ def clear_project_logs(name: str):
 
 
 @router.post("/projects/{name}/engine/stop")
-async def engine_stop(name: str):
+async def engine_stop(name: str, user=Depends(require_auth)):
     """停止当前运行的引擎。设置取消标志并立即保存 paused 状态。"""
     engine = _running_engines.get(name)
     if engine is not None:

@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sse_starlette.sse import EventSourceResponse
 
 from project_db import ProjectDB, get_project_dir
@@ -16,6 +16,7 @@ from .engine_registry import (
     _get_project_presets, _get_project_genre, _get_global_presets,
 )
 from .logs import _append_run_log
+from .auth import require_auth
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ router = APIRouter()
 # ---- SSE 流式引擎端点（日志实时推送） ----
 
 @router.post("/projects/{name}/outline/generate/stream")
-async def outline_generate_stream(name: str, req: OutlineGenerateRequest):
+async def outline_generate_stream(name: str, req: OutlineGenerateRequest, user=Depends(require_auth)):
     """大纲 MWR 循环生成（SSE 流式，实时推送进度日志）。"""
     return EventSourceResponse(_outline_generate_stream(name, req))
 
@@ -145,7 +146,7 @@ async def _outline_generate_stream(name: str, req: OutlineGenerateRequest):
 
 
 @router.post("/projects/{name}/writing/start/stream")
-async def writing_start_stream(name: str, req: WritingStartRequest):
+async def writing_start_stream(name: str, req: WritingStartRequest, user=Depends(require_auth)):
     """写作引擎（SSE 流式，实时推送进度日志）。"""
     return EventSourceResponse(_writing_start_stream(name, req))
 
@@ -189,7 +190,7 @@ async def _writing_start_stream(name: str, req: WritingStartRequest):
 
 
 @router.post("/projects/{name}/review/start/stream")
-async def review_start_stream(name: str):
+async def review_start_stream(name: str, user=Depends(require_auth)):
     """全局审校引擎（SSE 流式，实时推送进度日志）。"""
     return EventSourceResponse(_review_start_stream(name))
 

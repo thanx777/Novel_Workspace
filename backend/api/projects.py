@@ -1,11 +1,12 @@
 import os
 import time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from project_db import ProjectDB, get_project_dir, list_all_projects
 from knowledge_graph import KnowledgeGraph
 from .schemas import ProjectCreateRequest
+from .auth import require_auth
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ def get_project(name: str):
 
 
 @router.post("/projects")
-def create_project(req: ProjectCreateRequest):
+def create_project(req: ProjectCreateRequest, user=Depends(require_auth)):
     from project_db import create_project as _cp
     try:
         result = _cp(

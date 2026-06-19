@@ -1,7 +1,7 @@
 import os
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from project_db import ProjectDB, get_project_dir, read_file_safe
 from outline_templates import LAYER_NAMES
@@ -10,6 +10,7 @@ from engines.common.state import EngineState
 from engines.outline.engine import OutlineEngine
 from .schemas import OutlineLayersRequest
 from .engine_registry import _get_project_presets, _get_project_genre, _get_global_presets
+from .auth import require_auth
 
 router = APIRouter()
 
@@ -82,7 +83,7 @@ def get_outline(name: str, layer: str):
 
 
 @router.post("/projects/{name}/outlines/{layer}/regenerate")
-async def regenerate_outline(name: str, layer: str):
+async def regenerate_outline(name: str, layer: str, user=Depends(require_auth)):
     if layer not in ("L1", "L2"):
         raise HTTPException(400, f"Unknown layer: {layer}")
     project_dir = get_project_dir(name)
@@ -107,7 +108,7 @@ async def regenerate_outline(name: str, layer: str):
 
 
 @router.post("/projects/{name}/outlines/bootstrap")
-async def bootstrap_outlines(name: str, requirements: str = ""):
+async def bootstrap_outlines(name: str, requirements: str = "", user=Depends(require_auth)):
     """一键生成 L1→L2。"""
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)

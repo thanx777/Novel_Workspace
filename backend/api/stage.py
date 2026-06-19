@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from project_db import ProjectDB, get_project_dir
 from knowledge_graph import KnowledgeGraph
@@ -7,6 +7,7 @@ from engines.writing.engine import WritingEngine
 from engines.review.engine import ReviewEngine
 from .schemas import OutlineGenerateRequest, WritingStartRequest
 from .engine_registry import _get_project_presets, _get_project_genre, _get_global_presets
+from .auth import require_auth
 
 router = APIRouter()
 
@@ -14,7 +15,7 @@ router = APIRouter()
 # ---- 大纲引擎 ----
 
 @router.post("/projects/{name}/outline/generate")
-async def outline_generate(name: str, req: OutlineGenerateRequest):
+async def outline_generate(name: str, req: OutlineGenerateRequest, user=Depends(require_auth)):
     """触发大纲 MWR 循环生成。"""
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)
@@ -50,7 +51,7 @@ def outline_state(name: str):
 # ---- 写作引擎 ----
 
 @router.post("/projects/{name}/writing/start")
-async def writing_start(name: str, req: WritingStartRequest):
+async def writing_start(name: str, req: WritingStartRequest, user=Depends(require_auth)):
     """启动写作引擎。"""
     project_dir = get_project_dir(name)
     db = ProjectDB(name)
@@ -94,7 +95,7 @@ def writing_state(name: str):
 # ---- 全局审校引擎 ----
 
 @router.post("/projects/{name}/review/start")
-async def review_start(name: str):
+async def review_start(name: str, user=Depends(require_auth)):
     """启动全局审校。"""
     project_dir = get_project_dir(name)
     project_presets = _get_project_presets(name)

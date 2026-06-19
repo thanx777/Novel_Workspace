@@ -10,5 +10,10 @@
   ],
   "workspace_dir": "",
   "projects_dir": "",
-  "default_preset": "Example-Preset"
+  "default_preset": "Example-Preset",
+  "auth": {
+    "disabled": false,
+    "token_expire_hours": 24,
+    "admin_password_env": "ADMIN_PASSWORD"
+  }
 }
