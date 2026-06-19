@@ -434,6 +434,9 @@ class WritingEngine(BaseEngine):
         # 清洗LLM输出中的FS编号
         content = self._clean_fs_ids(content)
 
+        # 去除完全重复的段落（润色后也可能产生重复）
+        content = self._deduplicate_paragraphs(content)
+
         # 程序化添加章节标题
         if not re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
             content = f"# 第{ch}章\n\n{content}"
