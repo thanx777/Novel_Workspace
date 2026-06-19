@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import { useApp } from "../context/AppContext"
+import { AccessibleButton } from "./common/AccessibleButton"
 import ReactMarkdown from "react-markdown"
 
 const LAYER_META = {
@@ -138,15 +139,14 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
           const m = LAYER_META[k]
           const s = status[k] || {}
           return (
-            <div key={k} className={`outline-tab ${layer === k ? "active" : ""} ${s.enabled === false ? "disabled" : ""}`}
+            <AccessibleButton key={k} className={`outline-tab ${layer === k ? "active" : ""} ${s.enabled === false ? "disabled" : ""}`}
               style={layer === k ? { borderBottomColor: m.color, color: m.color } : {}}
-              role="button" tabIndex={s.enabled === false ? -1 : 0}
-              onClick={() => s.enabled !== false && setLayer(k)}
-              onKeyDown={e => (e.key === "Enter" || e.key === " ") && s.enabled !== false && setLayer(k)}>
+              disabled={s.enabled === false}
+              onClick={() => setLayer(k)}>
               <span className="tab-icon">{m.icon}</span>
               <span className="tab-label">{m.label}</span>
               {s.exists && <span className="tab-dot" style={{ background: m.color }} />}
-            </div>
+            </AccessibleButton>
           )
         })}
       </div>
@@ -169,12 +169,11 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
 
         {/* AI 对话 */}
         <div className="outline-chat">
-          <div className="outline-chat-header" role="button" tabIndex={0}
-            onClick={() => setChatExpanded(!chatExpanded)}
-            onKeyDown={e => (e.key === "Enter" || e.key === " ") && setChatExpanded(!chatExpanded)}>
+          <AccessibleButton className="outline-chat-header"
+            onClick={() => setChatExpanded(!chatExpanded)}>
             <span>💬 {t('aiChat')}</span>
             <span className="outline-chat-toggle">{chatExpanded ? "▾" : "▸"}</span>
-          </div>
+          </AccessibleButton>
           {chatExpanded && (
             <div className="outline-chat-body">
               <div className="outline-chat-messages">
@@ -418,13 +417,12 @@ function TreeNode({ icon, title, defaultOpen = false, children }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
     <div className="tree-node">
-      <div className="tree-node-header" role="button" tabIndex={0}
-        onClick={() => setOpen(!open)}
-        onKeyDown={e => (e.key === "Enter" || e.key === " ") && setOpen(!open)}>
+      <AccessibleButton className="tree-node-header"
+        onClick={() => setOpen(!open)}>
         <span className="tree-arrow">{open ? "▼" : "▶"}</span>
         <span className="tree-icon">{icon}</span>
         <span className="tree-title">{title}</span>
-      </div>
+      </AccessibleButton>
       {open && <div className="tree-node-children">{children}</div>}
     </div>
   )

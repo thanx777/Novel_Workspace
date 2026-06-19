@@ -9,6 +9,7 @@ import { AppProvider, useApp } from "./context/AppContext"
 import { PresetProvider, usePresetContext } from "./context/PresetContext"
 import { ProjectProvider, useProjectContext } from "./context/ProjectContext"
 import ErrorBoundary from "./components/ErrorBoundary"
+import { AccessibleButton } from "./components/common/AccessibleButton"
 
 function AppInner() {
   const { t, language } = useApp()
@@ -160,7 +161,7 @@ function AppContent({
             <div className="preset-sidebar-panel">
               <div className="preset-sidebar-header">
                 <span>⚙️ {t("presets")}</span>
-                <button className="preset-sidebar-close" onClick={() => setShowPresetSidebar(false)} aria-label="关闭">
+                <button className="preset-sidebar-close" onClick={() => setShowPresetSidebar(false)} aria-label={t("ariaClose")}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
               </div>
@@ -192,7 +193,7 @@ function AppContent({
       <DangerConfirmModal dangerCommand={dangerCommand} setDangerCommand={setDangerCommand} onConfirm={handleDangerConfirm} />
 
       {depMissing && (
-        <div className="confirm-overlay" onClick={handleDepSkip} onKeyDown={handleDepSkip} role="button" tabIndex={0}>
+        <AccessibleButton className="confirm-overlay" onClick={handleDepSkip}>
           <div className="danger-confirm-dialog" role="dialog" aria-modal="true">
             <div className="danger-confirm-icon">⚠️</div>
             <div className="danger-confirm-title">{t("missingDependency")}</div>
@@ -209,7 +210,7 @@ function AppContent({
               </button>
             </div>
           </div>
-        </div>
+        </AccessibleButton>
       )}
 
       {notification && (
