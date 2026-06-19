@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { useApp } from "../context/AppContext"
+import { apiGet, apiPost, apiPut } from "../api/client"
 
 // ============================================================
 // 节点类型元数据 — 极简主题（stone + ink + amber）
@@ -26,7 +27,7 @@ const VIEWS = [
 // ============================================================
 // 主组件
 // ============================================================
-export default function KnowledgeGraphView({ API_BASE, projectName }) {
+export default function KnowledgeGraphView({ projectName }) {
   const { language, t } = useApp()
   const [view, setView] = useState("graph")
   const [data, setData] = useState({ nodes: [], edges: [], stats: { node_count: 0, edge_count: 0, by_type: {} } })
@@ -44,15 +45,14 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
     if (!projectName) return
     setLoading(true)
     try {
-      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/graph`)
-      const j = await r.json()
+      const j = await apiGet(`/v2/projects/${encodeURIComponent(projectName)}/graph`)
       setData(j)
     } catch (e) {
       console.error("Graph load failed:", e)
     } finally {
       setLoading(false)
     }
-  }, [API_BASE, projectName])
+  }, [projectName])
 
   useEffect(() => { loadGraph() }, [loadGraph])
 
@@ -87,11 +87,7 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
   const onSaveEdit = async () => {
     if (!selectedNode) return
     try {
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/graph/node/${encodeURIComponent(selectedNode.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label: editLabel, summary: editSummary }),
-      })
+      await apiPut(`/v2/projects/${encodeURIComponent(projectName)}/graph/node/${encodeURIComponent(selectedNode.id)}`, { label: editLabel, summary: editSummary })
       await loadGraph()
       setEditing(false)
     } catch (e) {
@@ -103,9 +99,7 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
   const onIngest = async (chapter) => {
     if (!chapter) return
     try {
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/graph/ingest/${chapter}`, {
-        method: "POST"
-      })
+      await apiPost(`/v2/projects/${encodeURIComponent(projectName)}/graph/ingest/${chapter}`)
       await loadGraph()
     } catch (e) {
       console.error("Ingest failed:", e)
@@ -244,7 +238,7 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
               editSummary={editSummary} setEditSummary={setEditSummary}
               onSave={onSaveEdit} onIngest={onIngest}
               onClose={closeDetail}
-              projectName={projectName} language={language} API_BASE={API_BASE} />
+              projectName={projectName} language={language} />
           </div>
         )}
       </div>
@@ -833,7 +827,7 @@ function TableView({ nodes, edges, onSelect, projectName }) {
 // ============================================================
 function NodeDetail({ node, edges, nodes, editing, setEditing,
   editLabel, setEditLabel, editSummary, setEditSummary,
-  onSave, onIngest, onClose, projectName, language, API_BASE }) {
+  onSave, onIngest, onClose, projectName, language }) {
   const m = NODE_META[node.type] || { icon: "•", color: "#888", label: node.type }
   const related = edges.filter(e => e.source === node.id || e.target === node.id)
   const chapter = node.attrs?.chapter_num

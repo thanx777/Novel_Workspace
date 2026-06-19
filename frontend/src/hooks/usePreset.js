@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { API_BASE } from '../constants'
+import { apiGet, apiPost, apiPut, apiDelete, apiFetch } from '../api/client'
 import { useApp } from '../context/AppContext'
 
 export default function usePreset({ showNotification, setNodes }) {
@@ -17,8 +17,7 @@ export default function usePreset({ showNotification, setNodes }) {
 
   const fetchPresets = useCallback(async () => {
     try {
-      const r = await fetch(`${API_BASE}/presets`)
-      const d = await r.json()
+      const d = await apiGet('/presets')
       setPresets(d.presets || [])
       setDefaultPreset(d.default_preset || null)
     } catch (err) { console.error('fetchPresets error:', err) }
@@ -26,9 +25,7 @@ export default function usePreset({ showNotification, setNodes }) {
 
   const handleSetDefaultPreset = useCallback(async (name) => {
     try {
-      const r = await fetch(`${API_BASE}/presets/default?name=${encodeURIComponent(name)}`, { method: 'PUT' })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
+      const data = await apiPut(`/presets/default?name=${encodeURIComponent(name)}`)
       setDefaultPreset(data.default_preset || name)
       showNotification(language === 'zh' ? `已将「${name}」设为默认预设` : `Set "${name}" as default preset`, 'success')
     } catch (err) { showNotification(language === 'zh' ? '设置默认失败: ' : 'Set default failed: ' + err.message, 'error') }
@@ -36,9 +33,7 @@ export default function usePreset({ showNotification, setNodes }) {
 
   const handleClearDefaultPreset = useCallback(async () => {
     try {
-      const r = await fetch(`${API_BASE}/presets/default`, { method: 'DELETE' })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      await r.json()
+      await apiDelete('/presets/default')
       setDefaultPreset(null)
       showNotification(language === 'zh' ? '已清除默认预设' : 'Default preset cleared', 'success')
     } catch (err) { showNotification(language === 'zh' ? '清除默认失败: ' : 'Clear default failed: ' + err.message, 'error') }
@@ -51,18 +46,12 @@ export default function usePreset({ showNotification, setNodes }) {
       return
     }
     try {
-      const r = await fetch(`${API_BASE}/presets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newPresetName.trim(), base_url: newPresetConfig.base_url.trim(),
-          model: newPresetConfig.model.trim(), api_key: newPresetConfig.api_key.trim(),
-          api_format: newPresetConfig.api_format,
-          thinking_mode: newPresetConfig.thinking_mode || 'disabled'
-        })
+      const data = await apiPost('/presets', {
+        name: newPresetName.trim(), base_url: newPresetConfig.base_url.trim(),
+        model: newPresetConfig.model.trim(), api_key: newPresetConfig.api_key.trim(),
+        api_format: newPresetConfig.api_format,
+        thinking_mode: newPresetConfig.thinking_mode || 'disabled'
       })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
       if (data.presets) setPresets(data.presets)
       else fetchPresets()
       setShowAddPreset(false)
@@ -74,9 +63,7 @@ export default function usePreset({ showNotification, setNodes }) {
 
   const handleDeletePreset = useCallback(async (presetName, t) => {
     try {
-      const r = await fetch(`${API_BASE}/presets?name=${encodeURIComponent(presetName)}`, { method: 'DELETE' })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
+      const data = await apiDelete(`/presets?name=${encodeURIComponent(presetName)}`)
       if (data.presets) setPresets(data.presets)
       else fetchPresets()
       safeSetNodes(prev => prev.map(n =>
@@ -100,18 +87,12 @@ export default function usePreset({ showNotification, setNodes }) {
       return
     }
     try {
-      const r = await fetch(`${API_BASE}/presets`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          original_name: editingPreset, name: editPresetConfig.name.trim(),
-          base_url: editPresetConfig.base_url.trim(), model: editPresetConfig.model.trim(),
-          api_key: editPresetConfig.api_key.trim(), api_format: editPresetConfig.api_format,
-          thinking_mode: editPresetConfig.thinking_mode || null
-        })
+      const data = await apiPut('/presets', {
+        original_name: editingPreset, name: editPresetConfig.name.trim(),
+        base_url: editPresetConfig.base_url.trim(), model: editPresetConfig.model.trim(),
+        api_key: editPresetConfig.api_key.trim(), api_format: editPresetConfig.api_format,
+        thinking_mode: editPresetConfig.thinking_mode || null
       })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
       if (data.presets) setPresets(data.presets)
       else fetchPresets()
       const oldName = editingPreset, newName = editPresetConfig.name.trim()
@@ -137,9 +118,8 @@ export default function usePreset({ showNotification, setNodes }) {
     const timeoutId = setTimeout(() => controller.abort(), 50000)
 
     try {
-      const response = await fetch(`${API_BASE}/test-connection`, {
+      const response = await apiFetch('/test-connection', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           api_key: config.api_key,
           base_url: config.base_url,

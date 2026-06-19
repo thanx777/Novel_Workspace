@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react"
-import { API_BASE } from "../constants"
+import { apiGet, apiPost, apiDelete } from "../api/client"
 
 export function useProjectCrud(showNotification, t) {
   const [projects, setProjects] = useState([])
@@ -11,11 +11,8 @@ export function useProjectCrud(showNotification, t) {
   const fetchProjects = useCallback(async () => {
     setLoadingList(true)
     try {
-      const resp = await fetch(`${API_BASE}/v2/projects`)
-      if (resp.ok) {
-        const data = await resp.json()
-        setProjects(data.projects || [])
-      }
+      const data = await apiGet("/v2/projects")
+      setProjects(data.projects || [])
     } catch (e) {
       console.error("[v2] fetch projects failed:", e)
     } finally {
@@ -27,7 +24,7 @@ export function useProjectCrud(showNotification, t) {
   const syncChapters = useCallback(async (name) => {
     if (!name) return
     try {
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/sync-chapters`, { method: "POST" })
+      await apiPost(`/v2/projects/${encodeURIComponent(name)}/sync-chapters`)
     } catch (e) {
       console.error("[v2] sync chapters failed:", e)
     }
@@ -40,19 +37,18 @@ export function useProjectCrud(showNotification, t) {
       // 先同步章节标题，确保数据库中的章节信息是最新的
       await syncChapters(name)
 
-      const [projResp, chaptersResp, memoryResp, chatResp] = await Promise.all([
-        fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}`),
-        fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/chapters`),
-        fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/memory`),
-        fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/chat`),
+      const [projData, chaptersData, memoryData, chatData] = await Promise.all([
+        apiGet(`/v2/projects/${encodeURIComponent(name)}`),
+        apiGet(`/v2/projects/${encodeURIComponent(name)}/chapters`),
+        apiGet(`/v2/projects/${encodeURIComponent(name)}/memory`),
+        apiGet(`/v2/projects/${encodeURIComponent(name)}/chat`),
       ])
 
-      const respData = projResp.ok ? await projResp.json() : null
       // 后端返回的是 {project, chapters, ...} 包装结构，提取 project 部分
-      const project = respData && respData.project ? respData.project : respData
-      const chapters = chaptersResp.ok ? (await chaptersResp.json()).chapters || [] : []
-      const memory = memoryResp.ok ? (await memoryResp.json()).memory || [] : []
-      const chat = chatResp.ok ? (await chatResp.json()).chat || [] : []
+      const project = projData && projData.project ? projData.project : projData
+      const chapters = chaptersData.chapters || []
+      const memory = memoryData.memory || []
+      const chat = chatData.chat || []
 
       setActiveProject({
         ...(project || { name }),
@@ -70,13 +66,7 @@ export function useProjectCrud(showNotification, t) {
   // ---------- 创建 ----------
   const createProject = useCallback(async (payload) => {
     try {
-      const resp = await fetch(`${API_BASE}/v2/projects`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const data = await resp.json()
+      const data = await apiPost("/v2/projects", payload)
       showNotification && showNotification(t?.("projectCreated") || "项目已创建", "success")
       await fetchProjects()
       return data
@@ -89,10 +79,7 @@ export function useProjectCrud(showNotification, t) {
   // ---------- 删除 ----------
   const deleteProject = useCallback(async (name) => {
     try {
-      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}`, {
-        method: "DELETE",
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      await apiDelete(`/v2/projects/${encodeURIComponent(name)}`)
       showNotification && showNotification(t?.("projectDeleted") || "项目已删除", "success")
       if (activeProject?.name === name) setActiveProject(null)
       await fetchProjects()

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react"
 import { useApp } from "../context/AppContext"
 import { AccessibleButton } from "./common/AccessibleButton"
 import ReactMarkdown from "react-markdown"
+import { apiGet, apiPost } from "../api/client"
 
 const LAYER_META = {
   L1: { icon: "📚", label: "L1 全书大纲", color: "#1c1917" },
@@ -22,7 +23,7 @@ const VIEW_META = {
   ],
 }
 
-export default function OutlinePanel({ projectName, API_BASE, showNotification }) {
+export default function OutlinePanel({ projectName, showNotification }) {
   const { t } = useApp()
   const [layer, setLayer] = useState("L1")
   const [view, setView] = useState("md")
@@ -39,8 +40,7 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
   const loadStatus = async () => {
     if (!projectName) return
     try {
-      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines`)
-      const j = await r.json()
+      const j = await apiGet(`/v2/projects/${encodeURIComponent(projectName)}/outlines`)
       setStatus(j)
       // 默认选中第一个存在的层
       for (const k of ["L1", "L2"]) {
@@ -53,11 +53,8 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
   const loadLayer = async (targetLayer) => {
     if (!projectName) return
     try {
-      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${targetLayer}`)
-      if (r.ok) {
-        const j = await r.json()
-        setData(prev => ({ ...prev, [targetLayer]: j }))
-      }
+      const j = await apiGet(`/v2/projects/${encodeURIComponent(projectName)}/outlines/${targetLayer}`)
+      setData(prev => ({ ...prev, [targetLayer]: j }))
     } catch (e) { console.error(e) }
   }
 
@@ -80,8 +77,7 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
     setRegenerating(true)
     showNotification?.(t('regenerating'), "info")
     try {
-      const url = `${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outlines/${layer}/regenerate`
-      await fetch(url, { method: "POST" })
+      await apiPost(`/v2/projects/${encodeURIComponent(projectName)}/outlines/${layer}/regenerate`)
       await loadStatus()
       await loadLayer(layer)
       showNotification?.(t('regenerated'), "success")
@@ -101,12 +97,7 @@ export default function OutlinePanel({ projectName, API_BASE, showNotification }
     setChatMessages(prev => [...prev, { role: "user", content: msg }])
     try {
       const body = { message: msg, layer }
-      const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(projectName)}/outline/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      })
-      const j = await r.json()
+      const j = await apiPost(`/v2/projects/${encodeURIComponent(projectName)}/outline/chat`, body)
       setChatMessages(prev => [...prev, { role: "assistant", content: j.response || "（无回复）" }])
       // 刷新大纲数据
       await loadStatus()

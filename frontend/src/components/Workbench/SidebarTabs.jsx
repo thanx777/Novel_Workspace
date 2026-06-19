@@ -1,6 +1,5 @@
 import { useApp } from "../../context/AppContext"
 import { useProjectContext } from "../../context/ProjectContext"
-import { API_BASE } from "../../constants"
 import OutlinePanel from "../OutlinePanel"
 import ChapterTree from "./ChapterTree"
 import { formatTimestamp } from "@/utils/format"
@@ -57,7 +56,6 @@ export default function SidebarTabs({
         {activeSidePanel === "outline" && (
           <OutlinePanel
             projectName={activeProject?.name}
-            API_BASE={API_BASE}
             showNotification={showNotification}
           />
         )}

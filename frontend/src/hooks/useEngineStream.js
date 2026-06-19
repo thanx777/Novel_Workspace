@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react"
-import { API_BASE } from "../constants"
+import { apiGet, apiPost, apiFetch } from "../api/client"
 import { formatSSEEvent, readSSEStream } from "../utils/sse"
 
 export function useEngineStream(showNotification, loadProject, fetchProjects, t) {
@@ -23,24 +23,21 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
     stopLogPolling()
     const fetchLatest = async () => {
       try {
-        const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/logs?limit=100`)
-        if (!resp.ok) return
-        const data = await resp.json()
+        const data = await apiGet(`/v2/projects/${encodeURIComponent(name)}/logs?limit=100`)
         const logs = (data.logs || []).map(evt => formatSSEEvent({ ...evt, timestamp: evt.timestamp || Date.now() }))
         if (logs.length > 0 && onLogEvent) {
           // 用最新日志替换（由调用方决定如何处理）
           onLogEvent({ type: "replace", logs })
         }
         // 检查引擎是否还在跑
-        const stateResp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/state`)
-        if (stateResp.ok) {
-          const state = await stateResp.json()
+        try {
+          const state = await apiGet(`/v2/projects/${encodeURIComponent(name)}/engine/state`)
           const writing = state?.writing || {}
           if (writing.status === "completed" || writing.status === "failed" || writing.status === "cancelled") {
             stopLogPolling()
             return
           }
-        }
+        } catch {}
       } catch {}
     }
     fetchLatest()
@@ -50,7 +47,7 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
   const stopTask = useCallback(async (name) => {
     try {
       // 停止新引擎
-      await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(name)}/engine/stop`, { method: "POST" }).catch(() => {})
+      await apiPost(`/v2/projects/${encodeURIComponent(name)}/engine/stop`).catch(() => {})
       // 中断前端 SSE 请求
       if (engineAbortRef.current) { try { engineAbortRef.current.abort() } catch (e) {} }
       stopLogPolling()
@@ -74,9 +71,9 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
     const abortCtrl = new AbortController()
     engineAbortRef.current = abortCtrl
     try {
-      const resp = await fetch(url, {
+      const resp = await apiFetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Accept": "text/event-stream" },
         body: body ? JSON.stringify(body) : undefined,
         signal: abortCtrl.signal,
       })
@@ -117,7 +114,7 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
   const engineOutlineGenerate = useCallback(async (name, { layer = "", requirements = "", onLogEvent = null } = {}) => {
     await _startEngineStream(name, {
       stage: "outline",
-      url: `${API_BASE}/v2/projects/${encodeURIComponent(name)}/outline/generate/stream`,
+      url: `/v2/projects/${encodeURIComponent(name)}/outline/generate/stream`,
       body: { layer, requirements },
       doneMessage: "大纲生成完成",
       errorPrefix: "大纲生成",
@@ -134,7 +131,7 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
   const engineWritingStart = useCallback(async (name, { startChapter = 1, totalChapters = 0, onLogEvent = null } = {}) => {
     await _startEngineStream(name, {
       stage: "writing",
-      url: `${API_BASE}/v2/projects/${encodeURIComponent(name)}/writing/start/stream`,
+      url: `/v2/projects/${encodeURIComponent(name)}/writing/start/stream`,
       body: { start_chapter: startChapter, total_chapters: totalChapters },
       doneMessage: "写作完成",
       errorPrefix: "写作",
@@ -151,7 +148,7 @@ export function useEngineStream(showNotification, loadProject, fetchProjects, t)
   const engineReviewStart = useCallback(async (name, { onLogEvent = null } = {}) => {
     await _startEngineStream(name, {
       stage: "review",
-      url: `${API_BASE}/v2/projects/${encodeURIComponent(name)}/review/start/stream`,
+      url: `/v2/projects/${encodeURIComponent(name)}/review/start/stream`,
       body: null,
       doneMessage: "全局审校完成",
       errorPrefix: "审校",

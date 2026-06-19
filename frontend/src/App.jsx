@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react"
 import "./App.css"
 import "./styles/kg_v2.css"
-import { API_BASE } from "./constants"
+import { apiGet, apiPost, apiPut, apiFetch } from "./api/client"
 import Workbench from "./components/Workbench/index"
 import { PresetPanel } from "./components/Sidebar"
 import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./components/Modals"
@@ -38,8 +38,8 @@ function AppInner() {
   const fetchWorkspaceConfig = useCallback(async () => {
     setWsConfigLoading(true)
     try {
-      const resp = await fetch(`${API_BASE}/workspace-config`)
-      if (resp.ok) setWorkspaceSettings(await resp.json())
+      const data = await apiGet("/workspace-config")
+      setWorkspaceSettings(data)
     } catch (e) { console.error(e) }
     finally { setWsConfigLoading(false) }
   }, [])
@@ -48,21 +48,14 @@ function AppInner() {
 
   const handleSaveWorkspaceConfig = useCallback(async () => {
     try {
-      await fetch(`${API_BASE}/workspace-config`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(workspaceSettings)
-      })
+      await apiPut("/workspace-config", workspaceSettings)
       showNotification(t("settingsSaved"), "success")
     } catch (e) { showNotification("Failed: " + e.message, "error") }
   }, [workspaceSettings, showNotification, t])
 
   const handleDangerConfirm = useCallback(async (command) => {
     try {
-      const resp = await fetch(`${API_BASE}/test/confirm`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction: `[TEST:CMD: ${command}]` })
-      })
-      const result = await resp.json()
+      const result = await apiPost("/test/confirm", { instruction: `[TEST:CMD: ${command}]` })
       setTestLogs(prev => [...prev,
         { type: "prompt", data: `$ ${command} (force)`, elapsed: 0 },
         { type: result.success ? "done" : "error", data: result.output || result.error, exit_code: result.exit_code, elapsed: result.duration || 0 }
@@ -75,10 +68,7 @@ function AppInner() {
   const handleDepInstall = useCallback(async (dep) => {
     setDepMissing(null)
     try {
-      await fetch(`${API_BASE}/test/dep-install`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ module: dep.module, suggestion: dep.suggestion })
-      })
+      await apiPost("/test/dep-install", { module: dep.module, suggestion: dep.suggestion })
       showNotification(`Installed ${dep.module}`, "success")
     } catch (e) { showNotification("Install failed: " + e.message, "error") }
   }, [showNotification])
@@ -144,8 +134,7 @@ function AppContent({
   const projectV2 = useProjectContext()
 
   useEffect(() => {
-    fetch(`${API_BASE}/agent-catalog`)
-      .then(r => r.json())
+    apiGet("/agent-catalog")
       .then(d => setAgentCatalog(d.agents || []))
       .catch(() => {})
   }, [])

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import LogPanel from "../LogPanel"
 import KnowledgeGraphView from "../KnowledgeGraphView"
-import { API_BASE } from "../../constants"
+import { apiGet, apiPost, apiFetch } from "../../api/client"
 import Toolbar from "./Toolbar"
 import ProjectSidebar from "./ProjectSidebar"
 import SidebarTabs from "./SidebarTabs"
@@ -211,8 +211,8 @@ export default function Workbench({
     let timer
     const fetchKg = async () => {
       try {
-        const r = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(activeProject.name)}/graph`)
-        if (r.ok) { const d = await r.json(); setKgData(d) }
+        const d = await apiGet(`/v2/projects/${encodeURIComponent(activeProject.name)}/graph`)
+        setKgData(d)
       } catch {}
     }
     fetchKg()
@@ -320,16 +320,7 @@ export default function Workbench({
     if (!activeProject?.name || !selectedChapterIndex || !aiInstruction.trim()) return
     setAiLoading(true)
     try {
-      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(activeProject.name)}/chapters/${selectedChapterIndex}/ai-edit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction: aiInstruction.trim() })
-      })
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}))
-        throw new Error(err.detail || err.error || `HTTP ${resp.status}`)
-      }
-      const data = await resp.json()
+      const data = await apiPost(`/v2/projects/${encodeURIComponent(activeProject.name)}/chapters/${selectedChapterIndex}/ai-edit`, { instruction: aiInstruction.trim() })
       if (data.error) {
         showNotification && showNotification(data.error, "error")
         return
@@ -427,9 +418,8 @@ export default function Workbench({
   const handleSaveProjectInfo = useCallback(async () => {
     if (!activeProject) return
     try {
-      const resp = await fetch(`${API_BASE}/v2/projects/${encodeURIComponent(activeProject.name)}`, {
+      await apiFetch(`/v2/projects/${encodeURIComponent(activeProject.name)}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: editProjectTitle,
           genre: editProjectGenre,
@@ -440,7 +430,6 @@ export default function Workbench({
           max_rounds_outline: Number(editMaxRoundsOutline) || 8,
         }),
       })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
       // 保存附加要求
       if (editExtraReqs) {
         await putFile(activeProject.name, "extra_requirements.txt", editExtraReqs)
@@ -565,7 +554,6 @@ export default function Workbench({
           {isKnowledgeMode && activeProject?.name && (
             <div className="kg-fullscreen-wrap" style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
               <KnowledgeGraphView
-                API_BASE={API_BASE}
                 projectName={activeProject.name}
               />
             </div>
