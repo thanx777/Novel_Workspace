@@ -1,4 +1,6 @@
 import { useApp } from "../../context/AppContext"
+import { useProjectContext } from "../../context/ProjectContext"
+import { API_BASE } from "../../constants"
 import OutlinePanel from "../OutlinePanel"
 import ChapterTree from "./ChapterTree"
 import { formatTimestamp } from "@/utils/format"
@@ -8,13 +10,15 @@ export default function SidebarTabs({
   handleOpenOutline, setActiveRightPanel,
   activeProject, kgData, engineState, stageLabel,
   isRunning, runningStage, clearRunLogsLocal, runLogs, appendRunLog,
-  getFile, engineOutlineGenerate, engineWritingStart, engineReviewStart,
-  confirmOutline, confirmWriting, confirmReview, stopTask,
-  engineActionLock,
+  getFile, engineActionLock,
   volumes, expandedVolumes, setExpandedVolumes, handleSelectChapter,
-  API_BASE, showNotification,
+  showNotification,
 }) {
   const { t, language } = useApp()
+  const {
+    engineOutlineGenerate, engineWritingStart, engineReviewStart,
+    confirmOutline, confirmWriting, confirmReview, stopTask,
+  } = useProjectContext()
   return (
     <>
       <div className="wb-sidebar-tabs" style={{ borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>

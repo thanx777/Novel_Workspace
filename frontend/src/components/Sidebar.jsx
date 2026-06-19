@@ -1,9 +1,21 @@
 import { API_FORMATS } from '../constants'
 import TestResultCard from './TestResultCard'
 import { useApp } from '../context/AppContext'
+import { usePresetContext } from '../context/PresetContext'
 
-export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset, showAddPreset, setShowAddPreset, newPresetName, setNewPresetName, newPresetConfig, setNewPresetConfig, handleAddPreset, handleDeletePreset, editingPreset, setEditingPreset, editPresetConfig, setEditPresetConfig, handleUpdatePreset, runTestConnection, testConnState, testConnResult, selectedNode, updateNodeConfig, openEditPreset, showNotification, setConfirmDialog, applyPresetToAll, allNodes }) {
+export function PresetPanel({ showNotification, setConfirmDialog }) {
   const { t, language } = useApp()
+  const {
+    presets, defaultPreset, handleSetDefaultPreset, handleClearDefaultPreset,
+    showAddPreset, setShowAddPreset,
+    newPresetName, setNewPresetName,
+    newPresetConfig, setNewPresetConfig,
+    editingPreset, setEditingPreset,
+    editPresetConfig, setEditPresetConfig,
+    handleAddPreset, handleDeletePreset, handleUpdatePreset,
+    runTestConnection, testConnState, testConnResult,
+    openEditPreset,
+  } = usePresetContext()
   return (
     <div className="sidebar-section preset-section">
       <div className="sidebar-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -56,7 +68,7 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
         </div>
       )}
       {presets.map((preset, i) => (
-        <div key={i} className="model-card" onClick={() => { if (selectedNode) updateNodeConfig(selectedNode, { preset_name: preset.name }); openEditPreset(preset.name) }}>
+        <div key={i} className="model-card" onClick={() => openEditPreset(preset.name)}>
           <div className="model-dot" style={{ background: defaultPreset === preset.name ? '#f59e0b' : '#58a6ff' }} />
           <div className="model-info">
             <div className="model-name" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -78,13 +90,6 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
             style={defaultPreset === preset.name ? { background: '#f59e0b', color: '#fff' } : {}}>
             {defaultPreset === preset.name ? '★' : '☆'}
           </button>
-          {allNodes && allNodes.length > 0 && (
-            <button className="preset-apply-all-btn"
-              onClick={(e) => { e.stopPropagation(); applyPresetToAll(preset.name); showNotification(`已应用 "${preset.name}" 到全部 ${allNodes.length} 个节点`, 'success') }}
-              title="一键应用到所有节点">
-              全部
-            </button>
-          )}
           <button className="preset-delete-btn"
             onClick={(e) => { e.stopPropagation(); setConfirmDialog({ message: t('confirmDeletePreset'), onConfirm: async () => { await handleDeletePreset(preset.name); setConfirmDialog(null) }, onCancel: () => setConfirmDialog(null) }) }}
             title={t('deletePreset')}
@@ -172,4 +177,3 @@ export function PresetPanel({ presets, defaultPreset, handleSetDefaultPreset, ha
     </div>
   )
 }
-

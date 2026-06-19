@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import LogPanel from "../LogPanel"
 import KnowledgeGraphView from "../KnowledgeGraphView"
 import { API_BASE } from "../../constants"
-import useProjectV2 from "../../hooks/useProjectV2"
 import Toolbar from "./Toolbar"
 import ProjectSidebar from "./ProjectSidebar"
 import SidebarTabs from "./SidebarTabs"
@@ -11,6 +10,8 @@ import OutlineEditor from "./OutlineEditor"
 import AssistantPanel from "./AssistantPanel"
 import Modals from "./Modals"
 import { useApp } from "../../context/AppContext"
+import { useProjectContext } from "../../context/ProjectContext"
+import { usePresetContext } from "../../context/PresetContext"
 import { formatTime } from "@/utils/format"
 
 /** 从章节内容中提取标题（与后端 _extract_chapter_title 逻辑一致） */
@@ -36,12 +37,12 @@ function extractTitleFromContent(content) {
 
 export default function Workbench({
   setShowWorkspaceSettings, setShowPresetSidebar, showPresetSidebar,
-  presets, defaultPreset, showNotification,
-  isRunning, setIsRunning, runningStage,
+  showNotification,
   agentCatalog,
-  projectV2,
 }) {
   const { t, language } = useApp()
+  const projectV2 = useProjectContext()
+  const { presets, defaultPreset } = usePresetContext()
 
   // ---- Project V2 State ----
   const {
@@ -58,6 +59,7 @@ export default function Workbench({
     engineWritingStart, engineWritingChat, getWritingState,
     engineReviewStart, getReviewState,
     kgRefreshKey,
+    isRunning, setIsRunning, runningStage,
   } = projectV2 || {}
 
   // ---- Editor State ----
@@ -183,19 +185,6 @@ export default function Workbench({
   const [outlineDraft, setOutlineDraft] = useState("")
   // ---- Create Project Modal ----
   const [showCreate, setShowCreate] = useState(false)
-  const [newName, setNewName] = useState("")
-  const [newGenre, setNewGenre] = useState("")
-  const [newExtraReqs, setNewExtraReqs] = useState("")
-  const [newTotalChapters, setNewTotalChapters] = useState(0)
-  const [newWordCountMin, setNewWordCountMin] = useState(3000)
-  const [newWordCountMax, setNewWordCountMax] = useState(5000)
-  const [newMaxRoundsWriting, setNewMaxRoundsWriting] = useState(10)
-  const [newMaxRoundsOutline, setNewMaxRoundsOutline] = useState(8)
-  const [newManagerIdx, setNewManagerIdx] = useState(-1)
-  const [newWorkerIdx, setNewWorkerIdx] = useState(-1)
-  const [newReviewerIdx, setNewReviewerIdx] = useState(-1)
-  const [newChatPreset, setNewChatPreset] = useState("")  // AI 对话模型（用于人物输入等）
-  const [showModelConfig, setShowModelConfig] = useState(false)  // 模型配置折叠
 
   const GENRES_ZH = ["玄幻", "都市", "言情", "仙侠", "科幻", "历史", "武侠", "悬疑", "恐怖", "喜剧", "都市爽文", "系统流"]
   const GENRES_EN = ["Fantasy", "Urban", "Romance", "Xianxia", "Sci-Fi", "Historical", "Martial Arts", "Suspense", "Horror", "Comedy", "Urban Fantasy", "System Flow"]
@@ -463,55 +452,6 @@ export default function Workbench({
     }
   }, [activeProject, editProjectTitle, editProjectGenre, editTotalChapters, editExtraReqs, editWordCountMin, editWordCountMax, editMaxRoundsWriting, editMaxRoundsOutline, loadProject, showNotification, putFile, t])
 
-  // ---- Create project ----
-  const handleCreateProject = useCallback(async () => {
-    if (!newName.trim()) {
-      showNotification && showNotification(t("enterProjectName"), "error")
-      return
-    }
-    const rolePresets = {}
-    // 如果有默认预设，自动应用到所有角色
-    const defaultPresetObj = defaultPreset ? presets?.find(p => p.name === defaultPreset) : null
-    if (newManagerIdx >= 0 && presets?.[newManagerIdx]) rolePresets.manager = presets[newManagerIdx]
-    else if (defaultPresetObj) rolePresets.manager = defaultPresetObj
-    if (newWorkerIdx >= 0 && presets?.[newWorkerIdx]) rolePresets.worker = presets[newWorkerIdx]
-    else if (defaultPresetObj) rolePresets.worker = defaultPresetObj
-    if (newReviewerIdx >= 0 && presets?.[newReviewerIdx]) rolePresets.reviewer = presets[newReviewerIdx]
-    else if (defaultPresetObj) rolePresets.reviewer = defaultPresetObj
-    // AI 对话模型：按名字查找预设对象
-    if (newChatPreset && presets) {
-      const found = presets.find(p => p.name === newChatPreset)
-      if (found) rolePresets.chat = found
-    } else if (defaultPresetObj) {
-      rolePresets.chat = defaultPresetObj
-    }
-    const result = await createProject({
-      name: newName.trim(),
-      title: "",  // 标题由大纲生成阶段产生
-      genre: newGenre,
-      total_chapters: Number(newTotalChapters) || 0,
-      outline_layers: { L1: true, L2: true },
-      extra_requirements: newExtraReqs.trim(),
-      role_presets: rolePresets,
-      word_count_min: Number(newWordCountMin) || 3000,
-      word_count_max: Number(newWordCountMax) || 5000,
-      max_rounds_writing: Number(newMaxRoundsWriting) || 10,
-      max_rounds_outline: Number(newMaxRoundsOutline) || 8,
-    })
-    if (result) {
-      setNewName("")
-      setNewGenre("")
-      setNewExtraReqs("")
-      setNewTotalChapters(0)
-      setNewWordCountMin(3000)
-      setNewWordCountMax(5000)
-      setNewManagerIdx(-1); setNewWorkerIdx(-1); setNewReviewerIdx(-1)
-      setNewChatPreset("")
-      setShowModelConfig(false)
-      setShowCreate(false)
-    }
-  }, [newName, newGenre, newExtraReqs, newManagerIdx, newWorkerIdx, newReviewerIdx, newChatPreset, createProject, showNotification, presets, defaultPreset, t])
-
   // ---- Assistant chat ----
   const handleAssistantSend = useCallback(async () => {
     if (!activeProject || !assistantInput.trim()) return
@@ -606,15 +546,10 @@ export default function Workbench({
               isRunning={isRunning} runningStage={runningStage}
               clearRunLogsLocal={clearRunLogsLocal} runLogs={runLogs} appendRunLog={appendRunLog}
               getFile={getFile}
-              engineOutlineGenerate={engineOutlineGenerate}
-              engineWritingStart={engineWritingStart}
-              engineReviewStart={engineReviewStart}
-              confirmOutline={confirmOutline} confirmWriting={confirmWriting} confirmReview={confirmReview}
-              stopTask={stopTask}
               engineActionLock={engineActionLock}
               volumes={volumes} expandedVolumes={expandedVolumes} setExpandedVolumes={setExpandedVolumes}
               handleSelectChapter={handleSelectChapter}
-              API_BASE={API_BASE} showNotification={showNotification}
+              showNotification={showNotification}
             />
           )}
           {!activeProject && (
@@ -849,20 +784,6 @@ export default function Workbench({
       <Modals
         GENRES={GENRES}
         showCreate={showCreate} setShowCreate={setShowCreate}
-        newName={newName} setNewName={setNewName}
-        newGenre={newGenre} setNewGenre={setNewGenre}
-        newExtraReqs={newExtraReqs} setNewExtraReqs={setNewExtraReqs}
-        newTotalChapters={newTotalChapters} setNewTotalChapters={setNewTotalChapters}
-        newWordCountMin={newWordCountMin} setNewWordCountMin={setNewWordCountMin}
-        newWordCountMax={newWordCountMax} setNewWordCountMax={setNewWordCountMax}
-        newMaxRoundsWriting={newMaxRoundsWriting} setNewMaxRoundsWriting={setNewMaxRoundsWriting}
-        newMaxRoundsOutline={newMaxRoundsOutline} setNewMaxRoundsOutline={setNewMaxRoundsOutline}
-        newManagerIdx={newManagerIdx} setNewManagerIdx={setNewManagerIdx}
-        newWorkerIdx={newWorkerIdx} setNewWorkerIdx={setNewWorkerIdx}
-        newReviewerIdx={newReviewerIdx} setNewReviewerIdx={setNewReviewerIdx}
-        newChatPreset={newChatPreset} setNewChatPreset={setNewChatPreset}
-        showModelConfig={showModelConfig} setShowModelConfig={setShowModelConfig}
-        presets={presets} handleCreateProject={handleCreateProject}
         confirmDeleteProject={confirmDeleteProject} setConfirmDeleteProject={setConfirmDeleteProject}
         deleting={deleting} confirmDelete={confirmDelete}
       />

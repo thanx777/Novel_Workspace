@@ -1,18 +1,80 @@
+import { useState } from "react"
 import { useApp } from "../../context/AppContext"
+import { useProjectContext } from "../../context/ProjectContext"
+import { usePresetContext } from "../../context/PresetContext"
 
 export default function Modals({
   GENRES,
   showCreate, setShowCreate,
-  newName, setNewName, newGenre, setNewGenre, newExtraReqs, setNewExtraReqs,
-  newTotalChapters, setNewTotalChapters,
-  newWordCountMin, setNewWordCountMin, newWordCountMax, setNewWordCountMax,
-  newMaxRoundsWriting, setNewMaxRoundsWriting, newMaxRoundsOutline, setNewMaxRoundsOutline,
-  newManagerIdx, setNewManagerIdx, newWorkerIdx, setNewWorkerIdx,
-  newReviewerIdx, setNewReviewerIdx, newChatPreset, setNewChatPreset,
-  showModelConfig, setShowModelConfig, presets, handleCreateProject,
-  confirmDeleteProject, setConfirmDeleteProject, deleting, confirmDelete,
+  confirmDeleteProject, setConfirmDeleteProject,
+  deleting, confirmDelete,
 }) {
   const { t, language } = useApp()
+  const { presets } = usePresetContext()
+
+  // ---- Create Project Form State ----
+  const [newName, setNewName] = useState("")
+  const [newGenre, setNewGenre] = useState("")
+  const [newExtraReqs, setNewExtraReqs] = useState("")
+  const [newTotalChapters, setNewTotalChapters] = useState(0)
+  const [newWordCountMin, setNewWordCountMin] = useState(3000)
+  const [newWordCountMax, setNewWordCountMax] = useState(5000)
+  const [newMaxRoundsWriting, setNewMaxRoundsWriting] = useState(10)
+  const [newMaxRoundsOutline, setNewMaxRoundsOutline] = useState(8)
+  const [newManagerIdx, setNewManagerIdx] = useState(-1)
+  const [newWorkerIdx, setNewWorkerIdx] = useState(-1)
+  const [newReviewerIdx, setNewReviewerIdx] = useState(-1)
+  const [newChatPreset, setNewChatPreset] = useState("")
+  const [showModelConfig, setShowModelConfig] = useState(false)
+
+  const { createProject } = useProjectContext()
+  const { defaultPreset } = usePresetContext()
+
+  const handleCreateProject = async () => {
+    if (!newName.trim()) {
+      return
+    }
+    const rolePresets = {}
+    const defaultPresetObj = defaultPreset ? presets?.find(p => p.name === defaultPreset) : null
+    if (newManagerIdx >= 0 && presets?.[newManagerIdx]) rolePresets.manager = presets[newManagerIdx]
+    else if (defaultPresetObj) rolePresets.manager = defaultPresetObj
+    if (newWorkerIdx >= 0 && presets?.[newWorkerIdx]) rolePresets.worker = presets[newWorkerIdx]
+    else if (defaultPresetObj) rolePresets.worker = defaultPresetObj
+    if (newReviewerIdx >= 0 && presets?.[newReviewerIdx]) rolePresets.reviewer = presets[newReviewerIdx]
+    else if (defaultPresetObj) rolePresets.reviewer = defaultPresetObj
+    if (newChatPreset && presets) {
+      const found = presets.find(p => p.name === newChatPreset)
+      if (found) rolePresets.chat = found
+    } else if (defaultPresetObj) {
+      rolePresets.chat = defaultPresetObj
+    }
+    const result = await createProject({
+      name: newName.trim(),
+      title: "",
+      genre: newGenre,
+      total_chapters: Number(newTotalChapters) || 0,
+      outline_layers: { L1: true, L2: true },
+      extra_requirements: newExtraReqs.trim(),
+      role_presets: rolePresets,
+      word_count_min: Number(newWordCountMin) || 3000,
+      word_count_max: Number(newWordCountMax) || 5000,
+      max_rounds_writing: Number(newMaxRoundsWriting) || 10,
+      max_rounds_outline: Number(newMaxRoundsOutline) || 8,
+    })
+    if (result) {
+      setNewName("")
+      setNewGenre("")
+      setNewExtraReqs("")
+      setNewTotalChapters(0)
+      setNewWordCountMin(3000)
+      setNewWordCountMax(5000)
+      setNewManagerIdx(-1); setNewWorkerIdx(-1); setNewReviewerIdx(-1)
+      setNewChatPreset("")
+      setShowModelConfig(false)
+      setShowCreate(false)
+    }
+  }
+
   return (
     <>
       {/* 新建项目 Modal */}

@@ -2,12 +2,12 @@ import { useState, useEffect, useCallback } from "react"
 import "./App.css"
 import "./styles/kg_v2.css"
 import { API_BASE } from "./constants"
-import usePreset from "./hooks/usePreset"
-import useProjectV2 from "./hooks/useProjectV2"
 import Workbench from "./components/Workbench/index"
 import { PresetPanel } from "./components/Sidebar"
 import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./components/Modals"
 import { AppProvider, useApp } from "./context/AppContext"
+import { PresetProvider, usePresetContext } from "./context/PresetContext"
+import { ProjectProvider, useProjectContext } from "./context/ProjectContext"
 import ErrorBoundary from "./components/ErrorBoundary"
 
 function AppInner() {
@@ -27,16 +27,6 @@ function AppInner() {
     setTimeout(() => setNotification(null), 3500)
   }, [])
 
-  const presetHook = usePreset({ showNotification })
-  const projectV2 = useProjectV2({ t, showNotification, presets: presetHook.presets })
-
-  useEffect(() => {
-    fetch(`${API_BASE}/agent-catalog`)
-      .then(r => r.json())
-      .then(d => setAgentCatalog(d.agents || []))
-      .catch(() => {})
-  }, [])
-
   const [workspaceSettings, setWorkspaceSettings] = useState({
     workspace_dir: "", projects_dir: "",
     current_workspace: "", current_projects: "",
@@ -54,8 +44,6 @@ function AppInner() {
   }, [])
 
   useEffect(() => { fetchWorkspaceConfig() }, [fetchWorkspaceConfig])
-
-  useEffect(() => { presetHook.fetchPresets() }, [presetHook.fetchPresets])
 
   const handleSaveWorkspaceConfig = useCallback(async () => {
     try {
@@ -101,6 +89,69 @@ function AppInner() {
   }, [])
 
   return (
+    <PresetProvider showNotification={showNotification}>
+        <ProjectProvider showNotification={showNotification} t={t}>
+        <AppContent
+          t={t}
+          language={language}
+          agentCatalog={agentCatalog}
+          setAgentCatalog={setAgentCatalog}
+          notification={notification}
+          confirmDialog={confirmDialog}
+          setConfirmDialog={setConfirmDialog}
+          showWorkspaceSettings={showWorkspaceSettings}
+          setShowWorkspaceSettings={setShowWorkspaceSettings}
+          dangerCommand={dangerCommand}
+          setDangerCommand={setDangerCommand}
+          depMissing={depMissing}
+          setDepMissing={setDepMissing}
+          showPresetSidebar={showPresetSidebar}
+          setShowPresetSidebar={setShowPresetSidebar}
+          showNotification={showNotification}
+          workspaceSettings={workspaceSettings}
+          setWorkspaceSettings={setWorkspaceSettings}
+          wsConfigLoading={wsConfigLoading}
+          fetchWorkspaceConfig={fetchWorkspaceConfig}
+          handleSaveWorkspaceConfig={handleSaveWorkspaceConfig}
+          handleDangerConfirm={handleDangerConfirm}
+          handleDepInstall={handleDepInstall}
+          handleDepSkip={handleDepSkip}
+        />
+      </ProjectProvider>
+    </PresetProvider>
+  )
+}
+
+function AppContent({
+  t, language,
+  agentCatalog, setAgentCatalog,
+  notification, confirmDialog, setConfirmDialog,
+  showWorkspaceSettings, setShowWorkspaceSettings,
+  dangerCommand, setDangerCommand,
+  depMissing, setDepMissing,
+  showPresetSidebar, setShowPresetSidebar,
+  showNotification,
+  workspaceSettings, setWorkspaceSettings,
+  wsConfigLoading,
+  fetchWorkspaceConfig,
+  handleSaveWorkspaceConfig,
+  handleDangerConfirm,
+  handleDepInstall,
+  handleDepSkip,
+}) {
+  const presetHook = usePresetContext()
+  const projectV2 = useProjectContext()
+
+  useEffect(() => {
+    fetch(`${API_BASE}/agent-catalog`)
+      .then(r => r.json())
+      .then(d => setAgentCatalog(d.agents || []))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => { presetHook.fetchPresets() }, [presetHook.fetchPresets])
+
+  return (
     <div className="app">
 
       <div className="workspace-new">
@@ -114,26 +165,8 @@ function AppInner() {
                 </button>
               </div>
               <PresetPanel
-                presets={presetHook.presets}
-                defaultPreset={presetHook.defaultPreset}
-                handleSetDefaultPreset={presetHook.handleSetDefaultPreset}
-                handleClearDefaultPreset={presetHook.handleClearDefaultPreset}
-                showAddPreset={presetHook.showAddPreset} setShowAddPreset={presetHook.setShowAddPreset}
-                newPresetName={presetHook.newPresetName} setNewPresetName={presetHook.setNewPresetName}
-                newPresetConfig={presetHook.newPresetConfig} setNewPresetConfig={presetHook.setNewPresetConfig}
-                handleAddPreset={presetHook.handleAddPreset}
-                handleDeletePreset={presetHook.handleDeletePreset}
-                editingPreset={presetHook.editingPreset} setEditingPreset={presetHook.setEditingPreset}
-                editPresetConfig={presetHook.editPresetConfig} setEditPresetConfig={presetHook.setEditPresetConfig}
-                handleUpdatePreset={presetHook.handleUpdatePreset}
-                runTestConnection={presetHook.runTestConnection}
-                testConnState={presetHook.testConnState} testConnResult={presetHook.testConnResult}
-                selectedNode={null} updateNodeConfig={() => {}}
-                openEditPreset={presetHook.openEditPreset}
                 showNotification={showNotification}
                 setConfirmDialog={setConfirmDialog}
-                applyPresetToAll={() => {}}
-                allNodes={[]}
               />
             </div>
           </aside>
@@ -142,13 +175,8 @@ function AppInner() {
         <Workbench
           setShowWorkspaceSettings={setShowWorkspaceSettings}
           setShowPresetSidebar={setShowPresetSidebar} showPresetSidebar={showPresetSidebar}
-          presets={presetHook.presets}
-          defaultPreset={presetHook.defaultPreset}
           showNotification={showNotification}
-          isRunning={projectV2.isRunning} setIsRunning={projectV2.setIsRunning}
-          runningStage={projectV2.runningStage}
           agentCatalog={agentCatalog}
-          projectV2={projectV2}
         />
       </div>
 
