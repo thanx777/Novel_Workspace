@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-title OmniAgent Hub - Restart All
+title Novel Workspace - Restart All
 
 echo ============================================
-echo   Restart OmniAgent Hub (Backend + Frontend)
+echo   Restart Novel Workspace (Backend + Frontend)
 echo ============================================
 
 :: ---- Step 1: Kill all related processes ----
@@ -23,11 +23,11 @@ timeout /t 5 /nobreak >nul
 :: ---- Step 3: Start services ----
 echo [3/3] Starting services...
 
-start "OmniAgent-Backend" cmd /c "cd /d "%~dp0backend" && chcp 65001 >nul && echo ============================================ && echo   Backend (uvicorn) on http://127.0.0.1:8000 && echo ============================================ && python -m uvicorn main:app --host 127.0.0.1 --port 8000"
+start "NovelWorkspace-Backend" cmd /c "cd /d "%~dp0backend" && chcp 65001 >nul && echo ============================================ && echo   Backend (uvicorn) on http://127.0.0.1:8000 && echo ============================================ && python -m uvicorn main:app --host 127.0.0.1 --port 8000"
 
 ping -n 3 127.0.0.1 >nul
 
-start "OmniAgent-Frontend" cmd /c "cd /d "%~dp0frontend" && chcp 65001 >nul && echo ============================================ && echo   Frontend (vite) on http://localhost:5176 && echo ============================================ && npm run dev -- --port 5176"
+start "NovelWorkspace-Frontend" cmd /c "cd /d "%~dp0frontend" && chcp 65001 >nul && echo ============================================ && echo   Frontend (vite) on http://localhost:5176 && echo ============================================ && npm run dev -- --port 5176"
 
 echo.
 echo ============================================

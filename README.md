@@ -1,10 +1,10 @@
-# Omni-Agent-Hub
+# Novel Workspace
 
 > AI 长篇小说写作引擎 — 分层大纲 + 知识图谱 + MWR 循环 + 体裁感知
 
 ## 项目简介
 
-Omni-Agent-Hub 是一个 AI 驱动的长篇小说写作系统，核心解决 **LLM 写长篇时的三大难题**：记忆断裂（角色/伏笔前后矛盾）、节奏失控（爽点密度不足）、内容截断（输出长度限制导致章节缺失）。
+Novel Workspace 是一个 AI 驱动的长篇小说写作系统，核心解决 **LLM 写长篇时的三大难题**：记忆断裂（角色/伏笔前后矛盾）、节奏失控（爽点密度不足）、内容截断（输出长度限制导致章节缺失）。
 
 系统采用 **MWR（Manager-Writer-Reviewer）循环架构**，通过三引擎流水线完成从大纲到成书的全流程，并内置知识图谱、体裁规则、反幻觉守卫等保障机制。
 
@@ -202,7 +202,7 @@ project_dir/memory/
 
 | 机制 | 说明 |
 |------|------|
-| API Key 加密 | Fernet 对称加密存储，密钥从 `OMNI_AGENT_SECRET` 环境变量或 `.secret_key` 文件读取 |
+| API Key 加密 | Fernet 对称加密存储，密钥从 `NOVEL_WORKSPACE_SECRET` 环境变量或 `.secret_key` 文件读取 |
 | 速率限制 | slowapi 中间件，LLM 端点 10次/分钟，普通端点 60次/分钟 |
 | 路径遍历防护 | `_validate_project_name()` + `ProjectNameError`，拒绝 `../` 等路径攻击 |
 | Schema 迁移 | 版本化迁移链（v0→v1→v2），自动升级旧项目数据库 |
@@ -231,7 +231,7 @@ npm run dev             # → http://localhost:5173
 ### API Key 配置
 
 1. 在前端项目配置中填入 API Key（自动加密存储）
-2. 或设置环境变量 `OMNI_AGENT_SECRET`（Fernet 密钥，用于 API Key 加解密）
+2. 或设置环境变量 `NOVEL_WORKSPACE_SECRET`（Fernet 密钥，用于 API Key 加解密）
 
 ## 前端界面
 
@@ -288,7 +288,7 @@ npm run dev             # → http://localhost:5173
 ## 项目结构
 
 ```
-omni-agent-hub/
+novel-workspace/
 ├── backend/
 │   ├── main.py                    # FastAPI 入口 + 速率限制
 │   ├── project_db.py              # 项目数据库（SQLite + schema 迁移 + API Key 加密）

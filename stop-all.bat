@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul
-title OmniAgent Hub - Stop All
+title Novel Workspace - Stop All
 
 echo ============================================
-echo   Stop OmniAgent Hub
+echo   Stop Novel Workspace
 echo ============================================
 
 for %%p in (8000 5173 5174 5175 5176 5177) do (

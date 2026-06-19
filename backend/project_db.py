@@ -28,7 +28,7 @@ def _get_fernet():
     """获取 Fernet 加密实例（单例）。
 
     密钥来源优先级：
-    1. 环境变量 OMNI_AGENT_SECRET
+    1. 环境变量 NOVEL_WORKSPACE_SECRET
     2. backend/.secret_key 文件
     3. 自动生成新密钥，保存到 .secret_key 并打印提示
     """
@@ -41,7 +41,7 @@ def _get_fernet():
     secret_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret_key")
 
     # 1. 从环境变量读取
-    secret = os.environ.get("OMNI_AGENT_SECRET", "").strip()
+    secret = os.environ.get("NOVEL_WORKSPACE_SECRET", "").strip()
 
     # 2. 从 .secret_key 文件读取
     if not secret and os.path.exists(secret_key_path):
@@ -58,7 +58,7 @@ def _get_fernet():
             with open(secret_key_path, "w", encoding="utf-8") as f:
                 f.write(secret)
             print(f"[SECURITY] 已生成新的加密密钥，保存到 {secret_key_path}")
-            print(f"[SECURITY] 建议将以下密钥设置到环境变量 OMNI_AGENT_SECRET：")
+            print(f"[SECURITY] 建议将以下密钥设置到环境变量 NOVEL_WORKSPACE_SECRET：")
             print(f"[SECURITY]   {secret}")
         except Exception as e:
             print(f"[SECURITY] 无法保存密钥文件: {e}")

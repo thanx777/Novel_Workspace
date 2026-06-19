@@ -145,7 +145,7 @@ def t03():
 
 
 # ============================================================
-# t04: 无 OMNI_AGENT_SECRET 环境变量时自动生成 .secret_key 文件
+# t04: 无 NOVEL_WORKSPACE_SECRET 环境变量时自动生成 .secret_key 文件
 # ============================================================
 
 def t04():
@@ -157,7 +157,7 @@ def t04():
     _pdb._FERNET_INSTANCE = None
 
     # 临时移除环境变量
-    orig_env = os.environ.pop("OMNI_AGENT_SECRET", None)
+    orig_env = os.environ.pop("NOVEL_WORKSPACE_SECRET", None)
 
     # 临时设置 backend 目录为临时目录（让 .secret_key 生成到临时位置）
     orig_dir = os.path.dirname(os.path.abspath(_pdb.__file__))
@@ -178,7 +178,7 @@ def t04():
         fernet = _pdb._get_fernet()
 
         assert os.path.exists(secret_key_path), \
-            "缺少 OMNI_AGENT_SECRET 时应自动生成 .secret_key 文件"
+            "缺少 NOVEL_WORKSPACE_SECRET 时应自动生成 .secret_key 文件"
 
         with open(secret_key_path, "r", encoding="utf-8") as f:
             generated_key = f.read().strip()
@@ -190,7 +190,7 @@ def t04():
         # 恢复
         _pdb._FERNET_INSTANCE = orig_fernet
         if orig_env is not None:
-            os.environ["OMNI_AGENT_SECRET"] = orig_env
+            os.environ["NOVEL_WORKSPACE_SECRET"] = orig_env
         # 恢复备份
         if had_secret and os.path.exists(backup_path):
             shutil.move(backup_path, secret_key_path)
@@ -407,7 +407,7 @@ if __name__ == '__main__':
     run("t01. 明文 API Key 写入后自动加密", t01)
     run("t02. 读取时自动解密返回原始值", t02)
     run("t03. 已加密的 API Key 不重复加密（幂等性）", t03)
-    run("t04. 无 OMNI_AGENT_SECRET 时自动生成 .secret_key", t04)
+    run("t04. 无 NOVEL_WORKSPACE_SECRET 时自动生成 .secret_key", t04)
     run("t05. 解密失败时返回原值（兼容旧数据）", t05)
     run("t06. 多个 preset 的 API Key 都正确加密/解密", t06)
     print()

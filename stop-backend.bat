@@ -1,9 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
-title OmniAgent Hub - Stop
+title Novel Workspace - Stop
 
 echo ============================================
-echo   Stop OmniAgent Hub
+echo   Stop Novel Workspace
 echo ============================================
 
 echo Looking for backend (port 8000)...

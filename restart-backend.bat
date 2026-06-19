@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-title OmniAgent Hub - Restart
+title Novel Workspace - Restart
 
 echo ============================================
-echo   Restart OmniAgent Hub
+echo   Restart Novel Workspace
 echo ============================================
 
 :: ---- Step 1: Kill old processes ----
