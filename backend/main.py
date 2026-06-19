@@ -130,7 +130,7 @@ async def login(req: LoginRequest):
     return Token(access_token=token)
 
 # CORS 白名单：仅允许本地开发前端访问，避免任意源跨域
-_ALLOWED_ORIGINS = [
+_DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
@@ -143,9 +143,20 @@ _ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
+def _get_allowed_origins():
+    """从环境变量 CORS_ORIGINS 读取允许的源（逗号分隔），默认使用本地开发源。"""
+    env_origins = os.environ.get("CORS_ORIGINS", "").strip()
+    if env_origins:
+        origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+        if "*" in origins:
+            import logging
+            logging.getLogger(__name__).warning("[SECURITY] CORS_ORIGINS=* 允许所有源跨域，仅建议开发环境使用")
+        return origins
+    return _DEFAULT_ALLOWED_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_ALLOWED_ORIGINS,
+    allow_origins=_get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

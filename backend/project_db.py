@@ -24,6 +24,33 @@ from typing import List, Dict, Optional, Any, Union
 _FERNET_INSTANCE = None
 
 
+def _set_secret_key_permissions(path: str):
+    """设置密钥文件权限为仅所有者可读写（0o600）。Windows 上仅记录警告。"""
+    try:
+        import stat
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except OSError as e:
+        # Windows 上 os.chmod 行为不同，仅记录
+        import logging
+        logging.getLogger(__name__).debug(f"Cannot set secret_key permissions: {e}")
+
+
+def _check_secret_key_permissions(path: str):
+    """启动时校验密钥文件权限，权限过宽则警告。"""
+    if not os.path.exists(path):
+        return
+    try:
+        import stat
+        mode = os.stat(path).st_mode
+        if mode & stat.S_IRWXG or mode & stat.S_IRWXO:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[SECURITY] 密钥文件 {path} 权限过宽({oct(mode)})，建议设置为 0600"
+            )
+    except OSError:
+        pass
+
+
 def _get_fernet():
     """获取 Fernet 加密实例（单例）。
 
@@ -57,6 +84,7 @@ def _get_fernet():
         try:
             with open(secret_key_path, "w", encoding="utf-8") as f:
                 f.write(secret)
+            _set_secret_key_permissions(secret_key_path)
             print(f"[SECURITY] 已生成新的加密密钥，保存到 {secret_key_path}")
             print(f"[SECURITY] 建议将以下密钥设置到环境变量 NOVEL_WORKSPACE_SECRET：")
             print(f"[SECURITY]   {secret}")
@@ -71,10 +99,12 @@ def _get_fernet():
         try:
             with open(secret_key_path, "w", encoding="utf-8") as f:
                 f.write(secret)
+            _set_secret_key_permissions(secret_key_path)
         except Exception:
             pass
         _FERNET_INSTANCE = Fernet(secret.encode("utf-8"))
 
+    _check_secret_key_permissions(secret_key_path)
     return _FERNET_INSTANCE
 
 
