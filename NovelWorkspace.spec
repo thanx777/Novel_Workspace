@@ -97,7 +97,6 @@ exe = EXE(
     pyz, a.scripts, a.binaries, a.datas,
     name='NovelWorkspace',
     console=False,
-    # icon 需 .ico 格式，SVG 不支持。如需自定义图标，请提供 .ico 文件
-    # icon=os.path.join(SPECPATH, 'frontend', 'public', 'favicon.ico'),
+    icon=os.path.join(SPECPATH, 'build', 'IMG_20260620_000506.ico'),
     onefile=True,
 )
