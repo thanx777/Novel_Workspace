@@ -4,12 +4,16 @@ import "./styles/kg_v2.css"
 import { apiGet, apiPost, apiPut, apiFetch } from "./api/client"
 import Workbench from "./components/Workbench/index"
 import { PresetPanel } from "./components/Sidebar"
-import { ConfirmDialog, DangerConfirmModal, WorkspaceSettings } from "./components/Modals"
+import { ConfirmDialog, WorkspaceSettings } from "./components/Modals"
 import { AppProvider, useApp } from "./context/AppContext"
 import { PresetProvider, usePresetContext } from "./context/PresetContext"
 import { ProjectProvider, useProjectContext } from "./context/ProjectContext"
 import ErrorBoundary from "./components/ErrorBoundary"
-import { AccessibleButton } from "./components/common/AccessibleButton"
+
+const setupInputStyle = {
+  padding: "10px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.06)", color: "#e0e0e0", fontSize: 14, outline: "none"
+}
 
 function AppInner() {
   const { t, language } = useApp()
@@ -17,10 +21,6 @@ function AppInner() {
   const [notification, setNotification] = useState(null)
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [showWorkspaceSettings, setShowWorkspaceSettings] = useState(false)
-  // eslint-disable-next-line no-unused-vars
-  const [testLogs, setTestLogs] = useState([])
-  const [dangerCommand, setDangerCommand] = useState(null)
-  const [depMissing, setDepMissing] = useState(null)
   const [showPresetSidebar, setShowPresetSidebar] = useState(false)
 
   const showNotification = useCallback((msg, type = "info") => {
@@ -53,32 +53,6 @@ function AppInner() {
     } catch (e) { showNotification("Failed: " + e.message, "error") }
   }, [workspaceSettings, showNotification, t])
 
-  const handleDangerConfirm = useCallback(async (command) => {
-    try {
-      const result = await apiPost("/test/confirm", { instruction: `[TEST:CMD: ${command}]` })
-      setTestLogs(prev => [...prev,
-        { type: "prompt", data: `$ ${command} (force)`, elapsed: 0 },
-        { type: result.success ? "done" : "error", data: result.output || result.error, exit_code: result.exit_code, elapsed: result.duration || 0 }
-      ])
-    } catch (err) {
-      setTestLogs(prev => [...prev, { type: "error", data: err.message, elapsed: 0 }])
-    }
-  }, [])
-
-  const handleDepInstall = useCallback(async (dep) => {
-    setDepMissing(null)
-    try {
-      await apiPost("/test/dep-install", { module: dep.module, suggestion: dep.suggestion })
-      showNotification(`Installed ${dep.module}`, "success")
-    } catch (e) { showNotification("Install failed: " + e.message, "error") }
-  }, [showNotification])
-
-  const handleDepSkip = useCallback((e) => {
-    if (e.type === "click" || e.key === "Enter" || e.key === " " || e.key === "Escape") {
-      setDepMissing(null)
-    }
-  }, [])
-
   return (
     <PresetProvider showNotification={showNotification}>
         <ProjectProvider showNotification={showNotification} t={t}>
@@ -92,10 +66,6 @@ function AppInner() {
           setConfirmDialog={setConfirmDialog}
           showWorkspaceSettings={showWorkspaceSettings}
           setShowWorkspaceSettings={setShowWorkspaceSettings}
-          dangerCommand={dangerCommand}
-          setDangerCommand={setDangerCommand}
-          depMissing={depMissing}
-          setDepMissing={setDepMissing}
           showPresetSidebar={showPresetSidebar}
           setShowPresetSidebar={setShowPresetSidebar}
           showNotification={showNotification}
@@ -104,9 +74,6 @@ function AppInner() {
           wsConfigLoading={wsConfigLoading}
           fetchWorkspaceConfig={fetchWorkspaceConfig}
           handleSaveWorkspaceConfig={handleSaveWorkspaceConfig}
-          handleDangerConfirm={handleDangerConfirm}
-          handleDepInstall={handleDepInstall}
-          handleDepSkip={handleDepSkip}
         />
       </ProjectProvider>
     </PresetProvider>
@@ -118,20 +85,16 @@ function AppContent({
   agentCatalog, setAgentCatalog,
   notification, confirmDialog, setConfirmDialog,
   showWorkspaceSettings, setShowWorkspaceSettings,
-  dangerCommand, setDangerCommand,
-  depMissing, setDepMissing,
   showPresetSidebar, setShowPresetSidebar,
   showNotification,
   workspaceSettings, setWorkspaceSettings,
   wsConfigLoading,
   fetchWorkspaceConfig,
   handleSaveWorkspaceConfig,
-  handleDangerConfirm,
-  handleDepInstall,
-  handleDepSkip,
 }) {
   const presetHook = usePresetContext()
   const projectV2 = useProjectContext()
+  const [needsSetup, setNeedsSetup] = useState(null) // null=checking, true=引导, false=已配置
 
   useEffect(() => {
     apiGet("/agent-catalog")
@@ -140,6 +103,84 @@ function AppContent({
   }, [])
 
   useEffect(() => { presetHook.fetchPresets() }, [presetHook.fetchPresets])
+
+  // 检测是否需要首次引导
+  useEffect(() => {
+    if (presetHook.presets.length > 0) {
+      setNeedsSetup(false)
+    } else if (presetHook.presets.length === 0 && needsSetup === null) {
+      // presets 已加载但为空 → 需要引导
+      setNeedsSetup(true)
+    }
+  }, [presetHook.presets, needsSetup])
+
+  // 首次引导：创建预设
+  const [setupConfig, setSetupConfig] = useState({
+    name: "default", api_key: "", base_url: "", model: "", api_format: "openai", thinking_mode: "disabled"
+  })
+  const [setupSaving, setSetupSaving] = useState(false)
+
+  const handleSetupSave = useCallback(async () => {
+    if (!setupConfig.api_key.trim() || !setupConfig.model.trim() || !setupConfig.base_url.trim()) return
+    setSetupSaving(true)
+    try {
+      await apiPost("/presets", setupConfig)
+      await presetHook.fetchPresets()
+      setNeedsSetup(false)
+    } catch (e) {
+      // ignore
+    } finally {
+      setSetupSaving(false)
+    }
+  }, [setupConfig, presetHook])
+
+  // 首次引导界面
+  if (needsSetup === true) {
+    return (
+      <div className="app">
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          minHeight: "100vh", background: "linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%)"
+        }}>
+          <div style={{
+            background: "rgba(30,30,50,0.95)", borderRadius: 16, padding: 40,
+            maxWidth: 480, width: "90%", boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+            border: "1px solid rgba(255,255,255,0.08)"
+          }}>
+            <h2 style={{ color: "#e0e0e0", marginBottom: 8, fontSize: 22 }}>
+              {language === "zh" ? "欢迎使用 Novel Workspace" : "Welcome to Novel Workspace"}
+            </h2>
+            <p style={{ color: "#999", marginBottom: 24, fontSize: 14 }}>
+              {language === "zh"
+                ? "首次使用请配置 AI 模型的 API Key，保存后即可开始写作"
+                : "Configure your AI model API Key to get started"}
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <input placeholder={language === "zh" ? "API 地址 (Base URL)" : "Base URL"}
+                value={setupConfig.base_url} onChange={e => setSetupConfig(p => ({...p, base_url: e.target.value}))}
+                style={setupInputStyle} />
+              <input placeholder={language === "zh" ? "API Key" : "API Key"} type="password"
+                value={setupConfig.api_key} onChange={e => setSetupConfig(p => ({...p, api_key: e.target.value}))}
+                style={setupInputStyle} />
+              <input placeholder={language === "zh" ? "模型名称 (如 gpt-4o)" : "Model (e.g. gpt-4o)"}
+                value={setupConfig.model} onChange={e => setSetupConfig(p => ({...p, model: e.target.value}))}
+                style={setupInputStyle} />
+              <button onClick={handleSetupSave} disabled={setupSaving || !setupConfig.api_key.trim() || !setupConfig.model.trim() || !setupConfig.base_url.trim()}
+                style={{
+                  marginTop: 8, padding: "12px 24px", borderRadius: 8, border: "none",
+                  background: (setupSaving || !setupConfig.api_key.trim() || !setupConfig.model.trim() || !setupConfig.base_url.trim())
+                    ? "#444" : "#6c5ce7", color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer"
+                }}>
+                {setupSaving
+                  ? (language === "zh" ? "保存中..." : "Saving...")
+                  : (language === "zh" ? "保存并开始" : "Save & Start")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="app">
@@ -179,28 +220,6 @@ function AppContent({
       />
 
       <ConfirmDialog confirmDialog={confirmDialog} setConfirmDialog={setConfirmDialog} />
-      <DangerConfirmModal dangerCommand={dangerCommand} setDangerCommand={setDangerCommand} onConfirm={handleDangerConfirm} />
-
-      {depMissing && (
-        <AccessibleButton className="confirm-overlay" onClick={handleDepSkip}>
-          <div className="danger-confirm-dialog" role="dialog" aria-modal="true">
-            <div className="danger-confirm-icon">⚠️</div>
-            <div className="danger-confirm-title">{t("missingDependency")}</div>
-            <div className="danger-confirm-desc">
-              {language === "zh"
-                ? `Agent 测试时发现缺少依赖 "${depMissing.module}"，是否安装？`
-                : `Agent detected missing dependency "${depMissing.module}". Install?`}
-            </div>
-            <div className="danger-confirm-cmd">{depMissing.suggestion}</div>
-            <div className="danger-confirm-actions">
-              <button className="danger-confirm-reject" onClick={handleDepSkip}>{t("skip")}</button>
-              <button className="danger-confirm-approve" onClick={() => handleDepInstall(depMissing)}>
-                {language === "zh" ? `安装 ${depMissing.module}` : `Install ${depMissing.module}`}
-              </button>
-            </div>
-          </div>
-        </AccessibleButton>
-      )}
 
       {notification && (
         <div className={`notification ${notification.type}`}>{notification.msg}</div>

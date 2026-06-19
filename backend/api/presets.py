@@ -1,11 +1,14 @@
 """
 预设管理 — /api/presets, /api/presets/default
 """
+import json
+import os
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+import paths
 from .shared import limiter, _read_config, _write_config
 
 router = APIRouter(prefix="/api", tags=["presets"])
@@ -37,8 +40,7 @@ class PresetUpdate(BaseModel):
 @router.get("/presets")
 @limiter.limit("60/minute")
 def get_presets(request: Request):
-    import json, os
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    config_path = paths.get_config_path()
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)

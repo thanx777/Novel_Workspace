@@ -12,6 +12,8 @@ from fastapi import HTTPException
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+import paths
+
 # ── Rate limiter (single instance shared by all routers) ──────────────
 limiter = Limiter(key_func=get_remote_address)
 
@@ -26,7 +28,7 @@ def _resolve_workspace_dir(path: str, default_name: str) -> str:
     """Resolve workspace/projects directory path."""
     if path and path.strip():
         return os.path.abspath(path.strip())
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", default_name))
+    return paths.get_data_root()
 
 
 def get_full_path(filename: str) -> str:
@@ -49,7 +51,7 @@ def safe_join(root: str, *paths: str) -> str:
 # ── config.json helpers ──────────────────────────────────────────────
 
 def _get_config_path() -> str:
-    return os.path.join(os.path.dirname(__file__), "..", "config.json")
+    return paths.get_config_path()
 
 
 def _read_config() -> dict:
@@ -61,5 +63,7 @@ def _read_config() -> dict:
 
 
 def _write_config(data: dict) -> None:
-    with open(_get_config_path(), "w", encoding="utf-8") as f:
+    config_path = _get_config_path()
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

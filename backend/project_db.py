@@ -18,6 +18,8 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Union
 
+import paths
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -68,7 +70,7 @@ def _get_fernet():
 
     from cryptography.fernet import Fernet
 
-    secret_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret_key")
+    secret_key_path = os.path.join(paths.get_data_root(), ".secret_key")
 
     # 1. 从环境变量读取
     secret = os.environ.get("NOVEL_WORKSPACE_SECRET", "").strip()
@@ -144,9 +146,12 @@ def _decrypt_api_key(key: str, fernet=None) -> str:
 # 基础路径配置
 # ============================================================
 
-WORKSPACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
+WORKSPACE_DIR = paths.get_data_root()
 PROJECTS_DIR = os.path.join(WORKSPACE_DIR, "projects")
-os.makedirs(PROJECTS_DIR, exist_ok=True)
+try:
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+except PermissionError:
+    pass  # 杀毒软件可能拦截，目录可能已存在
 
 # ============================================================
 # 全局认证数据库（auth.db）
@@ -157,7 +162,10 @@ AUTH_DB_PATH = os.path.join(WORKSPACE_DIR, "auth.db")
 
 def _get_auth_conn():
     """获取全局认证数据库连接"""
-    os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
+    except PermissionError:
+        pass
     conn = sqlite3.connect(AUTH_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""

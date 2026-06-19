@@ -3,6 +3,7 @@ import json
 import asyncio
 from typing import List, Dict
 
+import paths
 from project_db import ProjectDB
 
 # 当前运行的引擎引用（用于 stop 端点取消），按项目名索引
@@ -32,7 +33,7 @@ def _get_project_genre(name: str) -> str:
 def _get_global_presets() -> List[Dict]:
     """获取全局预设列表（从 config.json 读取，与 main.py /api/presets 一致）。"""
     try:
-        config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+        config_path = paths.get_config_path()
         if os.path.isfile(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)

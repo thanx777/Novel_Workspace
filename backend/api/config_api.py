@@ -6,6 +6,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+import paths
 from .shared import (
     limiter, WORKSPACE_DIR, PROJECTS_DIR,
     _read_config, _write_config, _resolve_workspace_dir,
@@ -36,8 +37,8 @@ def get_workspace_config(request: Request):
         "projects_dir": data.get("projects_dir", ""),
         "current_workspace": WORKSPACE_DIR,
         "current_projects": PROJECTS_DIR,
-        "default_workspace": os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "workspace")),
-        "default_projects": os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), "projects")),
+        "default_workspace": paths.get_data_root(),
+        "default_projects": os.path.join(paths.get_data_root(), "projects"),
     }
 
 

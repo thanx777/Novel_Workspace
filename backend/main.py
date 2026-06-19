@@ -6,16 +6,28 @@ event live here.  All business-logic endpoints have been moved to api/
 sub-modules.
 """
 import os
+import sys
 import logging
 
+import paths
+
 # ── Logging 配置（全局一次）──────────────────────────────────────────
-os.makedirs('logs', exist_ok=True)
+_logs_dir = paths.get_logs_dir()
+try:
+    os.makedirs(_logs_dir, exist_ok=True)
+except PermissionError:
+    pass  # 目录可能已存在或被杀毒软件拦截，后续写入时会处理
+_file_handler = None
+try:
+    _file_handler = logging.FileHandler(os.path.join(_logs_dir, 'novel_workspace.log'), encoding='utf-8')
+except (PermissionError, OSError):
+    pass  # 日志文件无法创建时只用控制台输出
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('logs/novel_workspace.log', encoding='utf-8'),
+        *([_file_handler] if _file_handler else []),
     ]
 )
 
@@ -40,7 +52,6 @@ from api.presets import router as presets_router
 from api.skills import router as skills_router
 from api.workspace import router as workspace_router
 from api.agent_catalog import router as agent_catalog_router
-from api.test_exec import router as test_exec_router
 from api.assistant import router as assistant_router
 from api.config_api import router as config_router
 from api.v2_projects import router as v2_projects_router
@@ -58,8 +69,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.on_event("startup")
 async def _startup_init():
-    """应用启动时初始化默认管理员账户"""
-    init_default_admin()
+    """应用启动时初始化默认管理员账户（AUTH_DISABLED 时跳过）"""
+    if not os.environ.get('AUTH_DISABLED'):
+        try:
+            init_default_admin()
+        except Exception:
+            pass  # 打包模式下杀毒软件可能拦截数据库创建
 
 
 # ============================================
@@ -135,9 +150,29 @@ app.include_router(presets_router)
 app.include_router(skills_router)
 app.include_router(workspace_router)
 app.include_router(agent_catalog_router)
-app.include_router(test_exec_router)
 app.include_router(assistant_router)
 app.include_router(config_router)
+
+
+# ============================================
+# SPA static files (packaged mode only)
+# ============================================
+
+def _mount_spa(app):
+    """打包模式下挂载前端静态资源。开发模式不挂载，仍用 vite dev server。"""
+    if not getattr(sys, 'frozen', False):
+        return
+    from fastapi.staticfiles import StaticFiles
+    if getattr(sys, '_MEIPASS', None):
+        base = os.path.join(sys._MEIPASS, 'frontend', 'dist')
+    else:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend', 'dist')
+    if os.path.isdir(base):
+        app.mount("/", StaticFiles(directory=base, html=True), name="spa")
+
+
+_mount_spa(app)
+
 
 # ============================================
 # Startup (uvicorn)
