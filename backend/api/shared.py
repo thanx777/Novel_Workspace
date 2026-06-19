@@ -57,13 +57,27 @@ def _get_config_path() -> str:
 def _read_config() -> dict:
     path = _get_config_path()
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {"presets": []}
     return {"presets": []}
 
 
 def _write_config(data: dict) -> None:
     config_path = _get_config_path()
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except PermissionError:
+        # 杀毒软件可能拦截写入，尝试降级到用户主目录
+        alt_root = os.path.join(os.path.expanduser('~'), 'NovelWorkspace')
+        alt_path = os.path.join(alt_root, 'config.json')
+        try:
+            os.makedirs(alt_root, exist_ok=True)
+            with open(alt_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except PermissionError:
+            raise RuntimeError(f"无法写入配置文件，请检查目录权限: {alt_root}")

@@ -50,12 +50,15 @@ def get_presets(request: Request):
 @router.post("/presets")
 @limiter.limit("60/minute")
 def add_preset(request: Request, preset: PresetCreate):
-    data = _read_config()
-    if "presets" not in data:
-        data["presets"] = []
-    data["presets"].append(preset.model_dump())
-    _write_config(data)
-    return data
+    try:
+        data = _read_config()
+        if "presets" not in data:
+            data["presets"] = []
+        data["presets"].append(preset.model_dump())
+        _write_config(data)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存预设失败: {e}")
 
 
 @router.delete("/presets")
