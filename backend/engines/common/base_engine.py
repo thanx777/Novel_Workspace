@@ -145,9 +145,6 @@ class BaseEngine:
             content = self._read_chapter(ch)
             if content:
                 content = self._clean_fs_ids(content)
-                # 清洗前文中的省略号，避免 LLM 模仿传染
-                content = re.sub(r'……+', '——', content)
-                content = re.sub(r'\.{6,}', '——', content)
                 if is_adjacent:
                     # 紧邻章：注入全文，保证完美衔接
                     parts.append(f"【第{ch}章·全文 — 必须自然衔接】\n{content}")
