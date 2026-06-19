@@ -1,0 +1,244 @@
+/* ============================================
+   Component utility classes
+   Extracted from inline styles across the app
+   ============================================ */
+
+/* --- Flex layout helpers --- */
+.flex-gap-xs {
+  display: flex;
+  gap: 4px;
+}
+
+.flex-gap-sm {
+  display: flex;
+  gap: 6px;
+}
+
+.flex-gap-md {
+  display: flex;
+  gap: 8px;
+}
+
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.flex-col-gap-sm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* --- Text hint (small + muted) --- */
+.preset-hint {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.preset-hint-sm {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.text-hint {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.text-hint-70 {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* --- Input field (sidebar) --- */
+.sidebar-input {
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+/* --- Format option small --- */
+.format-option-sm {
+  padding: 4px 6px;
+  font-size: 10px;
+}
+
+.format-option-md {
+  padding: 4px 8px;
+  font-size: 10px;
+  flex: 1;
+  text-align: center;
+}
+
+/* --- Config section card --- */
+.config-section {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.config-section-accent {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-surface);
+}
+
+.config-section-lg {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.config-section-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.config-section-title-lg {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+/* --- Preset default badge --- */
+.default-badge {
+  font-size: 9px;
+  background: #f59e0b;
+  color: #fff;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* --- Sidebar button (small, inline) --- */
+.sidebar-btn-row {
+  display: flex;
+  gap: 4px;
+}
+
+.sidebar-btn-primary {
+  flex: 1;
+  padding: 4px;
+  border-radius: 4px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sidebar-btn-outline {
+  flex: 1;
+  padding: 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* --- Project config: number input --- */
+.num-input-sm {
+  width: 70px;
+}
+
+.num-input-md {
+  width: 100px;
+}
+
+/* --- WB select --- */
+.wb-select-full {
+  width: 100%;
+  font-size: 12px;
+}
+
+/* --- KG inline styles --- */
+.kg-stat-layer-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
+/* --- Volume header (ChapterTree) --- */
+.volume-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+
+/* --- ErrorBoundary --- */
+.error-boundary-container {
+  padding: 20px;
+  color: var(--red);
+  background: var(--red-dim);
+  border-radius: 8px;
+  margin: 10px;
+}
+
+.error-boundary-title {
+  margin: 0 0 8px 0;
+}
+
+.error-boundary-message {
+  margin: 0 0 12px 0;
+  word-break: break-word;
+}
+
+.error-boundary-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.error-boundary-btn {
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.error-boundary-btn:hover {
+  background: var(--bg-hover);
+}
+
+.error-boundary-btn-primary {
+  padding: 6px 12px;
+  cursor: pointer;
+  border: none;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+}
+
+.error-boundary-btn-primary:hover {
+  background: var(--accent-hover);
+}

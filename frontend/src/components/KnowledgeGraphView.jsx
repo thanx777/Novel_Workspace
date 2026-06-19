@@ -27,7 +27,7 @@ const VIEWS = [
 // 主组件
 // ============================================================
 export default function KnowledgeGraphView({ API_BASE, projectName }) {
-  const { language } = useApp()
+  const { language, t } = useApp()
   const [view, setView] = useState("graph")
   const [data, setData] = useState({ nodes: [], edges: [], stats: { node_count: 0, edge_count: 0, by_type: {} } })
   const [loading, setLoading] = useState(true)
@@ -140,8 +140,8 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
       {/* 顶部统计 + 视图切换 */}
       <div className="kg-topbar">
         <div className="kg-stats">
-          <span className="kg-stat"><b>{data.stats.node_count}</b> 节点</span>
-          <span className="kg-stat"><b>{data.stats.edge_count}</b> 边</span>
+          <span className="kg-stat"><b>{data.stats.node_count}</b> {t("kgNodes")}</span>
+          <span className="kg-stat"><b>{data.stats.edge_count}</b> {t("kgEdges")}</span>
           <span className="kg-stat-divider">·</span>
           {Object.entries(LAYER_COLORS).map(([k, c]) => {
             const cnt = Object.entries(data.stats.by_type || {}).reduce((sum, [type, n]) => {
@@ -214,11 +214,11 @@ export default function KnowledgeGraphView({ API_BASE, projectName }) {
         {/* 中部视图区 */}
         <div className="kg-canvas">
           {loading ? (
-            <div className="kg-loading">⏳ 加载中...</div>
+            <div className="kg-loading">⏳ {t("kgLoading")}</div>
           ) : data.nodes.length === 0 ? (
             <div className="kg-empty">
               <div className="kg-empty-icon">🕸</div>
-              <div className="kg-empty-title">图谱为空</div>
+              <div className="kg-empty-title">{t("kgEmpty")}</div>
               <div className="kg-empty-desc">开始写作后，章节、角色、伏笔、场景、世界观、剧情线、大纲节点会自动构建</div>
             </div>
           ) : view === "graph" ? (
@@ -624,7 +624,7 @@ function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, nei
 
       {/* 操作提示 */}
       <div className="kg-hint">
-        点击类型泡泡展开 · 点击节点查看详情 · 滚轮缩放 · 拖动平移
+        {t("kgClickToExpand")} · {language === "zh" ? "点击节点查看详情" : "Click node for details"} · {language === "zh" ? "滚轮缩放" : "Scroll to zoom"} · {language === "zh" ? "拖动平移" : "Drag to pan"}
       </div>
     </>
   )

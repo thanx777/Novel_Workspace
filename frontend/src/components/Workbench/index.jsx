@@ -498,7 +498,7 @@ export default function Workbench({
   }, [activeProject, stopTask, setIsRunning])
 
   // ---- Stage label ----
-  const stageLabel = (s) => ({ outline: "大纲制作", writing: "正文写作", polish: "润色审校", completed: "已完成" }[s] || s)
+  const stageLabel = (s) => ({ outline: t("stageOutline"), writing: t("stageWriting"), polish: t("stagePolish"), completed: t("stageComplete") }[s] || s)
 
   // ---- Sidebar tabs ----
   const SIDE_TABS = [
@@ -553,7 +553,7 @@ export default function Workbench({
             />
           )}
           {!activeProject && (
-            <div className="side-panel-empty" style={{ padding: 16, textAlign: "center", opacity: 0.5 }}>
+            <div className="side-panel-empty" style={{ padding: 16, textAlign: "center" }}>
               {t("selectProjectStart")}
             </div>
           )}
@@ -631,7 +631,7 @@ export default function Workbench({
             <div className="editor-wrap">
               <div className="editor-header">
                 <span>⚙️ {t("projectConfig")}</span>
-                <div style={{ display: "flex", gap: 6 }}>
+                <div className="flex-gap-md">
                   <button className="pc-btn primary small"
                     onClick={handleSaveProjectInfo}>
                     💾 {t("saveInfo")}
@@ -652,12 +652,12 @@ export default function Workbench({
               </div>
               <div className="editor-body">
                 {/* 项目基本信息 */}
-                <div style={{ marginBottom: 16, padding: 12, border: "1px solid var(--border)", borderRadius: 6 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>{t("projectInfo")}</div>
+                <div className="config-section-lg">
+                  <div className="config-section-title-lg">{t("projectInfo")}</div>
                   <div className="editor-field">
                     <label>{t("projectName")}</label>
                     <input value={editProjectName} disabled
-                      style={{ opacity: 0.6 }} />
+                      className="text-hint" />
                   </div>
                   <div className="editor-field">
                     <label>{t("novelTitle")}</label>
@@ -666,7 +666,7 @@ export default function Workbench({
                   </div>
                   <div className="editor-field">
                     <label>{t("genre")}</label>
-                    <select value={editProjectGenre} onChange={(e) => setEditProjectGenre(e.target.value)} className="wb-select" style={{ width: "100%" }}>
+                    <select value={editProjectGenre} onChange={(e) => setEditProjectGenre(e.target.value)} className="wb-select wb-select-full">
                       <option value="">{t("selectGenre")}</option>
                       {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
                     </select>
@@ -677,24 +677,24 @@ export default function Workbench({
                   </div>
                   <div className="editor-field">
                     <label>{t("wordsPerChapter")}</label>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div className="flex-gap-md" style={{ alignItems: "center" }}>
                       <input type="number" value={editWordCountMin} onChange={(e) => setEditWordCountMin(Number(e.target.value))}
-                        min={500} max={10000} step={500} style={{ width: 100 }} />
+                        min={500} max={10000} step={500} className="num-input-md" />
                       <span>~</span>
                       <input type="number" value={editWordCountMax} onChange={(e) => setEditWordCountMax(Number(e.target.value))}
-                        min={1000} max={15000} step={500} style={{ width: 100 }} />
-                      <span style={{ fontSize: 12, opacity: 0.6 }}>{t("wordCount")}</span>
+                        min={1000} max={15000} step={500} className="num-input-md" />
+                      <span className="text-hint">{t("wordCount")}</span>
                     </div>
                   </div>
                   <div className="editor-field">
                     <label>{t("mwrMaxRounds")}</label>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 12, opacity: 0.7 }}>{t("writing")}</span>
+                    <div className="flex-gap-md" style={{ alignItems: "center" }}>
+                      <span className="text-hint-70">{t("writing")}</span>
                       <input type="number" value={editMaxRoundsWriting} onChange={(e) => setEditMaxRoundsWriting(Number(e.target.value))}
-                        min={3} max={50} step={1} style={{ width: 70 }} />
-                      <span style={{ fontSize: 12, opacity: 0.7 }}>{t("outline")}</span>
+                        min={3} max={50} step={1} className="num-input-sm" />
+                      <span className="text-hint-70">{t("outline")}</span>
                       <input type="number" value={editMaxRoundsOutline} onChange={(e) => setEditMaxRoundsOutline(Number(e.target.value))}
-                        min={3} max={30} step={1} style={{ width: 70 }} />
+                        min={3} max={30} step={1} className="num-input-sm" />
                     </div>
                   </div>
 
@@ -708,25 +708,25 @@ export default function Workbench({
                 </div>
 
                 {/* AI 对话模型（用于人物输入等轻量对话） */}
-                <div style={{ marginBottom: 12, padding: 10, border: "1px solid var(--accent)", borderRadius: 6, background: "var(--bg-surface)" }}>
-                  <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 12 }}>
+                <div className="config-section-accent">
+                  <div className="config-section-title">
                     💬 {t("aiChatModel")}
                   </div>
                   <select value={aiChatPreset} onChange={e => setAiChatPreset(e.target.value)}
-                    className="wb-select" style={{ width: "100%", fontSize: 12 }}
+                    className="wb-select wb-select-full"
                     title={t("aiChatModelHint")}>
                     <option value="">{t("defaultFirstAvailable")}</option>
                     {presets?.map((p, i) => (
                       <option key={i} value={p.name}>{p.name} ({p.model})</option>
                     ))}
                   </select>
-                  <div style={{ fontSize: 10, opacity: 0.6, marginTop: 4 }}>
+                  <div className="preset-hint-sm" style={{ marginTop: 4 }}>
                     {t("aiChatModelDesc")}
                   </div>
                 </div>
 
                 {/* 模型配置 */}
-                <div style={{ marginBottom: 12, opacity: 0.7, fontSize: 12 }}>
+                <div className="text-hint-70" style={{ marginBottom: 12 }}>
                   {t("rolePresetHint")}
                 </div>
                 {["manager", "worker", "reviewer"].map((role) => {
@@ -747,16 +747,16 @@ export default function Workbench({
                     }
                   }
                   return (
-                    <div key={role} style={{ marginBottom: 12, padding: 10, border: "1px solid var(--border)", borderRadius: 6 }}>
-                      <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 12 }}>{roleLabels[role]}</div>
-                      <select className="wb-select" value={currentPresetName} onChange={(e) => handlePresetSelect(e.target.value)} style={{ width: "100%", fontSize: 12 }}>
+                    <div key={role} className="config-section">
+                      <div className="config-section-title">{roleLabels[role]}</div>
+                      <select className="wb-select wb-select-full" value={currentPresetName} onChange={(e) => handlePresetSelect(e.target.value)}>
                         <option value="">{t("defaultFirstAvailable")}</option>
                         {presets?.map((ps, i) => (
                           <option key={i} value={ps.name}>{ps.name} ({ps.model})</option>
                         ))}
                       </select>
                       {currentPresetName && (
-                        <div style={{ fontSize: 10, opacity: 0.6, marginTop: 4 }}>
+                        <div className="preset-hint-sm" style={{ marginTop: 4 }}>
                           {p.base_url} · {p.model}
                         </div>
                       )}
