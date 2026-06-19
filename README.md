@@ -155,6 +155,83 @@ npm run dev              # → http://localhost:5176
 
 ---
 
+## Configuration
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|:-----|:------:|:-----|
+| `AUTH_DISABLED` | `false` | 设为 `true` 跳过认证（本地开发） |
+| `AUTH_SECRET` | — | JWT 签名密钥，未设置时回退到 `NOVEL_WORKSPACE_SECRET`，再回退到硬编码默认值 |
+| `AUTH_TOKEN_EXPIRE_HOURS` | `24` | JWT Token 过期时间（小时） |
+| `ADMIN_PASSWORD` | — | 管理员初始密码，未设置时使用默认密码 `admin123` |
+| `CORS_ORIGINS` | `*` | 允许的跨域来源，多个用逗号分隔，如 `http://localhost:5176,http://localhost:3000` |
+| `NOVEL_WORKSPACE_SECRET` | — | Fernet 对称加密密钥，用于 API Key 加解密 |
+
+### config.json 配置文件
+
+将 `backend/config.example.json` 复制为 `backend/config.json`，按需修改：
+
+```json
+{
+  "presets": [
+    {
+      "name": "My-LLM",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o",
+      "api_key": "sk-xxx",
+      "api_format": "openai",
+      "thinking_mode": null
+    }
+  ],
+  "workspace_dir": "",
+  "projects_dir": "",
+  "default_preset": "My-LLM",
+  "auth": {
+    "disabled": false,
+    "token_expire_hours": 24,
+    "admin_password_env": "ADMIN_PASSWORD"
+  }
+}
+```
+
+#### Preset 字段说明
+
+| 字段 | 必填 | 说明 |
+|:-----|:----:|:-----|
+| `name` | Yes | 预设名称，唯一标识 |
+| `base_url` | Yes | LLM API 地址（OpenAI 兼容格式） |
+| `model` | Yes | 模型名称，如 `gpt-4o`、`deepseek-chat`、`claude-3-5-sonnet-20241022` |
+| `api_key` | Yes | API 密钥 |
+| `api_format` | No | API 格式：`openai`（默认）或 `claude` |
+| `thinking_mode` | No | 思考模式：`"enabled"` / `"disabled"` / `null`（仅 DeepSeek 等支持思考模式的模型） |
+
+#### 支持的 LLM 提供商
+
+| 提供商 | base_url 示例 | api_format | thinking_mode |
+|:-------|:-------------|:----------:|:------------:|
+| OpenAI | `https://api.openai.com/v1` | `openai` | — |
+| DeepSeek | `https://api.deepseek.com/v1` | `openai` | `enabled` |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `openai` | — |
+| Anthropic Claude | `https://api.anthropic.com` | `claude` | — |
+| 其他 OpenAI 兼容 | 按服务商文档 | `openai` | — |
+
+### 项目级配置
+
+每个项目可在前端「项目配置」面板中调整以下参数：
+
+| 参数 | 默认值 | 说明 |
+|:-----|:------:|:-----|
+| `word_count_min` | 3000 | 每章最少字数 |
+| `word_count_max` | 5000 | 每章最多字数 |
+| `max_rounds_writing` | 10 | 写作 MWR 循环最大轮次 |
+| `max_rounds_outline` | 8 | 大纲 MWR 循环最大轮次 |
+| `max_polish_rounds` | 3 | 每章最大润色轮次 |
+| `total_chapters` | — | 总章节数（创建时设定） |
+| `genre` | — | 体裁（创建时设定，影响体裁规则注入） |
+
+---
+
 ## Tech Stack
 
 | Layer | Technologies |
