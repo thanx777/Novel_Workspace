@@ -485,8 +485,9 @@ class ProjectDB:
                 c.execute("ALTER TABLE projects ADD COLUMN max_rounds_writing INTEGER DEFAULT 10")
             if "max_rounds_outline" not in cols:
                 c.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Migration v0->v1 failed: {e}", exc_info=True)
 
     def _migrate_v1_to_v2(self, conn=None):
         """v1→v2: 加密 preset JSON 中的明文 api_key"""
@@ -511,14 +512,16 @@ class ProjectDB:
                                 preset["api_key"] = _encrypt_api_key(api_key, fernet)
                                 new_values[col_name] = json.dumps(preset, ensure_ascii=False)
                                 updated = True
-                    except (json.JSONDecodeError, Exception):
-                        pass
+                    except (json.JSONDecodeError, Exception) as e:
+                        import logging
+                        logging.getLogger(__name__).warning(f"Migration v1->v2: failed to parse preset: {e}", exc_info=True)
                 if updated:
                     set_clause = ", ".join(f"{k}=?" for k in new_values)
                     values = list(new_values.values()) + [row_id]
                     c.execute(f"UPDATE projects SET {set_clause} WHERE id=?", values)
         except Exception as e:
-            print(f"[DB] _migrate_v1_to_v2 error: {e}")
+            import logging
+            logging.getLogger(__name__).warning(f"Migration v1->v2 failed: {e}", exc_info=True)
 
     def _migrate_outline_layers(self) -> None:
         """把旧 outline_mode 迁移到 outline_layers。"""

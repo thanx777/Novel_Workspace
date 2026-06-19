@@ -583,11 +583,11 @@ async def test_connection(request: Request, config: AgentConfig):
     api_format = getattr(config, "api_format", "openai")
 
     if not api_key:
-        return {"success": False, "message": "API Key not configured", "hint": "no_api_key"}
+        raise HTTPException(status_code=400, detail="API Key not configured")
     if not base_url:
-        return {"success": False, "message": "Base URL is empty", "hint": "no_base_url"}
+        raise HTTPException(status_code=400, detail="Base URL is empty")
     if not model:
-        return {"success": False, "message": "Model name is empty", "hint": "no_model"}
+        raise HTTPException(status_code=400, detail="Model name is empty")
 
     try:
         test_timeout = 45.0
@@ -610,9 +610,11 @@ async def test_connection(request: Request, config: AgentConfig):
         elapsed_ms = int((time.time() - start_time) * 1000)
         if full_content.strip():
             return {"success": True, "message": f"Connected ({elapsed_ms}ms)", "response": full_content.strip(), "model": model, "elapsed_ms": elapsed_ms}
-        return {"success": False, "message": "Empty response", "elapsed_ms": elapsed_ms}
+        raise HTTPException(status_code=502, detail="Empty response")
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"success": False, "message": str(e)[:300], "elapsed_ms": int((time.time() - start_time) * 1000)}
+        raise HTTPException(status_code=500, detail=str(e)[:300])
 
 # ============================================
 # API — Test Execution
@@ -650,7 +652,7 @@ async def api_test_confirm(request: Request, req: TestConfirmRequest):
     import re as _re
     cmd_match = _re.match(r"\[TEST:CMD:\s*(.+)\]$", req.instruction, re.IGNORECASE)
     if not cmd_match:
-        return {"success": False, "error": "Only CMD tests support force execution"}
+        raise HTTPException(status_code=400, detail="Only CMD tests support force execution")
     result = await execute_terminal_force(cmd_match.group(1).strip(), req.workspace_dir or WORKSPACE_DIR)
     return result.to_dict()
 
@@ -1056,7 +1058,7 @@ def v2_migrate_old_projects(request: Request, body: dict = {}):
             "stderr": result.stderr,
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================
@@ -1072,7 +1074,7 @@ def v2_assistant_chat(request: Request, project_name: str, body: _AssistantChat)
         reply = pa.chat(body.message)
         return {"success": True, "reply": reply, "project_name": project_name}
     except Exception as e:
-        return {"success": False, "reply": f"(助理出错：{e})", "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class _AiAddCharacter(BaseModel):
@@ -1130,11 +1132,11 @@ def v2_delete_character(request: Request, project_name: str, body: _DeleteCharac
     """
     try:
         if not body.name.strip():
-            return {"success": False, "error": "角色名不能为空"}
+            raise HTTPException(status_code=400, detail="角色名不能为空")
 
         char_path = get_project_file(project_name, "characters.md")
         if not os.path.exists(char_path):
-            return {"success": False, "error": "characters.md 不存在"}
+            raise HTTPException(status_code=404, detail="characters.md 不存在")
 
         with open(char_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -1150,7 +1152,7 @@ def v2_delete_character(request: Request, project_name: str, body: _DeleteCharac
                     break
 
         if not found:
-            return {"success": False, "error": f"未找到角色「{target}」"}
+            raise HTTPException(status_code=404, detail=f"未找到角色「{target}」")
 
         # 清理：把因删除留下的连续空行合并
         new_content = re.sub(r"\n{3,}", "\n\n", new_content).rstrip() + "\n"
@@ -1169,8 +1171,10 @@ def v2_delete_character(request: Request, project_name: str, body: _DeleteCharac
             "file_path": "characters.md",
             "size": len(new_content),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v2/projects/{project_name}/ai-add-character")
@@ -1182,7 +1186,7 @@ def v2_ai_add_character(request: Request, project_name: str, body: _AiAddCharact
     """
     try:
         if not body.description.strip():
-            return {"success": False, "error": "描述不能为空"}
+            raise HTTPException(status_code=400, detail="描述不能为空")
 
         # 1. 读取现有 characters.md
         char_path = get_project_file(project_name, "characters.md")
@@ -1252,8 +1256,10 @@ def v2_ai_add_character(request: Request, project_name: str, body: _AiAddCharact
             "file_path": "characters.md",
             "size": len(new_content),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v2/projects/{project_name}/assistant/suggest-next")
@@ -1266,7 +1272,7 @@ def v2_assistant_suggest_next(request: Request, project_name: str, body: dict = 
         reply = pa.suggest_next_chapter()
         return {"success": True, "reply": reply}
     except Exception as e:
-        return {"success": False, "reply": "", "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v2/projects/{project_name}/assistant/analyze-consistency")
@@ -1279,7 +1285,7 @@ def v2_assistant_analyze(request: Request, project_name: str, body: dict = {}):
         reply = pa.analyze_consistency()
         return {"success": True, "reply": reply}
     except Exception as e:
-        return {"success": False, "reply": "", "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v2/projects/{project_name}/chat")
