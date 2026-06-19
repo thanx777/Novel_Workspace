@@ -1,5 +1,6 @@
 """大纲引擎 — 第一阶段：MWR 循环生成 L1/L2 大纲。"""
 
+import logging
 import os
 import re
 from typing import Dict, List, Optional
@@ -14,6 +15,8 @@ from ..common.prompts import (
     CHAT_SYSTEM, HALLUCINATION_CHECK_PROMPT, OUTPUT_FORMAT_CONSTRAINT,
 )
 from project_db import ProjectDB
+
+logger = logging.getLogger(__name__)
 
 # 复用现有模板和解析（sys.path 已由 engines/__init__.py 统一设置）
 from outline_templates import (
@@ -197,6 +200,7 @@ class OutlineEngine(BaseEngine):
             try:
                 md_text = await self.llm.call_strict("writer", system_prompt, user_prompt)
             except LLMError as e:
+                logger.error("L1 generation failed: %s", e)
                 self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，{layer} 使用占位内容"})
                 md_text = self._placeholder_outline(layer)
 
@@ -326,8 +330,10 @@ class OutlineEngine(BaseEngine):
                 suggestions = data.get("suggestions", [])
                 return score, issues, suggestions
         except LLMError as e:
+            logger.error("AI review LLM call failed: %s", e)
             self._emit({"status": "warning", "message": f"AI 评审调用失败: {e}"})
         except Exception as e:
+            logger.exception("AI review parse failed")
             self._emit({"status": "warning", "message": f"AI 评审解析失败: {e}"})
 
         return 5.0, ["AI 评审解析失败"], []
@@ -433,6 +439,7 @@ class OutlineEngine(BaseEngine):
                     self.kg_adapter.kg.add_edge("edge_L2_from_L1", "derived_from", node_id, l1_id)
             self.kg_adapter.kg.save()
         except Exception as e:
+            logger.exception("KG outline write failed for %s layer %s", self.project_name, layer)
             self._emit({"status": "warning", "message": f"KG 写入失败（不阻塞流程）: {e}"})
 
     async def _ai_ingest_outline(self, layer: str, md_text: str):
@@ -444,6 +451,7 @@ class OutlineEngine(BaseEngine):
                 emit=self._emit,
             )
         except Exception as e:
+            logger.exception("AI outline ingest failed for %s layer %s", self.project_name, layer)
             self._emit({"status": "warning", "message": f"大纲 AI 摄取失败（不阻塞流程）: {e}"})
 
     def _extract_titles_from_l2(self, l2_md: str) -> Dict[int, str]:

@@ -1,9 +1,12 @@
 """BaseEngine — 三引擎共享的 MWR 循环骨架。"""
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .llm_client import LLMClient
 from .kg_adapter import KGAdapter
@@ -70,6 +73,7 @@ class BaseEngine:
                  genre: str = ""):
         self.project_dir = project_dir
         self.project_name = project_name
+        self.engine_name = self.__class__.__name__
         self.llm = LLMClient(project_presets=project_presets,
                              global_presets=global_presets)
         self.kg_adapter = KGAdapter(kg=kg, project_dir=project_dir)
@@ -188,6 +192,7 @@ class BaseEngine:
         round_num = 0
         while True:
             round_num += 1
+            logger.info("MWR cycle started: %s round %d", self.engine_name, round_num)
 
             # 润色轮次硬上限（使用传入的 max_rounds 参数）
             if round_num > max_rounds:
@@ -196,6 +201,7 @@ class BaseEngine:
 
             # 检查是否已被用户取消
             if self.cancelled:
+                logger.info("MWR cycle cancelled: %s", self.engine_name)
                 self._emit({"status": "cycle_cancelled", "round": round_num, "reason": "用户取消"})
                 return last_result or ReviewResult(score=0.0, issues=["用户取消"])
 
@@ -229,6 +235,7 @@ class BaseEngine:
             # 3.5 连续LLM错误检测：连续3轮score=0且all_required_passed=false，停止循环
             if result.score == 0.0 and not result.all_required_passed:
                 consecutive_llm_errors += 1
+                logger.error("MWR LLM error: %s round %d", self.engine_name, round_num)
                 if consecutive_llm_errors >= 3:
                     self._emit({"status": "cycle_stuck", "round": round_num,
                                 "reason": f"连续{consecutive_llm_errors}轮LLM错误/空内容，停止循环"})
@@ -238,6 +245,7 @@ class BaseEngine:
 
             # 4. 判断是否通过
             if result.score >= score_threshold and result.all_required_passed:
+                logger.info("MWR cycle passed: %s score=%.1f", self.engine_name, result.score)
                 self._on_cycle_completed(round_num, result)
                 self._emit({"status": "cycle_completed", "round": round_num, "score": result.score})
                 return result
@@ -250,6 +258,7 @@ class BaseEngine:
                 recent_scores.append(result.score)
 
             if len(recent_scores) >= NO_IMPROVE_WINDOW:
+                logger.warning("MWR cycle stuck: %s after %d rounds", self.engine_name, round_num)
                 self._emit({"status": "cycle_stuck", "round": round_num,
                             "reason": f"连续{NO_IMPROVE_WINDOW}轮评分无提升（最高{best_score:.1f}），停止循环"})
                 break

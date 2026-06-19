@@ -14,8 +14,11 @@ import re
 import sqlite3
 import json
 import time
+import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Union
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # Fernet 加密密钥管理
@@ -76,7 +79,7 @@ def _get_fernet():
             with open(secret_key_path, "r", encoding="utf-8") as f:
                 secret = f.read().strip()
         except Exception:
-            pass
+            logger.exception("Failed to read .secret_key file")
 
     # 3. 生成新密钥
     if not secret:
@@ -89,7 +92,7 @@ def _get_fernet():
             print(f"[SECURITY] 建议将以下密钥设置到环境变量 NOVEL_WORKSPACE_SECRET：")
             print(f"[SECURITY]   {secret}")
         except Exception as e:
-            print(f"[SECURITY] 无法保存密钥文件: {e}")
+            logger.error("Unable to save secret key file: %s", e)
 
     try:
         _FERNET_INSTANCE = Fernet(secret.encode("utf-8") if isinstance(secret, str) else secret)
@@ -101,7 +104,7 @@ def _get_fernet():
                 f.write(secret)
             _set_secret_key_permissions(secret_key_path)
         except Exception:
-            pass
+            logger.exception("Failed to save regenerated secret key file")
         _FERNET_INSTANCE = Fernet(secret.encode("utf-8"))
 
     _check_secret_key_permissions(secret_key_path)
@@ -119,6 +122,7 @@ def _encrypt_api_key(key: str, fernet=None) -> str:
         f = fernet or _get_fernet()
         return f.encrypt(key.encode("utf-8")).decode("utf-8")
     except Exception:
+        logger.exception("API Key encryption failed")
         return key
 
 
@@ -133,6 +137,7 @@ def _decrypt_api_key(key: str, fernet=None) -> str:
         f = fernet or _get_fernet()
         return f.decrypt(key.encode("utf-8")).decode("utf-8")
     except Exception:
+        logger.error("API Key decryption failed, returning original value")
         return key
 
 # ============================================================
@@ -311,7 +316,7 @@ def read_file_safe(path: str, default: str = "") -> str:
             with open(path, "r", encoding="utf-8") as f:
                 return f.read()
     except Exception:
-        pass
+        logger.exception("Failed to read file: %s", path)
     return default
 
 
@@ -323,6 +328,7 @@ def write_file_safe(path: str, content: str) -> bool:
             f.write(content)
         return True
     except Exception:
+        logger.exception("Failed to write file: %s", path)
         return False
 
 
@@ -486,8 +492,7 @@ class ProjectDB:
             if "max_rounds_outline" not in cols:
                 c.execute("ALTER TABLE projects ADD COLUMN max_rounds_outline INTEGER DEFAULT 8")
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Migration v0->v1 failed: {e}", exc_info=True)
+            logger.exception("Schema migration v0->v1 failed")
 
     def _migrate_v1_to_v2(self, conn=None):
         """v1→v2: 加密 preset JSON 中的明文 api_key"""
@@ -513,15 +518,13 @@ class ProjectDB:
                                 new_values[col_name] = json.dumps(preset, ensure_ascii=False)
                                 updated = True
                     except (json.JSONDecodeError, Exception) as e:
-                        import logging
-                        logging.getLogger(__name__).warning(f"Migration v1->v2: failed to parse preset: {e}", exc_info=True)
+                        logger.warning("Migration v1->v2: failed to parse preset: %s", e)
                 if updated:
                     set_clause = ", ".join(f"{k}=?" for k in new_values)
                     values = list(new_values.values()) + [row_id]
                     c.execute(f"UPDATE projects SET {set_clause} WHERE id=?", values)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Migration v1->v2 failed: {e}", exc_info=True)
+            logger.exception("Schema migration v1->v2 failed")
 
     def _migrate_outline_layers(self) -> None:
         """把旧 outline_mode 迁移到 outline_layers。"""
@@ -547,7 +550,7 @@ class ProjectDB:
                 layers = {"L1": True, "L2": True, "L3": True}
             self.update_project(outline_layers=json.dumps(layers, ensure_ascii=False))
         except Exception:
-            pass
+            logger.exception("Outline layers migration failed")
 
     def _migrate_outline_layers_run(self) -> None:
         pass  # placeholder, real impl below
@@ -600,7 +603,9 @@ class ProjectDB:
                     if isinstance(preset, dict) and "api_key" in preset:
                         preset["api_key"] = _decrypt_api_key(preset["api_key"])
                     info[k] = preset
-                except Exception: info[k] = {}
+                except Exception:
+                    logger.warning("Failed to parse preset JSON for %s field %s", self.project_name, k)
+                    info[k] = {}
             else:
                 info[k] = {}
         return info
@@ -624,7 +629,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"[DB] update_project error: {e}")
+            logger.exception("update_project failed for %s", self.project_name)
             return False
 
     def set_stage(self, stage: str) -> bool:
@@ -730,7 +735,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"[DB] upsert_chapter error: {e}")
+            logger.exception("upsert_chapter failed for %s chapter %d", self.project_name, chapter_index)
             return False
 
     def update_chapter_status(self, chapter_index: int, status: str) -> bool:
@@ -744,6 +749,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception:
+            logger.exception("update_chapter_status failed for %s chapter %d", self.project_name, chapter_index)
             return False
 
     def delete_chapter(self, chapter_index: int) -> bool:
@@ -761,6 +767,7 @@ class ProjectDB:
                 os.remove(path)
             return True
         except Exception:
+            logger.exception("delete_chapter failed for %s chapter %d", self.project_name, chapter_index)
             return False
 
     def get_chapter_count(self) -> int:
@@ -815,7 +822,7 @@ class ProjectDB:
             self.conn.commit()
             return cur.lastrowid
         except Exception as e:
-            print(f"[DB] add_memory error: {e}")
+            logger.exception("add_memory failed for %s", self.project_name)
             return 0
 
     def clear_memory_type(self, mem_type: str) -> bool:
@@ -829,6 +836,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception:
+            logger.exception("clear_memory_type failed for %s type=%s", self.project_name, mem_type)
             return False
 
     # ---------------- 对话 CRUD ----------------
@@ -854,7 +862,7 @@ class ProjectDB:
             self.conn.commit()
             return cur.lastrowid
         except Exception as e:
-            print(f"[DB] add_chat error: {e}")
+            logger.exception("add_chat failed for %s", self.project_name)
             return 0
 
     def clear_chat(self) -> bool:
@@ -865,6 +873,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception:
+            logger.exception("clear_chat failed for %s", self.project_name)
             return False
 
     # ---------------- 阶段运行记录 ----------------
@@ -881,7 +890,7 @@ class ProjectDB:
             self.set_stage(stage)
             return cur.lastrowid
         except Exception as e:
-            print(f"[DB] start_stage_run error: {e}")
+            logger.exception("start_stage_run failed for %s stage=%s", self.project_name, stage)
             return 0
 
     def finish_stage_run(self, stage: str, status: str = "completed", message: str = "") -> bool:
@@ -895,6 +904,7 @@ class ProjectDB:
             self.conn.commit()
             return True
         except Exception:
+            logger.exception("finish_stage_run failed for %s stage=%s", self.project_name, stage)
             return False
 
     def list_stage_runs(self) -> List[Dict]:
@@ -975,7 +985,7 @@ class ProjectDB:
         try:
             self.conn.close()
         except Exception:
-            pass
+            logger.exception("Failed to close DB connection for %s", self.project_name)
 
 
 # ============================================================
@@ -1011,6 +1021,7 @@ def list_all_projects() -> List[Dict]:
             })
         except Exception:
             # 还没初始化的文件夹
+            logger.warning("Failed to read project: %s", name)
             result.append({
                 "name": name, "title": name, "genre": "",
                 "total_chapters": 0, "current_stage": "outline",
@@ -1070,7 +1081,7 @@ def delete_project(name: str) -> bool:
             if attempt < 4:
                 time.sleep(0.3)
             else:
-                print(f"[DB] delete_project error after retries: {e}")
+                logger.exception("delete_project failed after retries: %s", name)
                 # 最后一次尝试：逐个删除文件，跳过被锁定的
                 try:
                     for root, dirs, files in os.walk(p, topdown=False):
@@ -1092,4 +1103,5 @@ def delete_project(name: str) -> bool:
                         pass
                     return not os.path.exists(p)
                 except Exception:
+                    logger.exception("delete_project final cleanup failed: %s", name)
                     return False

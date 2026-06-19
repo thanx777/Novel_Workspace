@@ -10,6 +10,7 @@ v2 项目管理端点 — /api/v2/projects/{project_name}/...
 import os
 import re
 import time
+import logging
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Request, Depends
@@ -21,6 +22,8 @@ from project_db import (
     ProjectDB, delete_project, get_project_dir, get_project_file,
     write_file_safe,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["v2-projects"])
 
@@ -55,6 +58,7 @@ def v2_delete_project(request: Request, project_name: str, user=Depends(require_
         ok = delete_project(project_name)
         return {"success": ok, "name": project_name}
     except Exception as e:
+        logger.exception("v2_delete_project failed: %s", project_name)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -227,6 +231,7 @@ def v2_confirm_outline(request: Request, project_name: str, user=Depends(require
         db.close()
         return {"success": True, "stage": "writing", "project": data}
     except Exception as e:
+        logger.exception("v2_confirm_outline failed: %s", project_name)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -255,6 +260,7 @@ def v2_confirm_writing(request: Request, project_name: str, user=Depends(require
         db.close()
         return {"success": True, "stage": "review", "project": data}
     except Exception as e:
+        logger.exception("v2_confirm_writing failed: %s", project_name)
         raise HTTPException(status_code=500, detail=str(e))
 
 

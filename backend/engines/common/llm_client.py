@@ -4,10 +4,13 @@
 """
 
 import asyncio
+import logging
 import httpx
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -118,6 +121,8 @@ async def call_llm(
     if not base_url or not model:
         raise LLMConfigError("Base URL 或模型名未配置")
 
+    logger.info("LLM request: model=%s", model)
+
     last_error: LLMError = LLMError("未知错误")
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -186,6 +191,7 @@ async def call_llm(
 
             if not full_content.strip():
                 raise LLMEmptyResponseError("模型返回为空，可能是当前模型不支持该请求格式")
+            logger.debug("LLM response: model=%s tokens=%s", model, getattr(response, 'usage', 'N/A'))
             return full_content
         except LLMError:
             raise
@@ -193,6 +199,7 @@ async def call_llm(
             error_msg = str(e)
             # 判断是否可重试
             if attempt < _MAX_RETRIES and _is_retryable_error(error_msg):
+                logger.warning("LLM retry %d/%d: %s", attempt + 1, _MAX_RETRIES, error_msg)
                 if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
                     last_error = LLMTimeoutError(error_msg)
                 elif "429" in error_msg or "rate" in error_msg.lower():
@@ -217,6 +224,7 @@ async def call_llm(
             raise LLMError(error_msg[:300])
 
     # 所有重试都失败
+    logger.error("LLM call failed after %d retries: %s", _MAX_RETRIES, last_error.message[:300])
     raise LLMError(f"重试 {_MAX_RETRIES} 次后仍失败: {last_error.message[:300]}")
 
 

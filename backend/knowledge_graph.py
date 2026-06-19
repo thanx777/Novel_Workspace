@@ -9,10 +9,13 @@
 """
 import os
 import json
+import logging
 import re
 import sqlite3
 import time
 from typing import Dict, List, Optional, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -202,6 +205,7 @@ class KnowledgeGraph:
             with open(self.graph_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
+            logger.exception("KG JSON migration: failed to read %s", self.graph_path)
             return
 
         conn = self._get_conn()
@@ -224,6 +228,7 @@ class KnowledgeGraph:
             conn.commit()
             self._use_sqlite = True
         except Exception:
+            logger.exception("KG JSON→SQLite migration failed for %s", self.project_dir)
             conn.rollback()
         finally:
             conn.close()
@@ -273,6 +278,7 @@ class KnowledgeGraph:
             conn.commit()
             return True
         except Exception:
+            logger.exception("KG SQLite save failed for %s", self.project_dir)
             conn.rollback()
             return False
         finally:
@@ -356,6 +362,7 @@ class KnowledgeGraph:
             self._loaded = True
             return True
         except Exception:
+            logger.exception("KG SQLite load failed for %s", self.project_dir)
             self.nodes = {}
             self.edges = {}
             self._loaded = True

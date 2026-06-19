@@ -8,6 +8,17 @@ sub-modules.
 import os
 import logging
 
+# ── Logging 配置（全局一次）──────────────────────────────────────────
+os.makedirs('logs', exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('logs/novel_workspace.log', encoding='utf-8'),
+    ]
+)
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
