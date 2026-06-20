@@ -198,7 +198,7 @@ class OutlineEngine(BaseEngine):
             md_text = self._placeholder_outline(layer)
         else:
             try:
-                md_text = await self.llm.call_strict("writer", system_prompt, user_prompt)
+                md_text = await self.llm.call_strict("writer", system_prompt, user_prompt, max_tokens=16000)
             except LLMError as e:
                 logger.error("L1 generation failed: %s", e)
                 self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，{layer} 使用占位内容"})
@@ -678,13 +678,13 @@ class OutlineEngine(BaseEngine):
 
         user_prompt = f"请为第{vol_num}卷「{vol_name}」的第{start_ch}章到第{end_ch}章生成详细细纲。本卷定位：{vol_position}；核心冲突：{vol_conflict}。"
 
-        # 调用 LLM
+        # 调用 LLM（大纲生成需要更多输出 token）
         if not self.llm.has_valid_config("writer"):
             self._emit({"status": "warning", "message": "未配置 LLM，跳过章节细纲生成"})
             return None
 
         try:
-            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt, max_tokens=16000)
         except LLMError as e:
             self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，跳过本批次章节细纲生成"})
             return None
@@ -989,8 +989,11 @@ class OutlineEngine(BaseEngine):
 
     def _extract_chapters_from_batch(self, batch_md: str, start_ch: int, end_ch: int) -> str:
         """从分批生成结果中提取章节细纲部分。"""
-        # 找到第一个 "### 第N章" 的位置
-        first_match = re.search(r"###\s*第\s*\d+\s*章", batch_md)
+        # 找到第一个章节标题的位置（兼容多种格式）
+        first_match = re.search(r"(?:#{1,4}\s*)?第\s*\d+\s*章", batch_md)
+        if not first_match:
+            cn_num = "一二三四五六七八九十百千万零"
+            first_match = re.search(rf"(?:#{1,4}\s*)?第[{cn_num}]+章", batch_md)
         if first_match:
             return batch_md[first_match.start():]
         return batch_md
@@ -999,7 +1002,13 @@ class OutlineEngine(BaseEngine):
         """统计 markdown 中实际生成的章节数。"""
         if not md_text:
             return 0
-        chapters = re.findall(r"###\s*第\s*\d+\s*章", md_text)
+        # 匹配多种格式：### 第N章 / ## 第N章 / 第N章 / 第NNN章（含中文数字）
+        chapters = re.findall(r"(?:#{1,4}\s*)?第\s*\d+\s*章", md_text)
+        if chapters:
+            return len(chapters)
+        # 兜底：匹配中文数字章节号
+        cn_num = "一二三四五六七八九十百千万零"
+        chapters = re.findall(rf"(?:#{1,4}\s*)?第[{cn_num}]+章", md_text)
         return len(chapters)
 
     async def _supplement_chapters(self, vol_num: int, vol_name: str,
@@ -1038,7 +1047,7 @@ class OutlineEngine(BaseEngine):
             return ""
 
         try:
-            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt)
+            batch_md = await self.llm.call_strict("writer", system_prompt, user_prompt, max_tokens=16000)
         except LLMError as e:
             self._emit({"status": "warning", "message": f"LLM 调用失败: {e}，补齐章节失败"})
             return ""

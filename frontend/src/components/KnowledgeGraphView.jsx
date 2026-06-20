@@ -219,7 +219,7 @@ export default function KnowledgeGraphView({ projectName }) {
             <ForceGraph nodes={filtered.nodes} edges={filtered.edges}
               selected={selectedNode} onSelect={onSelect}
               hovered={hovered} setHovered={setHovered}
-              neighbors={neighbors} />
+              neighbors={neighbors} t={t} language={language} />
           ) : view === "char" ? (
             <CharacterView nodes={filtered.nodes} edges={filtered.edges} onSelect={onSelect} />
           ) : view === "time" ? (
@@ -249,7 +249,7 @@ export default function KnowledgeGraphView({ projectName }) {
 // ============================================================
 // 关系网视图（分层聚合 + 力导向图 + 平移/缩放/拖动）
 // ============================================================
-function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, neighbors }) {
+function ForceGraph({ nodes, edges, selected, onSelect, hovered, setHovered, neighbors, t, language }) {
   const svgRef = useRef(null)
   const [dims, setDims] = useState({ w: 800, h: 600 })
   const [positions, setPositions] = useState({})

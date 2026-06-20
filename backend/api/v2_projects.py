@@ -314,7 +314,7 @@ def v2_get_project_file(request: Request, project_name: str, file_path: str):
         project_dir = get_project_dir(project_name)
         full_path = safe_join(project_dir, file_path)
         if not os.path.exists(full_path):
-            raise HTTPException(status_code=404, detail="File not found")
+            return {"path": file_path, "content": ""}
         with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
         if file_path.startswith("chapters/") and file_path.endswith(".txt"):

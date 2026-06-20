@@ -155,6 +155,26 @@ class WritingEngine(BaseEngine):
 
     # ---- MWR 实现 ----
 
+    # ── 程序化扣分表 ──
+    # A类：幻觉/设定类（严格，上限5.0分）
+    _DEDUCTION_HALLUCINATION = {
+        "hallucination_char": {"penalty_per": 1.5},    # 幻觉角色，-1.5/个
+        "foreshadow_error": {"penalty_per": 1.0},       # 伏笔ID错误，-1.0/个
+        "name_mismatch": {"penalty_per": 1.0},           # 人名与KG不一致，-1.0/个
+    }
+    _DEDUCTION_HALLUCINATION_CAP = 5.0
+
+    # B类：词语/符号/格式类（宽容，上限3.5分）
+    _DEDUCTION_STYLE = {
+        "ellipsis": {"penalty_per": 0.2, "threshold": 5},       # 省略号>5个，-0.2/个超出
+        "word_count_severe": {"penalty": 1.5, "threshold": 1000}, # 字数<1000，-1.5
+        "word_count_low": {"penalty": 0.5, "threshold": 2000},    # 字数1000-2000，-0.5
+        "ai_phrase": {"penalty_per": 0.3},                        # AI短语黑名单，-0.3/个
+        "fatigue_word": {"penalty_per": 0.2, "threshold": 3},     # 疲劳词≥3次，-0.2/个
+        "said_overuse": {"penalty_per": 0.15, "threshold": 3},    # "说道">3次，-0.15/个超出
+    }
+    _DEDUCTION_STYLE_CAP = 3.5
+
     # 全局性问题关键词 — 这些问题无法通过段落级编辑修复，需要全文润色
     _GLOBAL_ISSUE_KEYWORDS = [
         "省略号过多", "省略号过多",
@@ -458,12 +478,13 @@ class WritingEngine(BaseEngine):
         """写新章节。"""
         self._emit({"status": "chapter_writing", "chapter": ch})
 
-        # 重写奖励：重写通常意味着大幅改进，给+1.0奖励
-        # 不重置 base_score，保持评分锚定稳定
+        # 重写是全新内容，重置评分锚定让首次评审重新打分
+        # 重写后质量可能大幅变化，沿用旧base_score不准确
         if self._base_score is not None:
-            self._incremental_score += 1.0  # 重写奖励
             self._emit({"status": "info", "message":
-                f"重写奖励 +1.0, 累计加减{self._incremental_score:+.1f}"})
+                f"重写重置评分锚定 (旧base_score={self._base_score:.1f})"})
+            self._base_score = None
+            self._incremental_score = 0.0
 
         # 构建上下文 — KG 为主，memory 为辅，体裁+反幻觉为增强
         outline = self._read_outline_summary()
@@ -719,8 +740,8 @@ class WritingEngine(BaseEngine):
         # 清洗
         content = self._clean_fs_ids(content)
 
-        # 程序化替换多余省略号
-        content = self._reduce_ellipsis(content)
+        # 多层后处理流水线（省略号+对话标签+AI短语+句长波动）
+        content = self._post_process(content)
 
         # 去除完全重复的段落
         content = self._deduplicate_paragraphs(content)
@@ -1007,6 +1028,165 @@ class WritingEngine(BaseEngine):
 
         return is_effective
 
+    def _programmatic_score(self, content: str, hallucination_warnings: list,
+                             fatigue_hits: list, word_count: int) -> tuple:
+        """计算程序化扣分明细（分类+上限）。
+
+        A类：幻觉/设定类（严格，上限5.0分）
+        B类：词语/符号/格式类（宽容，上限3.5分）
+
+        Returns: (hallucination_deduction, style_deduction, deduction_details)
+        """
+        h_details = []
+        h_total = 0.0
+        s_details = []
+        s_total = 0.0
+
+        # ── A类：幻觉/设定 ──
+        for w in hallucination_warnings:
+            if "疑似幻觉角色" in w:
+                d = self._DEDUCTION_HALLUCINATION["hallucination_char"]["penalty_per"]
+                h_details.append(f"幻觉角色(-{d:.1f})")
+                h_total += d
+            elif "未知伏笔" in w:
+                d = self._DEDUCTION_HALLUCINATION["foreshadow_error"]["penalty_per"]
+                h_details.append(f"伏笔ID错误(-{d:.1f})")
+                h_total += d
+
+        # A类上限
+        if h_total > self._DEDUCTION_HALLUCINATION_CAP:
+            h_total = self._DEDUCTION_HALLUCINATION_CAP
+
+        # ── B类：词语/符号/格式 ──
+        # 省略号
+        ellipsis_count = len(re.findall(r'……|\.\.\.\.\.\.', content))
+        threshold = self._DEDUCTION_STYLE["ellipsis"]["threshold"]
+        if ellipsis_count > threshold:
+            excess = ellipsis_count - threshold
+            d = excess * self._DEDUCTION_STYLE["ellipsis"]["penalty_per"]
+            s_details.append(f"省略号超出{excess}个(-{d:.1f})")
+            s_total += d
+
+        # 字数
+        if word_count < self._DEDUCTION_STYLE["word_count_severe"]["threshold"]:
+            d = self._DEDUCTION_STYLE["word_count_severe"]["penalty"]
+            s_details.append(f"字数严重不足{word_count}字(-{d:.1f})")
+            s_total += d
+        elif word_count < self._DEDUCTION_STYLE["word_count_low"]["threshold"]:
+            d = self._DEDUCTION_STYLE["word_count_low"]["penalty"]
+            s_details.append(f"字数偏少{word_count}字(-{d:.1f})")
+            s_total += d
+
+        # AI短语
+        for phrase in self._AI_PHRASE_BLACKLIST:
+            if phrase in content:
+                d = self._DEDUCTION_STYLE["ai_phrase"]["penalty_per"]
+                s_details.append(f"AI短语'{phrase}'(-{d:.1f})")
+                s_total += d
+
+        # 疲劳词
+        for hit in fatigue_hits:
+            if hit.get("count", 0) >= self._DEDUCTION_STYLE["fatigue_word"]["threshold"]:
+                d = self._DEDUCTION_STYLE["fatigue_word"]["penalty_per"]
+                s_details.append(f"疲劳词'{hit.get('word', '?')}'{hit['count']}次(-{d:.1f})")
+                s_total += d
+
+        # "说道"滥用
+        said_count = len(re.findall(r'说道[：:]?', content))
+        threshold = self._DEDUCTION_STYLE["said_overuse"]["threshold"]
+        if said_count > threshold:
+            excess = said_count - threshold
+            d = excess * self._DEDUCTION_STYLE["said_overuse"]["penalty_per"]
+            s_details.append(f"'说道'超出{excess}次(-{d:.1f})")
+            s_total += d
+
+        # B类上限
+        if s_total > self._DEDUCTION_STYLE_CAP:
+            s_total = self._DEDUCTION_STYLE_CAP
+
+        return h_total, s_total, h_details + s_details
+
+    def _programmatic_verify_fixes(self, content: str, previous_issues: list) -> tuple:
+        """程序化验证可验证的问题是否修复。
+
+        省略号、字数、AI短语、疲劳词、标题等问题可以用程序确定性验证，
+        不需要依赖LLM判断（LLM对这类问题判断不可靠）。
+
+        Returns: (programmatically_fixed, remaining_issues)
+        - programmatically_fixed: 程序化确认已修复的问题列表
+        - remaining_issues: 无法程序化验证、需要LLM判断的问题列表
+        """
+        programmatically_fixed = []
+        remaining_issues = []
+
+        for iss in previous_issues:
+            # 去掉 [未修复]/[新发现] 标签后判断
+            clean_iss = re.sub(r'\s*\[(?:未修复|新发现)\]', '', iss)
+            fixed = False
+
+            # 省略号问题：检查当前省略号数量
+            if "省略号" in clean_iss:
+                ellipsis_count = len(re.findall(r'……|\.\.\.\.\.\.', content))
+                if ellipsis_count <= 5:
+                    fixed = True
+                    self._emit({"status": "info", "message":
+                        f"程序化验证: 省略号已减少到{ellipsis_count}个，确认修复"})
+
+            # 字数问题：检查当前字数
+            elif any(kw in clean_iss for kw in ["字数过少", "字数不足", "偏少", "过少"]):
+                word_count = len(re.findall(r'[\u4e00-\u9fff]', content))
+                if word_count >= 1000:
+                    fixed = True
+                    self._emit({"status": "info", "message":
+                        f"程序化验证: 字数已达{word_count}，确认修复"})
+
+            # AI短语问题：检查黑名单短语是否还存在
+            elif any(phrase in clean_iss for phrase in self._AI_PHRASE_BLACKLIST.keys()):
+                found_phrases = [phrase for phrase in self._AI_PHRASE_BLACKLIST.keys()
+                                 if phrase in content]
+                if not found_phrases:
+                    fixed = True
+                    self._emit({"status": "info", "message":
+                        f"程序化验证: AI短语已清除，确认修复"})
+
+            # 疲劳词问题：检查该词出现次数
+            elif "疲劳词" in clean_iss:
+                m = re.search(r"疲劳词['''](.+?)[''']", clean_iss)
+                if m:
+                    word = m.group(1)
+                    if content.count(word) < 3:
+                        fixed = True
+                        self._emit({"status": "info", "message":
+                            f"程序化验证: 疲劳词'{word}'出现{content.count(word)}次<3，确认修复"})
+
+            # 缺少章节标题
+            elif "缺少章节标题" in clean_iss or "章节标题" in clean_iss:
+                ch = self._current_chapter
+                if re.search(rf'第\s*{ch}\s*[章节]', content.strip()[:200]):
+                    fixed = True
+                    self._emit({"status": "info", "message":
+                        "程序化验证: 章节标题已存在，确认修复"})
+
+            # "说道"滥用：检查出现次数
+            elif "说道" in clean_iss and ("滥用" in clean_iss or "过多" in clean_iss):
+                said_count = len(re.findall(r'说道[：:]?', content))
+                if said_count <= 3:
+                    fixed = True
+                    self._emit({"status": "info", "message":
+                        f"程序化验证: '说道'出现{said_count}次≤3，确认修复"})
+
+            if fixed:
+                programmatically_fixed.append(iss)
+            else:
+                remaining_issues.append(iss)
+
+        if programmatically_fixed:
+            self._emit({"status": "info", "message":
+                f"程序化验证: {len(programmatically_fixed)}个问题已确认修复，"
+                f"{len(remaining_issues)}个问题需LLM判断"})
+
+        return programmatically_fixed, remaining_issues
+
     def _infer_problem_paragraphs(self, paragraphs: list, focus_issues: list) -> set:
         """根据审查反馈推断需要修改的段落编号。
 
@@ -1154,39 +1334,53 @@ class WritingEngine(BaseEngine):
                 score = 0.0
                 issues.append(f"内容过少({word_count}字)，跳过AI评审")
             elif self._base_score is None:
-                # R1 或重写后首次评审：完整AI评审，锚定 base_score
-                score, ai_issues, ai_suggestions = await self._ai_review(ch, content)
+                # R1: 程序化评分 + LLM修正
+                h_deduction, s_deduction, prog_details = self._programmatic_score(
+                    content, hallucination_warnings, fatigue_hits, word_count)
+                adjustment, ai_issues, ai_suggestions = await self._ai_review(ch, content)
                 if "AI 评审解析失败" in ai_issues:
-                    # 解析失败，给默认分
-                    score = 5.0
-                    ai_issues = ["AI评审解析失败，使用默认评分5.0"]
+                    adjustment = 0.0
+                    ai_issues = ["AI评审解析失败，使用默认修正值0"]
+
+                total_deduction = h_deduction + s_deduction
+                score = max(0.0, min(10.0, 10.0 - total_deduction + adjustment))
                 self._base_score = score
                 self._incremental_score = 0.0
                 self._last_valid_ai_score = score
+
+                detail_str = " ".join(prog_details) if prog_details else "无"
                 self._emit({"status": "info", "message":
-                    f"首次评审锚定 base_score={score:.1f}"})
+                    f"首次评分: 10.0 - 设定类{h_deduction:.1f} - 词语类{s_deduction:.1f}"
+                    f"({detail_str}) + LLM修正{adjustment:+.1f} = {score:.1f}"})
                 issues.extend(ai_issues)
             else:
-                # R2+ 增量评审：只判断问题修复/新增，不打总分
+                # R2+ 增量评审：程序化验证 + LLM增量评审
                 prev_issues_list = list(self._previous_issues)
-                fixed_issues, new_issues, ai_suggestions = await self._ai_review_incremental(
-                    ch, content, prev_issues_list)
 
-                # 验证 fixed_issues 确实是上一轮问题的子集
-                actually_fixed = [iss for iss in fixed_issues
-                                  if any(iss in prev or prev in iss
-                                         for prev in prev_issues_list)]
+                # 第一步：程序化验证可验证的问题（省略号/字数/AI短语/疲劳词/标题等）
+                prog_fixed, remaining_issues = self._programmatic_verify_fixes(
+                    content, prev_issues_list)
 
-                # 增量加减分：修复+1.0/个，新增-0.25/个（温和扣分，避免分数暴跌）
-                fix_bonus = len(actually_fixed) * 1.0
+                # 第二步：LLM增量评审（只看无法程序化验证的剩余问题）
+                if remaining_issues:
+                    fixed_issues, new_issues, ai_suggestions = await self._ai_review_incremental(
+                        ch, content, remaining_issues)
+                else:
+                    fixed_issues, new_issues, ai_suggestions = [], [], []
+
+                # 第三步：合并修复结果
+                all_fixed = prog_fixed + fixed_issues
+
+                # 增量加减分：修复+1.0/个，新增-0.25/个
+                fix_bonus = len(all_fixed) * 1.0
                 new_penalty = len(new_issues) * 0.25
                 self._incremental_score += fix_bonus - new_penalty
                 score = max(0.0, min(10.0, self._base_score + self._incremental_score))
                 self._last_valid_ai_score = score
 
                 self._emit({"status": "info", "message":
-                    f"增量评审: 修复{len(actually_fixed)}个(+{fix_bonus:.1f}), "
-                    f"新增{len(new_issues)}个(-{new_penalty:.1f}), "
+                    f"增量评审: 程序化修复{len(prog_fixed)}个 + LLM修复{len(fixed_issues)}个"
+                    f"(+{fix_bonus:.1f}), 新增{len(new_issues)}个(-{new_penalty:.1f}), "
                     f"累计加减{self._incremental_score:+.1f}, "
                     f"评分 {self._base_score:.1f}{self._incremental_score:+.1f}={score:.1f}"})
 
@@ -1242,7 +1436,11 @@ class WritingEngine(BaseEngine):
         )
 
     async def _ai_review(self, ch: int, content: str) -> tuple:
-        """AI 评审章节（注入体裁审查维度）。"""
+        """AI 评审章节（注入体裁审查维度）。
+
+        返回 (adjustment, issues, suggestions)。
+        adjustment: LLM修正值 -3~+1，程序化检查已自动扣分，LLM只评估主观质量。
+        """
         system_prompt = self.prompts["reviewer_writing"]
 
         # 注入 KG 上下文
@@ -1261,12 +1459,23 @@ class WritingEngine(BaseEngine):
             resp = await self.llm.call_strict("reviewer", system_prompt, user_prompt)
             data = extract_json_from_response(resp)
             if data:
-                return float(data.get("score", 5.0)), data.get("issues", []), data.get("suggestions", [])
+                # 优先读取 adjustment，兼容旧格式 score
+                if "adjustment" in data:
+                    adj = float(data["adjustment"])
+                    adj = max(-3.0, min(1.0, adj))  # 限制范围 -3~+1
+                elif "score" in data:
+                    # 兼容旧prompt：score 0-10 映射到 adjustment -3~+1
+                    old_score = float(data["score"])
+                    adj = (old_score - 7.0) * 0.5  # 7分→0, 10分→+1.5→+1, 4分→-1.5, 1分→-3
+                    adj = max(-3.0, min(1.0, adj))
+                else:
+                    adj = 0.0
+                return adj, data.get("issues", []), data.get("suggestions", [])
         except LLMError as e:
             self._emit({"status": "warning", "message": f"AI 评审 LLM 调用失败: {e}"})
         except Exception as e:
             self._emit({"status": "warning", "message": f"AI 评审解析异常: {e}"})
-        return 5.0, ["AI 评审解析失败"], []
+        return 0.0, ["AI 评审解析失败"], []
 
     async def _ai_review_incremental(self, ch: int, content: str,
                                       previous_issues: list) -> tuple:
