@@ -39,6 +39,8 @@ class WritingEngine(BaseEngine):
         self._last_valid_ai_score = None  # 上一次有效的AI评审评分
         self._previous_issues = set()  # 上一轮评审的问题集合（用于问题继承机制）
         self._ineffective_polish_count = 0  # 连续无效润色次数
+        self._base_score = None  # R1首次评审锚定分数
+        self._incremental_score = 0.0  # R2+累计加减分
 
     # ---- 文件路径 ----
 
@@ -455,6 +457,13 @@ class WritingEngine(BaseEngine):
     async def _write_chapter(self, ch: int, task: MWRTask) -> Draft:
         """写新章节。"""
         self._emit({"status": "chapter_writing", "chapter": ch})
+
+        # 重写奖励：重写通常意味着大幅改进，给+1.0奖励
+        # 不重置 base_score，保持评分锚定稳定
+        if self._base_score is not None:
+            self._incremental_score += 1.0  # 重写奖励
+            self._emit({"status": "info", "message":
+                f"重写奖励 +1.0, 累计加减{self._incremental_score:+.1f}"})
 
         # 构建上下文 — KG 为主，memory 为辅，体裁+反幻觉为增强
         outline = self._read_outline_summary()
@@ -1137,29 +1146,53 @@ class WritingEngine(BaseEngine):
         score = 0.0
         suggestions = []
         ai_suggestions = []
-        is_polish_action = draft.metadata.get("action") == "polish"
+        is_write_action = draft.metadata.get("action") == "write"
 
         if self.llm.has_valid_config("reviewer"):
-            # 内容过少时跳过AI评审，直接给0分，避免浪费token和复用历史高分
+            # 内容过少时跳过AI评审，直接给0分
             if word_count < 100:
                 score = 0.0
                 issues.append(f"内容过少({word_count}字)，跳过AI评审")
-            else:
+            elif self._base_score is None:
+                # R1 或重写后首次评审：完整AI评审，锚定 base_score
                 score, ai_issues, ai_suggestions = await self._ai_review(ch, content)
-                # 解析失败时复用上次有效评分，避免评分突降导致无效润色
-                if "AI 评审解析失败" in ai_issues and self._last_valid_ai_score is not None:
-                    score = self._last_valid_ai_score
-                    ai_issues = [f"AI评审解析失败，复用上次评分{score}"]
-                elif "AI 评审解析失败" not in ai_issues:
-                    # 润色后评分波动保护：如果润色改了内容但AI给了更低分，取较高分
-                    # 避免AI随机性导致润色反而分数下降
-                    if is_polish_action and self._last_valid_ai_score is not None:
-                        if score < self._last_valid_ai_score:
-                            self._emit({"status": "info", "message":
-                                f"润色后AI评分{score:.1f}低于上次{self._last_valid_ai_score:.1f}，取较高分"})
-                            score = self._last_valid_ai_score
-                    self._last_valid_ai_score = score
+                if "AI 评审解析失败" in ai_issues:
+                    # 解析失败，给默认分
+                    score = 5.0
+                    ai_issues = ["AI评审解析失败，使用默认评分5.0"]
+                self._base_score = score
+                self._incremental_score = 0.0
+                self._last_valid_ai_score = score
+                self._emit({"status": "info", "message":
+                    f"首次评审锚定 base_score={score:.1f}"})
                 issues.extend(ai_issues)
+            else:
+                # R2+ 增量评审：只判断问题修复/新增，不打总分
+                prev_issues_list = list(self._previous_issues)
+                fixed_issues, new_issues, ai_suggestions = await self._ai_review_incremental(
+                    ch, content, prev_issues_list)
+
+                # 验证 fixed_issues 确实是上一轮问题的子集
+                actually_fixed = [iss for iss in fixed_issues
+                                  if any(iss in prev or prev in iss
+                                         for prev in prev_issues_list)]
+
+                # 增量加减分：修复+1.0/个，新增-0.25/个（温和扣分，避免分数暴跌）
+                fix_bonus = len(actually_fixed) * 1.0
+                new_penalty = len(new_issues) * 0.25
+                self._incremental_score += fix_bonus - new_penalty
+                score = max(0.0, min(10.0, self._base_score + self._incremental_score))
+                self._last_valid_ai_score = score
+
+                self._emit({"status": "info", "message":
+                    f"增量评审: 修复{len(actually_fixed)}个(+{fix_bonus:.1f}), "
+                    f"新增{len(new_issues)}个(-{new_penalty:.1f}), "
+                    f"累计加减{self._incremental_score:+.1f}, "
+                    f"评分 {self._base_score:.1f}{self._incremental_score:+.1f}={score:.1f}"})
+
+                # 新增的AI问题加入issues
+                issues.extend(new_issues)
+
             suggestions.extend(ai_suggestions)
         else:
             score = 6.0 if len(hallucination_warnings) == 0 else 3.0
@@ -1171,10 +1204,6 @@ class WritingEngine(BaseEngine):
         fresh_issues = [iss for iss in issues if iss not in self._previous_issues]
 
         # all_required_passed 只看 persistent_issues 中的非全局问题 + 硬性底线
-        # 全局性 persistent_issues（省略号/AI痕迹等）不阻塞通过：
-        #   - 这些问题可能已超出 LLM 修复能力
-        #   - 段落润色修不了全局问题，全文润色也未必能修
-        #   - 不应因一个顽固全局问题耗尽所有润色次数
         blocking_persistent = [
             iss for iss in persistent_issues
             if not any(kw in iss for kw in self._GLOBAL_ISSUE_KEYWORDS)
@@ -1188,10 +1217,6 @@ class WritingEngine(BaseEngine):
             and word_count >= 1000
             and format_result.get("passed", True)
         )
-
-        # 评分调整：AI评分已包含问题惩罚，不再对persistent_issues额外扣分
-        # （之前额外扣0.5分/个导致双重惩罚，分数越润越低形成负向螺旋）
-        # persistent_issues 只影响 all_required_passed，不影响分数
 
         # 更新 _previous_issues：本轮所有问题都成为下轮的"老问题"
         self._previous_issues = current_issues_set
@@ -1242,6 +1267,44 @@ class WritingEngine(BaseEngine):
         except Exception as e:
             self._emit({"status": "warning", "message": f"AI 评审解析异常: {e}"})
         return 5.0, ["AI 评审解析失败"], []
+
+    async def _ai_review_incremental(self, ch: int, content: str,
+                                      previous_issues: list) -> tuple:
+        """增量评审：只判断问题修复/新增，不打总分。
+
+        返回 (fixed_issues, new_issues, suggestions)。
+        fixed_issues: 上一轮问题中已修复的
+        new_issues: 本轮新发现的问题
+        """
+        from ..common.prompts import REVIEWER_SYSTEM_INCREMENTAL
+
+        issues_text = "\n".join(f"- {iss}" for iss in previous_issues) if previous_issues else "（无）"
+        system_prompt = REVIEWER_SYSTEM_INCREMENTAL.format(previous_issues=issues_text)
+
+        # 注入 KG 上下文
+        kg_ctx = self.kg_adapter.get_chapter_context(ch)
+        if kg_ctx:
+            system_prompt += f"\n\n{kg_ctx}"
+
+        # 注入体裁审查维度
+        genre_reviewer = self.genre_adapter.get_reviewer_injection(stage="writing")
+        if genre_reviewer:
+            system_prompt += f"\n\n{genre_reviewer}"
+
+        user_prompt = f"请增量审校第{ch}章：\n\n{content}"
+
+        try:
+            resp = await self.llm.call_strict("reviewer", system_prompt, user_prompt)
+            data = extract_json_from_response(resp)
+            if data:
+                return (data.get("fixed_issues", []),
+                        data.get("new_issues", []),
+                        data.get("suggestions", []))
+        except LLMError as e:
+            self._emit({"status": "warning", "message": f"AI增量评审LLM调用失败: {e}"})
+        except Exception as e:
+            self._emit({"status": "warning", "message": f"AI增量评审解析异常: {e}"})
+        return [], ["AI增量评审解析失败"], []
 
     def manager_final_decision(self) -> FinalDecision:
         writing_state = self.state.data.get("writing", {})
@@ -1345,6 +1408,8 @@ class WritingEngine(BaseEngine):
         self._last_valid_ai_score = None
         self._previous_issues = set()  # 每章重置问题继承
         self._ineffective_polish_count = 0  # 每章重置无效润色计数
+        self._base_score = None  # 每章重置评分基准
+        self._incremental_score = 0.0
         result = await self.run_mwr_cycle(
             max_rounds=self.mode_config["max_rounds_writing"],
             score_threshold=self.score_threshold,
