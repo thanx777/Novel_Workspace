@@ -2,7 +2,7 @@
 ; 使用方法: 用 Inno Setup Compiler 打开此文件，点击 Build
 
 #define AppName "Novel Workspace"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppPublisher "Novel Workspace"
 #define AppExeName "NovelWorkspace.exe"
 
