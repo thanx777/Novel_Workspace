@@ -140,6 +140,209 @@ class BaseEngine:
         content = re.sub(r"[（(]\s*[）)]", "", content)
         return content
 
+    # 省略号替换标点：按顺序轮换使用
+    # 不用短语替换！短语（如"沉默了片刻"、"深吸了一口气"）本身就是AI痕迹
+    # 用标点替换更自然：逗号=停顿，句号=结束，破折号=转折，感叹号=情绪
+    _ELLIPSIS_REPLACEMENTS = [
+        "，",
+        "——",
+        "。",
+        "！",
+        "，",
+        "——",
+        "。",
+        "！",
+    ]
+
+    def _reduce_ellipsis(self, content: str, max_ellipsis: int = 5) -> str:
+        """程序化替换多余省略号。
+
+        LLM 几乎无法自行减少省略号（日志显示50→43，润色4轮仍不达标），
+        因此必须在写作/润色后程序化处理。
+
+        策略：保留前 max_ellipsis 个省略号，多余的替换为标点。
+        不用短语替换——短语本身就是AI痕迹，会被Reviewer标记。
+        """
+        ellipsis_pattern = re.compile(r'……|\.\.\.\.\.\.')
+        matches = list(ellipsis_pattern.finditer(content))
+
+        if len(matches) <= max_ellipsis:
+            return content
+
+        # 从后往前替换（避免索引漂移），保留前 max_ellipsis 个
+        replace_count = len(matches) - max_ellipsis
+        self._emit({"status": "info", "message":
+            f"省略号{len(matches)}个超过上限{max_ellipsis}，程序化替换{replace_count}个"})
+
+        result = content
+        replacement_idx = 0
+        for match in reversed(matches[max_ellipsis:]):
+            replacement = self._ELLIPSIS_REPLACEMENTS[
+                replacement_idx % len(self._ELLIPSIS_REPLACEMENTS)]
+            result = result[:match.start()] + replacement + result[match.end():]
+            replacement_idx += 1
+
+        return result
+
+    # ─── 多层后处理流水线 ──────────────────────────────────
+    # 专业方法：程序化后处理优先于LLM自我修正
+    # 参考：Sudowrite / NovelAI / AI_NovelGenerator 的最佳实践
+
+    # Layer 2: 对话标签多样化
+    _SAID_VARIANTS = [
+        "道", "沉声道", "冷声道", "低声道", "叹了口气",
+        "反问", "追问", "嘟囔", "嘀咕", "笑道",
+        "苦笑", "厉声道", "轻声道", "嗤笑", "冷哼",
+    ]
+
+    def _diversify_dialogue_tags(self, content: str, max_said: int = 3) -> str:
+        """对话标签多样化：同一章内"说道"出现不超过 max_said 次，超出部分随机替换。
+
+        LLM 倾向于反复使用"说道"，这是最典型的AI痕迹之一。
+        程序化替换比让LLM自己改更可靠。
+        """
+        # 匹配 "X说道" "X说道：" 等模式
+        said_pattern = re.compile(r'说道[：:]?')
+        matches = list(said_pattern.finditer(content))
+
+        if len(matches) <= max_said:
+            return content
+
+        replace_count = len(matches) - max_said
+        self._emit({"status": "info", "message":
+            f"对话标签'说道'出现{len(matches)}次超过上限{max_said}，替换{replace_count}个"})
+
+        import random
+        result = content
+        # 从后往前替换，避免索引漂移
+        for i, match in enumerate(reversed(matches[max_said:])):
+            variant = self._SAID_VARIANTS[random.randint(0, len(self._SAID_VARIANTS) - 1)]
+            # 如果原文是"说道："，替换为"variant："
+            if match.group().endswith('：') or match.group().endswith(':'):
+                variant += '：'
+            result = result[:match.start()] + variant + result[match.end():]
+
+        return result
+
+    # Layer 3: AI高频短语黑名单替换
+    _AI_PHRASE_BLACKLIST = {
+        "心中一震": ["心里咯噔一下", "愣住了", "瞳孔一缩"],
+        "不禁感叹": ["叹了口气", "摇了摇头", "感慨万千"],
+        "与此同时": ["这会儿", "另一边", "就在这时"],
+        "值得注意的是": [],
+        "综上所述": [],
+        "由此可见": [],
+        "颇为": ["挺", "蛮", "相当"],
+        "甚是": ["很", "特别", "非常"],
+        "不禁": ["忍不住", "下意识"],
+        "心中暗道": ["心想", "暗想", "心下思忖"],
+        "嘴角微微上扬": ["嘴角一勾", "笑了", "咧嘴一笑"],
+        "眼中闪过一丝": ["眼里掠过", "目光一闪", "眸光微动"],
+        # LLM 高频生成的省略号替换残留 / 模板短语
+        "沉默了片刻": ["顿了顿", "停了一拍"],
+        "深吸了一口气": ["吸了口气", "长出一口气"],
+    }
+
+    def _replace_ai_phrases(self, content: str) -> str:
+        """AI高频短语黑名单替换。
+
+        这些短语是LLM的"指纹"，人类作者极少使用。
+        程序化替换比让LLM自己避免更可靠。
+        """
+        changes = 0
+        for phrase, replacements in self._AI_PHRASE_BLACKLIST.items():
+            count = content.count(phrase)
+            if count > 0:
+                if replacements:
+                    import random
+                    replacement = replacements[random.randint(0, len(replacements) - 1)]
+                    content = content.replace(phrase, replacement)
+                else:
+                    # 空列表 = 直接删除
+                    content = content.replace(phrase, "")
+                changes += count
+
+        if changes > 0:
+            self._emit({"status": "info", "message": f"替换{changes}个AI高频短语"})
+
+        return content
+
+    # Layer 4: 句长波动注入（burstiness提升）
+    def _inject_sentence_variation(self, content: str) -> str:
+        """句长波动注入：检测连续短句或连续长句，适当合并或拆分。
+
+        AI生成的句子长度趋于均匀（15-25字），人类写作则长短错落。
+        提升burstiness指标可以让文本更像人写的。
+        """
+        # 按段落处理，避免跨段落操作
+        paragraphs = content.split("\n\n")
+        result = []
+
+        for para in paragraphs:
+            if not para.strip():
+                result.append(para)
+                continue
+
+            # 按中文句号/问号/感叹号分句
+            sentences = re.split(r'([。！？])', para)
+            # 重组（保留标点）
+            sent_list = []
+            for i in range(0, len(sentences) - 1, 2):
+                s = sentences[i] + (sentences[i + 1] if i + 1 < len(sentences) else '')
+                if s.strip():
+                    sent_list.append(s)
+            if len(sentences) % 2 == 1 and sentences[-1].strip():
+                sent_list.append(sentences[-1])
+
+            if len(sent_list) < 3:
+                result.append(para)
+                continue
+
+            # 检测连续短句（<8字）超过3个 → 合并为一句
+            merged = []
+            short_run = []
+            for s in sent_list:
+                cn_chars = len(re.findall(r'[\u4e00-\u9fff]', s))
+                if cn_chars < 8:
+                    short_run.append(s)
+                    if len(short_run) >= 3:
+                        # 合并：去掉中间的句号，用逗号连接
+                        merged_sent = short_run[0][:-1] + "，"
+                        for mid in short_run[1:-1]:
+                            merged_sent += mid[:-1] + "，"
+                        merged_sent += short_run[-1]
+                        merged.append(merged_sent)
+                        short_run = []
+                else:
+                    if short_run:
+                        merged.extend(short_run)
+                        short_run = []
+                    merged.append(s)
+            if short_run:
+                merged.extend(short_run)
+
+            result.append("".join(merged))
+
+        return "\n\n".join(result)
+
+    def _post_process(self, content: str) -> str:
+        """多层后处理流水线入口。
+
+        执行顺序：
+        1. 省略号配额管理（_reduce_ellipsis）
+        2. 对话标签多样化（_diversify_dialogue_tags）
+        3. AI高频短语替换（_replace_ai_phrases）
+        4. 句长波动注入（_inject_sentence_variation）
+        5. 去重（_deduplicate_paragraphs，在子类中调用）
+
+        原则：能用规则解决的问题不要交给LLM。
+        """
+        content = self._reduce_ellipsis(content)
+        content = self._diversify_dialogue_tags(content)
+        content = self._replace_ai_phrases(content)
+        content = self._inject_sentence_variation(content)
+        return content
+
     def _read_recent_chapters(self, n: int = 3) -> str:
         """读取最近章节上下文：前2章给结尾摘要，紧邻章给全文以保证完美衔接。"""
         parts = []
@@ -186,7 +389,7 @@ class BaseEngine:
         self._issue_consecutive_counts = {}
         best_score = 0.0
         recent_scores = []  # 滑动窗口：记录未超过best_score的轮次
-        NO_IMPROVE_WINDOW = 3  # 最近3轮无提升则认为卡住
+        NO_IMPROVE_WINDOW = 5  # 最近5轮无提升则认为卡住（放宽，给LLM更多修改机会）
         consecutive_llm_errors = 0  # 连续LLM错误计数
 
         round_num = 0
@@ -250,7 +453,7 @@ class BaseEngine:
                 self._emit({"status": "cycle_completed", "round": round_num, "score": result.score})
                 return result
 
-            # 5. 卡住检测（滑动窗口）：最近N轮评分均未超过best_score则停止
+            # 5. 卡住检测（滑动窗口）：只发警告不退出（依赖 max_rounds 兜底）
             if result.score > best_score:
                 best_score = result.score
                 recent_scores = []  # 有提升，重置窗口
@@ -259,19 +462,11 @@ class BaseEngine:
 
             if len(recent_scores) >= NO_IMPROVE_WINDOW:
                 logger.warning("MWR cycle stuck: %s after %d rounds", self.engine_name, round_num)
-                self._emit({"status": "cycle_stuck", "round": round_num,
-                            "reason": f"连续{NO_IMPROVE_WINDOW}轮评分无提升（最高{best_score:.1f}），停止循环"})
-                break
+                self._emit({"status": "warning", "round": round_num,
+                            "message": f"连续{NO_IMPROVE_WINDOW}轮评分无提升（最高{best_score:.1f}），继续尝试修改"})
+                recent_scores = []  # 重置窗口，给 LLM 更多机会
 
-            # 6. 收益递减检测：评分接近阈值且连续2轮变化<0.3，提前退出
-            if len(recent_scores) >= 2 and best_score >= (score_threshold - 0.5):
-                last_two = recent_scores[-2:]
-                if abs(last_two[0] - last_two[1]) < 0.3:
-                    self._emit({"status": "cycle_diminishing", "round": round_num,
-                                "reason": f"评分接近阈值({best_score:.1f})且收益递减，提前结束"})
-                    break
-
-            # 6. 连续相同问题检测：发出警告但继续
+            # 6. 连续相同问题检测：只发警告不退出（依赖 max_rounds 兜底）
             if result.score < score_threshold or not result.all_required_passed:
                 current_issues_set = set(result.issues)
                 new_issue_counts = {}
@@ -280,10 +475,9 @@ class BaseEngine:
                 self._issue_consecutive_counts = new_issue_counts
                 stuck_issues = [iss for iss, cnt in self._issue_consecutive_counts.items() if cnt >= 3]
                 if stuck_issues:
-                    self._emit({"status": "cycle_stuck", "round": round_num,
-                                "reason": f"连续3轮未解决问题: {stuck_issues[:3]}，提前退出"})
-                    self._issue_consecutive_counts = {}
-                    break
+                    self._emit({"status": "warning", "round": round_num,
+                                "message": f"连续3轮未解决问题: {stuck_issues[:3]}，继续尝试修改"})
+                    # 不再退出，只发警告，依赖 max_rounds 兜底
             else:
                 self._issue_consecutive_counts = {}
 

@@ -169,11 +169,31 @@ class WritingEngine(BaseEngine):
     def _classify_issues(self, issues: list) -> str:
         """分类当前问题，决定润色策略。
 
+        优先解析 Reviewer 输出的 [全局]/[局部]/[字数] 标记，
+        回退到关键词匹配。
+
         Returns:
             "word_count" — 字数不足，需要全文重写扩写
             "global" — 全局问题（AI痕迹/省略号等），需要全文润色
             "local" — 局部问题（衔接/角色矛盾等），段落级润色即可
         """
+        # 优先解析 Reviewer 标注的类型标记
+        for iss in issues:
+            clean = re.sub(r'\s*\[(?:未修复|新发现)\]', '', iss)
+            if '[字数]' in clean:
+                return "word_count"
+
+        for iss in issues:
+            clean = re.sub(r'\s*\[(?:未修复|新发现)\]', '', iss)
+            if '[全局]' in clean:
+                return "global"
+
+        for iss in issues:
+            clean = re.sub(r'\s*\[(?:未修复|新发现)\]', '', iss)
+            if '[局部]' in clean:
+                return "local"
+
+        # 回退：关键词匹配
         for iss in issues:
             clean = re.sub(r'\s*\[(?:未修复|新发现)\]', '', iss)
             if any(kw in clean for kw in self._WORD_COUNT_ISSUE_KEYWORDS):
@@ -185,8 +205,7 @@ class WritingEngine(BaseEngine):
             if any(kw in clean for kw in self._GLOBAL_ISSUE_KEYWORDS):
                 global_count += 1
 
-        # 超过一半的问题是全局性的，用全文润色
-        if global_count > 0 and global_count >= len(issues) / 2:
+        if global_count > 0:
             return "global"
 
         return "local"
@@ -196,6 +215,7 @@ class WritingEngine(BaseEngine):
 
         决策逻辑：
         - 第1轮：写新章节
+        - 低分(<=4)：全文重写（润色救不了严重幻觉/剧情崩塌）
         - 字数不足：全文重写（不受 MAX_REWRITES 限制）
         - 格式问题（缺标题等）+ 重写次数未用尽：全文重写
         - 全局问题（AI痕迹/省略号等）：全文润色（polish_fulltext）
@@ -206,6 +226,18 @@ class WritingEngine(BaseEngine):
             return MWRTask(action="write", chapter_num=self._current_chapter)
 
         if last_result and not last_result.all_required_passed:
+            # 低分(<=4)：全文重写（润色修不了严重幻觉/剧情崩塌/新角色违规）
+            if last_result.score <= 4.0 and self._rewrite_count < 2:
+                self._rewrite_count += 1
+                self._emit({"status": "info", "message":
+                    f"评分{last_result.score:.1f}过低，跳过润色直接重写"})
+                return MWRTask(
+                    action="write",
+                    chapter_num=self._current_chapter,
+                    focus_issues=last_result.issues,
+                    context=self._format_feedback_context(last_result),
+                )
+
             # 字数不足：全文重写扩写（不受 MAX_REWRITES 限制）
             word_count_issues = [iss for iss in last_result.issues
                                  if any(kw in iss for kw in self._WORD_COUNT_ISSUE_KEYWORDS)]
@@ -269,6 +301,17 @@ class WritingEngine(BaseEngine):
 
         # 硬性校验通过但分数不够，尝试润色提升
         if last_result and last_result.all_required_passed and self._polish_count < self.max_polish_rounds:
+            # 即使 all_required_passed，低分(<=4)也应该重写而非润色
+            if last_result.score <= 4.0 and self._rewrite_count < 2:
+                self._rewrite_count += 1
+                self._emit({"status": "info", "message":
+                    f"评分{last_result.score:.1f}过低，跳过润色直接重写"})
+                return MWRTask(
+                    action="write",
+                    chapter_num=self._current_chapter,
+                    focus_issues=last_result.issues,
+                    context=self._format_feedback_context(last_result),
+                )
             # 连续无效润色检测
             if self._ineffective_polish_count >= 2:
                 self._emit({"status": "info", "message": f"连续{self._ineffective_polish_count}次无效润色，接受当前版本"})
@@ -366,7 +409,7 @@ class WritingEngine(BaseEngine):
         return "\n\n".join(context_parts)
 
     def _build_polish_context(self, ch: int, outline: str, task: MWRTask) -> str:
-        """构建润色上下文（体裁声明 + 大纲 + 记忆 + 体裁注入 + 前文 + 审查反馈）。"""
+        """构建润色上下文（体裁声明 + 大纲 + 细纲 + 记忆 + 体裁注入 + 前文 + 审查反馈）。"""
         context_parts = []
 
         # ★ 体裁声明放在最前面
@@ -377,6 +420,11 @@ class WritingEngine(BaseEngine):
         # 大纲
         if outline:
             context_parts.append(f"【小说大纲】\n{outline}")
+
+        # 章节细纲（润色也需要知道本章情节目标，避免偏离大纲）
+        ch_outline = self._read_chapter_outline(ch)
+        if ch_outline:
+            context_parts.append(f"【本章细纲】\n{ch_outline}")
 
         # 融合记忆
         memory_block = self._read_fused_memory(ch)
@@ -450,6 +498,9 @@ class WritingEngine(BaseEngine):
         # 清洗LLM输出中的FS编号（防止LLM忽略禁止指令）
         content = self._clean_fs_ids(content)
 
+        # 多层后处理流水线（省略号+对话标签+AI短语+句长波动）
+        content = self._post_process(content)
+
         # 去除完全重复的段落（LLM偶发整段复制粘贴）
         content = self._deduplicate_paragraphs(content)
 
@@ -471,7 +522,11 @@ class WritingEngine(BaseEngine):
         return Draft(content=content, chapter_num=ch, metadata={"action": "write"})
 
     async def _polish_chapter(self, ch: int, task: MWRTask) -> Draft:
-        """润色已有章节 — 针对性修改而非全文重写。"""
+        """润色已有章节 — LLM输出完整章节，程序化还原非问题段落。
+
+        核心策略：让LLM输出完整章节（解决格式失败问题），
+        然后程序化将非问题段落还原为原文（解决全部重写问题）。
+        """
         self._emit({"status": "chapter_polishing", "chapter": ch, "polish_round": self._polish_count})
 
         original = self._read_chapter(ch)
@@ -488,14 +543,13 @@ class WritingEngine(BaseEngine):
 
         system_prompt = self.prompts["writer_polish"] + "\n\n" + context_str
 
-        # 将原文按段落分割，标注段落编号
+        # 将原文按段落分割
         paragraphs = [p for p in original.split("\n\n") if p.strip()]
-        numbered_original = "\n\n".join(f"[P{i+1}] {p}" for i, p in enumerate(paragraphs))
 
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
 
-        # 根据审查反馈推断需要修改的段落编号
+        # 推断问题段落编号
         problem_paragraph_nums = self._infer_problem_paragraphs(paragraphs, task.focus_issues)
 
         # 构建带标注的原文：需修改段落标注 [需修改]，其他标注 [无需修改，禁止改动]
@@ -510,15 +564,9 @@ class WritingEngine(BaseEngine):
 
         user_prompt = (
             f"请润色第{ch}章。根据审查反馈进行针对性修改。\n\n"
-            "【重要】只修改标注为'需修改'的段落，标注为'无需修改'的段落必须原样保留！\n"
-            "输出格式：每处修改用以下格式：\n"
-            "===REPLACE P{段落编号}===\n"
-            "新段落内容\n"
-            "===END===\n\n"
-            "如果某问题需要新增段落，用：\n"
-            "===INSERT AFTER P{段落编号}===\n"
-            "新段落内容\n"
-            "===END===\n\n"
+            "【重要】请输出完整的修改后章节全文。\n"
+            "只修改标注为'需修改'的段落，标注为'无需修改'的段落必须原样保留，一字不改。\n"
+            "保持与原文相同的段落结构（相同的段落数量和顺序，不要合并或拆分段落）。\n\n"
             f"【字数要求】修改后总字数不得低于原文（{word_min}-{word_max}字）。\n\n"
             f"--- 原文（段落已编号）---\n{numbered_original}\n--- 原文结束 ---"
         )
@@ -529,8 +577,15 @@ class WritingEngine(BaseEngine):
         else:
             try:
                 llm_output = await self.llm.call_strict("writer", system_prompt, user_prompt)
-                # 解析 LLM 输出，程序化替换段落
-                content, polish_format_failed = self._apply_paragraph_edits_v2(original, paragraphs, llm_output)
+                # 检测LLM是否使用了旧 ===REPLACE=== 格式（兼容）
+                if re.search(r'===REPLACE\s+P\d+===', llm_output):
+                    self._emit({"status": "info", "message": "LLM使用了段落替换格式，使用兼容解析器"})
+                    content, polish_format_failed = self._apply_paragraph_edits_v2(original, paragraphs, llm_output)
+                else:
+                    # LLM输出了完整章节，程序化还原非问题段落
+                    content, polish_format_failed = self._apply_fulltext_with_restore(
+                        original, paragraphs, llm_output, problem_paragraph_nums
+                    )
             except LLMError as e:
                 self._emit({"status": "warning", "message": f"第{ch}章润色失败: {e}"})
                 content = original
@@ -538,6 +593,9 @@ class WritingEngine(BaseEngine):
 
         # 清洗LLM输出中的FS编号
         content = self._clean_fs_ids(content)
+
+        # 多层后处理流水线
+        content = self._post_process(content)
 
         # 去除完全重复的段落（润色后也可能产生重复）
         content = self._deduplicate_paragraphs(content)
@@ -567,9 +625,11 @@ class WritingEngine(BaseEngine):
             else:
                 self._ineffective_polish_count = 0
         else:
-            # 内容完全没变（格式不匹配或 LLM 输出无效），视为无效润色
+            # 内容完全没变，视为无效润色
             polish_format_failed = True
             self._polish_format_fail_count = getattr(self, '_polish_format_fail_count', 0) + 1
+            # 格式失败不浪费润色次数：退回 _polish_count
+            self._polish_count = max(0, self._polish_count - 1)
 
         # 落盘
         self._write_atomic(self._chapter_path(ch), content)
@@ -586,7 +646,7 @@ class WritingEngine(BaseEngine):
 
     async def _polish_chapter_fulltext(self, ch: int, task: MWRTask) -> Draft:
         """全文润色 — 用于全局性问题（AI痕迹、省略号过多、重复句式等）。
-        LLM 输出完整章节，但必须保持原有情节结构不变。
+        LLM 输出完整章节，程序化检测情节漂移并还原。
         """
         self._emit({"status": "chapter_polishing", "chapter": ch, "polish_round": self._polish_count, "mode": "fulltext"})
 
@@ -597,24 +657,9 @@ class WritingEngine(BaseEngine):
         if not task.focus_issues:
             return Draft(content=original, chapter_num=ch, metadata={"action": "polish", "no_changes": True})
 
-        # 构建精简的润色上下文（全文润色不需要大纲/KG等，只需要原文+问题+体裁规范）
-        context_parts = []
-
-        # 体裁规范
-        genre_injection = self.genre_adapter.get_writer_injection(stage="writing")
-        if genre_injection:
-            context_parts.append(genre_injection)
-
-        # 审查反馈
-        feedback_parts = []
-        if task.focus_issues:
-            feedback_parts.append("问题：\n" + "\n".join(f"- {iss}" for iss in task.focus_issues))
-        if task.context:
-            feedback_parts.append(task.context)
-        if feedback_parts:
-            context_parts.append("【审查反馈 — 必须全部修复】\n" + "\n\n".join(feedback_parts))
-
-        context_str = "\n\n".join(context_parts)
+        # 构建完整润色上下文（与段落润色一致，包含大纲/KG/记忆/前文）
+        outline = self._read_outline_summary()
+        context_str = self._build_polish_context(ch, outline, task)
 
         word_min = self.mode_config['word_count_min']
         word_max = self.mode_config['word_count_max']
@@ -629,11 +674,10 @@ class WritingEngine(BaseEngine):
             "4. 输出完整的中文小说章节全文，不要输出JSON、分析报告或英文内容\n"
             "5. 正文中禁止出现FS编号\n\n"
             "全文润色重点：\n"
-            "6. 省略号（……）：替换为完整的句子或动作描写，全文省略号不超过5个\n"
-            "7. 重复句式：为重复的表达提供多样化的替代表达，每章描写方式各不相同\n"
-            "8. AI痕迹：消除模板化描写、万能形容词、'说道'滥用，用具体动作替代\n"
-            "9. 疲劳词：替换为同义但不同的表达\n\n"
-            f"10. 字数要求：修改后不少于{word_min}字，当前原文{original_cn}字，修改后字数不得低于原文\n"
+            "6. 重复句式：为重复的表达提供多样化的替代表达，每章描写方式各不相同\n"
+            "7. AI痕迹：消除模板化描写、万能形容词、'说道'滥用，用具体动作替代\n"
+            "8. 疲劳词：替换为同义但不同的表达\n\n"
+            f"9. 字数要求：修改后不少于{word_min}字，当前原文{original_cn}字，修改后字数不得低于原文\n"
         )
 
         user_prompt = (
@@ -645,17 +689,31 @@ class WritingEngine(BaseEngine):
         if context_str:
             system_prompt += "\n\n" + context_str
 
+        paragraphs = [p for p in original.split("\n\n") if p.strip()]
+
         if not self.llm.has_valid_config("writer"):
             content = original
+            polish_format_failed = True
         else:
             try:
-                content = await self.llm.call_strict("writer", system_prompt, user_prompt)
+                llm_output = await self.llm.call_strict("writer", system_prompt, user_prompt)
+                # 全文润色也用还原机制：检测情节漂移
+                all_nums = set(range(1, len(paragraphs) + 1))
+                content, polish_format_failed = self._apply_fulltext_with_restore(
+                    original, paragraphs, llm_output, all_nums, fulltext_mode=True
+                )
             except LLMError as e:
                 self._emit({"status": "warning", "message": f"第{ch}章全文润色失败: {e}"})
                 content = original
+                polish_format_failed = True
 
         # 清洗
         content = self._clean_fs_ids(content)
+
+        # 程序化替换多余省略号
+        content = self._reduce_ellipsis(content)
+
+        # 去除完全重复的段落
         content = self._deduplicate_paragraphs(content)
 
         # 程序化添加章节标题
@@ -666,14 +724,15 @@ class WritingEngine(BaseEngine):
         if not content or not content.strip():
             self._emit({"status": "warning", "message": f"第{ch}章全文润色后内容为空，回退到原文"})
             content = original
+            polish_format_failed = True
         else:
             new_cn = len(re.findall(r'[\u4e00-\u9fff]', content))
             if new_cn < original_cn * 0.7 and original_cn > 500:
                 self._emit({"status": "warning", "message": f"第{ch}章全文润色后字数大幅缩水({new_cn}←{original_cn})，回退到原文"})
                 content = original
+                polish_format_failed = True
 
         # 润色差异检测
-        polish_format_failed = False
         if content != original:
             is_effective = self._check_polish_effectiveness(original, content)
             if not is_effective:
@@ -695,6 +754,130 @@ class WritingEngine(BaseEngine):
 
         self._emit({"status": "chapter_polished", "chapter": ch, "mode": "fulltext"})
         return Draft(content=content, chapter_num=ch, metadata={"action": "polish", "polish_format_failed": polish_format_failed})
+
+    def _apply_fulltext_with_restore(self, original: str, original_paragraphs: list,
+                                      llm_output: str, problem_nums: set,
+                                      fulltext_mode: bool = False) -> tuple:
+        """LLM输出完整章节后，程序化还原非问题段落。
+
+        策略：
+        1. 段落数匹配 → 按索引还原非问题段落（最可靠）
+        2. 段落数接近 → 模糊对齐后还原
+        3. 差异过大 → 接受LLM全文（LLM可能重组了段落结构）
+
+        fulltext_mode: 全文润色模式，所有段落都是问题段落，
+            但仍然检测情节漂移（相似度<0.4的段落会被还原）
+
+        Returns: (content, format_failed)
+        """
+        llm_cleaned = llm_output.strip()
+
+        if not llm_cleaned:
+            return original, True
+
+        # 分割LLM输出为段落
+        llm_paragraphs = [p for p in llm_cleaned.split("\n\n") if p.strip()]
+
+        # 清理LLM可能复制的段落编号标记 [PN · 需修改/无需修改]
+        llm_paragraphs = [
+            re.sub(r'^\[P\d+\s*(?:·\s*(?:需修改|无需修改|禁止改动))?\]\s*', '', p).strip()
+            for p in llm_paragraphs
+        ]
+        llm_paragraphs = [p for p in llm_paragraphs if p]
+
+        # 去除标题行用于对齐
+        orig_paras = [p.strip() for p in original_paragraphs
+                      if not re.match(r'^#\s*第\s*\d+\s*[章节]', p.strip())]
+        llm_paras = [p for p in llm_paragraphs
+                     if not re.match(r'^#\s*第\s*\d+\s*[章节]', p)]
+
+        # 情况1：段落数匹配 → 按索引精确还原
+        if len(llm_paras) == len(orig_paras) and len(orig_paras) > 0:
+            import difflib
+            restored_count = 0
+            drift_count = 0
+            result = []
+            for i, (orig, new) in enumerate(zip(orig_paras, llm_paras)):
+                para_num = i + 1
+                if para_num in problem_nums and not fulltext_mode:
+                    # 段落润色模式：问题段落接受LLM修改
+                    result.append(new)
+                elif fulltext_mode:
+                    # 全文润色模式：接受修改，但检测情节漂移
+                    ratio = difflib.SequenceMatcher(None, orig[:200], new[:200]).ratio()
+                    if ratio < 0.4:
+                        # 相似度太低，LLM可能重写了情节，还原
+                        self._emit({"status": "warning", "message":
+                            f"P{para_num}相似度{ratio:.0%}过低，可能情节漂移，还原为原文"})
+                        result.append(orig)
+                        drift_count += 1
+                    else:
+                        result.append(new)
+                else:
+                    # 非问题段落：还原为原文
+                    if orig.strip() != new.strip():
+                        restored_count += 1
+                    result.append(orig)
+            if restored_count > 0:
+                self._emit({"status": "info", "message": f"已还原{restored_count}个非问题段落为原文"})
+            if drift_count > 0:
+                self._emit({"status": "info", "message": f"已还原{drift_count}个情节漂移段落为原文"})
+            content = "\n\n".join(result)
+            return content, False
+
+        # 情况2：段落数接近（差1-3段）→ 模糊对齐后还原
+        if abs(len(llm_paras) - len(orig_paras)) <= 3 and len(orig_paras) > 3:
+            result = self._fuzzy_restore_paragraphs(orig_paras, llm_paras, problem_nums)
+            if result is not None:
+                return result, False
+
+        # 情况3：段落数差异大或对齐失败 → 接受LLM全文
+        self._emit({"status": "warning", "message":
+            f"段落数不匹配(原文{len(orig_paras)}段/LLM{len(llm_paras)}段)，接受LLM全文输出"})
+        return llm_cleaned, False
+
+    def _fuzzy_restore_paragraphs(self, orig_paras: list, llm_paras: list,
+                                   problem_nums: set) -> Optional[str]:
+        """模糊对齐段落后还原非问题段落。返回 None 表示对齐失败。"""
+        import difflib
+
+        # 为每个LLM段落找到最佳匹配的原文段落
+        llm_to_orig = {}
+        used_orig = set()
+
+        for llm_idx, llm_p in enumerate(llm_paras):
+            best_ratio = 0
+            best_orig_idx = -1
+            for orig_idx, orig_p in enumerate(orig_paras):
+                if orig_idx in used_orig:
+                    continue
+                ratio = difflib.SequenceMatcher(None, orig_p[:150], llm_p[:150]).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_orig_idx = orig_idx
+            if best_ratio > 0.5:
+                llm_to_orig[llm_idx] = best_orig_idx
+                used_orig.add(best_orig_idx)
+
+        # 对齐率检查：至少80%的段落能对齐
+        alignment_rate = len(llm_to_orig) / max(len(llm_paras), len(orig_paras))
+        if alignment_rate < 0.8:
+            return None
+
+        # 还原非问题段落
+        result = list(llm_paras)
+        restored_count = 0
+        for llm_idx, orig_idx in llm_to_orig.items():
+            para_num = orig_idx + 1
+            if para_num not in problem_nums:
+                if orig_paras[orig_idx].strip() != llm_paras[llm_idx].strip():
+                    restored_count += 1
+                result[llm_idx] = orig_paras[orig_idx]
+
+        if restored_count > 0:
+            self._emit({"status": "info", "message": f"模糊对齐后还原{restored_count}个非问题段落"})
+
+        return "\n\n".join(result)
 
     def _apply_paragraph_edits_v2(self, original: str, paragraphs: list, llm_output: str) -> tuple:
         """解析 LLM 的段落编辑指令，程序化应用到原文。
@@ -818,13 +1001,27 @@ class WritingEngine(BaseEngine):
     def _infer_problem_paragraphs(self, paragraphs: list, focus_issues: list) -> set:
         """根据审查反馈推断需要修改的段落编号。
 
-        策略：如果 issues 中提到了具体段落内容/关键词，定位到对应段落；
-        否则默认标记最后几段（章末钩子/结尾问题常见）和前几段（衔接问题常见）。
+        优先解析 Reviewer 输出的 [PN] 标记（最精确），
+        回退到关键词匹配（次优），
+        最后默认标记首段和末段（兜底）。
         """
         problem_nums = set()
         if not focus_issues:
             return problem_nums
 
+        # 优先解析 [PN] 标记（Reviewer 直接标注的段落编号）
+        for issue in focus_issues:
+            clean_issue = re.sub(r'\s*\[(?:未修复|新发现)\]', '', issue)
+            for m in re.finditer(r'\[P(\d+)\]', clean_issue):
+                num = int(m.group(1))
+                if 1 <= num <= len(paragraphs):
+                    problem_nums.add(num)
+
+        # 如果 Reviewer 标注了段落编号，直接返回
+        if problem_nums:
+            return problem_nums
+
+        # 回退：关键词匹配
         all_text = "\n".join(paragraphs)
 
         for issue in focus_issues:
@@ -940,6 +1137,8 @@ class WritingEngine(BaseEngine):
         score = 0.0
         suggestions = []
         ai_suggestions = []
+        is_polish_action = draft.metadata.get("action") == "polish"
+
         if self.llm.has_valid_config("reviewer"):
             # 内容过少时跳过AI评审，直接给0分，避免浪费token和复用历史高分
             if word_count < 100:
@@ -952,6 +1151,13 @@ class WritingEngine(BaseEngine):
                     score = self._last_valid_ai_score
                     ai_issues = [f"AI评审解析失败，复用上次评分{score}"]
                 elif "AI 评审解析失败" not in ai_issues:
+                    # 润色后评分波动保护：如果润色改了内容但AI给了更低分，取较高分
+                    # 避免AI随机性导致润色反而分数下降
+                    if is_polish_action and self._last_valid_ai_score is not None:
+                        if score < self._last_valid_ai_score:
+                            self._emit({"status": "info", "message":
+                                f"润色后AI评分{score:.1f}低于上次{self._last_valid_ai_score:.1f}，取较高分"})
+                            score = self._last_valid_ai_score
                     self._last_valid_ai_score = score
                 issues.extend(ai_issues)
             suggestions.extend(ai_suggestions)
@@ -964,9 +1170,16 @@ class WritingEngine(BaseEngine):
         persistent_issues = [iss for iss in issues if iss in self._previous_issues]
         fresh_issues = [iss for iss in issues if iss not in self._previous_issues]
 
-        # fresh_issues 不阻塞通过，但记录到 _previous_issues 供下轮检查
-        # persistent_issues 必须修复才允许通过
-        has_persistent_blockers = len(persistent_issues) > 0
+        # all_required_passed 只看 persistent_issues 中的非全局问题 + 硬性底线
+        # 全局性 persistent_issues（省略号/AI痕迹等）不阻塞通过：
+        #   - 这些问题可能已超出 LLM 修复能力
+        #   - 段落润色修不了全局问题，全文润色也未必能修
+        #   - 不应因一个顽固全局问题耗尽所有润色次数
+        blocking_persistent = [
+            iss for iss in persistent_issues
+            if not any(kw in iss for kw in self._GLOBAL_ISSUE_KEYWORDS)
+        ]
+        has_persistent_blockers = len(blocking_persistent) > 0
 
         # all_required_passed 只看 persistent_issues + 硬性底线
         all_required_passed = (
@@ -976,11 +1189,9 @@ class WritingEngine(BaseEngine):
             and format_result.get("passed", True)
         )
 
-        # 评分调整：fresh_issues 不额外扣分（已包含在AI评分中，这里不重复惩罚）
-        # 但如果有 persistent_issues，额外扣0.5分/个（上限2分）
-        if persistent_issues:
-            penalty = min(len(persistent_issues) * 0.5, 2.0)
-            score = max(score - penalty, 0.0)
+        # 评分调整：AI评分已包含问题惩罚，不再对persistent_issues额外扣分
+        # （之前额外扣0.5分/个导致双重惩罚，分数越润越低形成负向螺旋）
+        # persistent_issues 只影响 all_required_passed，不影响分数
 
         # 更新 _previous_issues：本轮所有问题都成为下轮的"老问题"
         self._previous_issues = current_issues_set

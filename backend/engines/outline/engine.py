@@ -297,8 +297,8 @@ class OutlineEngine(BaseEngine):
         rounds = outline_state.get("rounds", [])
         if rounds:
             last = rounds[-1]
-            if last.get("score", 0) >= 6.0:
-                return FinalDecision(accepted=True, reason="评分尚可，接受当前版本")
+            if last.get("score", 0) >= self.score_threshold:
+                return FinalDecision(accepted=True, reason=f"评分{last.get('score', 0):.1f}达到阈值{self.score_threshold}，接受当前版本")
         return FinalDecision(accepted=False, reason="达到最大轮数，大纲质量不达标，需人工审核")
 
     # ---- AI 评审 ----

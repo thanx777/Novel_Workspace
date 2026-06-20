@@ -30,6 +30,7 @@ backend/.secret_key
 # Workspace runtime data
 backend/workspace/
 workspace/
+backend_port.txt
 
 # Logs
 logs/

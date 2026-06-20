@@ -20,8 +20,8 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#AppName}
-; 安装程序图标（可选，需要 .ico 文件）
-; SetupIconFile=frontend\public\favicon.ico
+; 安装程序图标
+SetupIconFile=build\IMG_20260620_000506.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
